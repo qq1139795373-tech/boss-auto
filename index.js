@@ -85,7 +85,16 @@ async function run() {
             await sleep(1000);
             await clickText(page, '自动航行');
             console.log('3. 航行中...');
-            await sleep(15000);
+            // 等待到达孟买
+            for (let w = 0; w < 30; w++) {
+                await sleep(3000);
+                const txt = await getPageText(page);
+                if (txt.includes('当前城市：孟买')) {
+                    console.log('到达孟买');
+                    break;
+                }
+            }
+            await sleep(2000);
         }
 
         // 4. 点击世界boss

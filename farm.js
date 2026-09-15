@@ -109,12 +109,12 @@ async function run() {
             step = await clickText(page, '自动航行');
             console.log(`自动航行: ${step}`);
             console.log('航行中...');
-            // 等待航行结束，弹窗消失
-            for (let w = 0; w < 20; w++) {
+            // 等待到达广州
+            for (let w = 0; w < 30; w++) {
                 await sleep(3000);
-                const stillSailing = await page.locator('text=航行中').first().isVisible({ timeout: 1000 }).catch(() => false);
-                if (!stillSailing) {
-                    console.log('航行完成');
+                pageText = await getPageText(page);
+                if (pageText.includes('当前城市：广州')) {
+                    console.log('到达广州');
                     break;
                 }
             }
