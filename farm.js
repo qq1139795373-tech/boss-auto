@@ -10,7 +10,7 @@ async function sleep(ms) {
 async function clickText(page, text, timeout = 5000) {
     const el = page.getByText(text, { exact: false }).first();
     if (await el.isVisible({ timeout }).catch(() => false)) {
-        await el.click();
+        await el.click({ force: true }).catch(() => {});
         return true;
     }
     return false;
@@ -21,7 +21,15 @@ async function getPageText(page) {
 }
 
 async function closePopup(page) {
-    await page.mouse.click(100, 100);
+    // 尝试点击不同位置关闭弹窗
+    await page.mouse.click(10, 10);
+    await sleep(500);
+    await page.mouse.click(990, 10);
+    await sleep(500);
+    await page.mouse.click(500, 500);
+    await sleep(500);
+    // 尝试按ESC
+    await page.keyboard.press('Escape');
     await sleep(1000);
 }
 
