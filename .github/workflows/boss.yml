@@ -13,14 +13,13 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
-          cache: 'npm'
+          node-version: 22
 
-      - run: npm install
-      - run: npx playwright install --with-deps chromium
-
-      - name: Run boss script
+      - name: Install and run
         env:
           GAME_ACCOUNT: ${{ secrets.GAME_ACCOUNT }}
           GAME_PASSWORD: ${{ secrets.GAME_PASSWORD }}
-        run: node index.js
+        run: |
+          npm install
+          npx playwright install chromium
+          node index.js
