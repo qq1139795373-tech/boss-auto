@@ -36,23 +36,21 @@ async function run() {
         await sleep(3000);
         console.log('1. 登录完成');
 
-        // 2. 选择角色，进入游戏
+        // 2. 进入游戏
         await clickText(page, '进入游戏');
         await sleep(3000);
         console.log('2. 进入游戏');
 
-        // 3. 检查是否在孟买，不在就导航过去
+        // 3. 检查是否在孟买码头（"你看到"里有"世界boss"就说明到了）
         let pageText = await getPageText(page);
-        if (!pageText.includes('当前城市：孟买')) {
-            console.log('3. 不在孟买，导航中...');
+        if (!pageText.includes('世界boss')) {
+            console.log('3. 不在孟买码头，导航中...');
             await clickText(page, '城内地图');
             await sleep(2000);
             await clickText(page, '码头');
             await sleep(2000);
             await clickText(page, '出航');
             await sleep(2000);
-
-            // 印度洋区域
             await clickText(page, '印度洋');
             await sleep(1000);
             await clickText(page, '孟买');
@@ -63,7 +61,7 @@ async function run() {
             console.log('3. 航行中...');
             await sleep(15000);
         } else {
-            console.log('3. 已在孟买');
+            console.log('3. 已在孟买码头');
         }
 
         // 4. 点击世界boss
@@ -78,7 +76,6 @@ async function run() {
                 await challengeBtn.click();
                 await sleep(2000);
 
-                // 检查是否有时间提示
                 pageText = await getPageText(page);
                 if (pageText.includes('12:00') || pageText.includes('开放时间')) {
                     console.log('未到开放时间，停止');
