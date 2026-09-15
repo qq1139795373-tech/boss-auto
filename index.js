@@ -11,6 +11,15 @@ async function getPageText(page) {
     return await page.textContent('body').catch(() => '');
 }
 
+async function clickText(page, text, timeout = 5000) {
+    const el = page.getByText(text, { exact: false }).first();
+    if (await el.isVisible({ timeout }).catch(() => false)) {
+        await el.click();
+        return true;
+    }
+    return false;
+}
+
 async function run() {
     const browser = await chromium.launch({ headless: true });
     const context = await browser.newContext();
@@ -28,22 +37,41 @@ async function run() {
         console.log('1. 登录完成');
 
         // 2. 选择角色，进入游戏
-        const enterBtn = page.locator('text=进入游戏').first();
-        if (await enterBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
-            await enterBtn.click();
-            await sleep(3000);
-        }
+        await clickText(page, '进入游戏');
+        await sleep(3000);
         console.log('2. 进入游戏');
 
-        // 3. 点击世界boss
-        const worldBoss = page.locator('text=世界boss').first();
-        if (await worldBoss.isVisible({ timeout: 5000 }).catch(() => false)) {
-            await worldBoss.click();
-            await sleep(3000);
-        }
-        console.log('3. 进入boss页面');
+        // 3. 检查是否在孟买，不在就导航过去
+        let pageText = await getPageText(page);
+        if (!pageText.includes('当前城市：孟买')) {
+            console.log('3. 不在孟买，导航中...');
+            await clickText(page, '城内地图');
+            await sleep(2000);
+            await clickText(page, '码头');
+            await sleep(2000);
+            await clickText(page, '出航');
+            await sleep(2000);
 
-        // 4. 发起挑战（最多10次）
+            // 印度洋区域
+            await clickText(page, '印度洋');
+            await sleep(1000);
+            await clickText(page, '孟买');
+            await sleep(2000);
+            await clickText(page, '立即出发');
+            await sleep(1000);
+            await clickText(page, '自动航行');
+            console.log('3. 航行中...');
+            await sleep(15000);
+        } else {
+            console.log('3. 已在孟买');
+        }
+
+        // 4. 点击世界boss
+        await clickText(page, '世界boss');
+        await sleep(3000);
+        console.log('4. 进入boss页面');
+
+        // 5. 发起挑战（最多10次）
         for (let i = 0; i < 10; i++) {
             const challengeBtn = page.locator('text=发起挑战').first();
             if (await challengeBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
@@ -51,22 +79,22 @@ async function run() {
                 await sleep(2000);
 
                 // 检查是否有时间提示
-                const bodyText = await getPageText(page);
-                if (bodyText.includes('12:00') || bodyText.includes('开放时间')) {
+                pageText = await getPageText(page);
+                if (pageText.includes('12:00') || pageText.includes('开放时间')) {
                     console.log('未到开放时间，停止');
                     break;
                 }
 
-                console.log(`4. 第 ${i + 1} 次挑战`);
+                console.log(`5. 第 ${i + 1} 次挑战`);
                 await sleep(5000);
 
                 const closeBtn = page.locator('text=关闭').first();
                 if (await closeBtn.isVisible({ timeout: 10000 }).catch(() => false)) {
                     await closeBtn.click();
-                    console.log(`5. 第 ${i + 1} 次关闭`);
+                    console.log(`6. 第 ${i + 1} 次关闭`);
                 }
 
-                console.log(`6. 等待35秒冷却...`);
+                console.log(`7. 等待35秒冷却...`);
                 await sleep(35000);
             } else {
                 console.log('按钮不可用');
