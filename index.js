@@ -48,6 +48,8 @@ async function run() {
         console.log('1. 登录完成');
 
         // 2. 进入游戏
+        await closePopup(page);
+        await sleep(1000);
         await clickText(page, '进入游戏');
         await sleep(3000);
         console.log('2. 进入游戏');
