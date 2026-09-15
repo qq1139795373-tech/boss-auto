@@ -45,6 +45,11 @@ async function run() {
         let pageText = await getPageText(page);
         if (!pageText.includes('世界boss')) {
             console.log('3. 不在孟买码头，导航中...');
+
+            // 调试：打印页面HTML片段
+            const html = await page.evaluate(() => document.body.innerHTML.substring(0, 2000));
+            console.log('页面HTML:', html);
+
             let step = await clickText(page, '城内地图');
             console.log(`城内地图: ${step}`);
             await sleep(2000);
