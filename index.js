@@ -41,8 +41,15 @@ async function run() {
 
         // 4. 发起挑战（最多10次）
         for (let i = 0; i < 10; i++) {
-            const challengeBtn = page.locator('text=发起挑战').first();
-            if (await challengeBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
+            let challengeBtn = null;
+            for (let retry = 0; retry < 3; retry++) {
+                challengeBtn = page.locator('text=发起挑战').first();
+                if (await challengeBtn.isVisible({ timeout: 5000 }).catch(() => false)) break;
+                console.log(`按钮未找到，重试 ${retry + 1}/3...`);
+                await sleep(3000);
+            }
+
+            if (challengeBtn && await challengeBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
                 await challengeBtn.click();
                 console.log(`4. 第 ${i + 1} 次挑战`);
                 await sleep(5000);
