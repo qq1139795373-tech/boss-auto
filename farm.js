@@ -51,8 +51,23 @@ async function run() {
 
         // 进入游戏
         await clickText(page, '进入游戏');
-        await sleep(3000);
+        await sleep(5000);
         console.log('进入游戏');
+
+        // 等待页面加载完成
+        await sleep(3000);
+
+        // 检查是否有弹窗并关闭
+        let pageText = await getPageText(page);
+        console.log('页面文本前200字:', pageText.substring(0, 200));
+
+        // 尝试关闭弹窗
+        await closePopup(page);
+        await sleep(2000);
+
+        // 再次检查
+        pageText = await getPageText(page);
+        console.log('关闭弹窗后前200字:', pageText.substring(0, 200));
 
         // 检查是否在广州
         let pageText = await getPageText(page);
