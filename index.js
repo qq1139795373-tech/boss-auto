@@ -15,24 +15,45 @@ async function run() {
     try {
         // 1. 登录
         await page.goto('http://yiyu.yiyutx.top/yysh/#/pages/login/login');
-        await page.waitForTimeout(2000);
-        await page.fill('input[placeholder="请输入账号"]', ACCOUNT);
-        await page.fill('input[placeholder="请输入密码"]', PASSWORD);
-        await page.click('text=登录');
+        await page.waitForTimeout(3000);
+        await page.screenshot({ path: 'debug-1.png' });
+
+        // 用所有input框
+        const inputs = await page.$$('input');
+        console.log(`找到 ${inputs.length} 个input`);
+        if (inputs.length >= 2) {
+            await inputs[0].fill(ACCOUNT);
+            await inputs[1].fill(PASSWORD);
+        } else {
+            // 试placeholder
+            await page.locator('input').first().fill(ACCOUNT);
+            await page.locator('input').nth(1).fill(PASSWORD);
+        }
+
+        await page.screenshot({ path: 'debug-2.png' });
+
+        // 点登录按钮
+        const loginBtn = page.locator('button, text=登录, [class*="btn"]').first();
+        await loginBtn.click();
         await sleep(3000);
         await page.screenshot({ path: 'step1-login.png' });
         console.log('1. 登录完成');
 
         // 2. 选择角色，进入游戏
-        await page.click('text=进入游戏');
-        await sleep(3000);
+        const enterBtn = page.locator('text=进入游戏').first();
+        if (await enterBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
+            await enterBtn.click();
+            await sleep(3000);
+        }
         await page.screenshot({ path: 'step2-main.png' });
         console.log('2. 进入游戏');
 
         // 3. 点击世界boss
         const worldBoss = page.locator('text=世界boss').first();
-        await worldBoss.click();
-        await sleep(3000);
+        if (await worldBoss.isVisible({ timeout: 5000 }).catch(() => false)) {
+            await worldBoss.click();
+            await sleep(3000);
+        }
         await page.screenshot({ path: 'step3-boss.png' });
         console.log('3. 进入boss页面');
 
@@ -45,7 +66,6 @@ async function run() {
                 await sleep(5000);
                 await page.screenshot({ path: `step4-battle-${i+1}.png` });
 
-                // 点击关闭
                 const closeBtn = page.locator('text=关闭').first();
                 if (await closeBtn.isVisible({ timeout: 10000 }).catch(() => false)) {
                     await closeBtn.click();
@@ -56,7 +76,6 @@ async function run() {
                     await page.screenshot({ path: `step5-no-close-${i+1}.png` });
                 }
 
-                // 等待35秒冷却
                 console.log(`6. 等待35秒冷却...`);
                 await sleep(35000);
             } else {
