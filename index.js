@@ -33,8 +33,7 @@ async function run() {
         await page.screenshot({ path: 'debug-2.png' });
 
         // 点登录按钮
-        const loginBtn = page.locator('button, text=登录, [class*="btn"]').first();
-        await loginBtn.click();
+        await page.getByText('登录').first().click();
         await sleep(3000);
         await page.screenshot({ path: 'step1-login.png' });
         console.log('1. 登录完成');
