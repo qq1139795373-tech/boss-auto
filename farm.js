@@ -70,7 +70,7 @@ async function run() {
         console.log('关闭弹窗后前200字:', pageText.substring(0, 200));
 
         // 检查是否在广州
-        let pageText = await getPageText(page);
+        pageText = await getPageText(page);
         if (pageText.includes('当前城市：广州')) {
             console.log('已在广州');
         } else {
