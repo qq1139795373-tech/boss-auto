@@ -41,6 +41,18 @@ async function run() {
 
         // 4. 发起挑战（最多10次）
         for (let i = 0; i < 10; i++) {
+            // 检查攻击次数
+            const pageText = await page.textContent('body');
+            const match = pageText.match(/攻击次数：(\d+)\/10/);
+            if (match) {
+                const used = parseInt(match[1]);
+                console.log(`攻击次数: ${used}/10`);
+                if (used >= 10) {
+                    console.log('10次用完，停止');
+                    break;
+                }
+            }
+
             let challengeBtn = null;
             for (let retry = 0; retry < 3; retry++) {
                 challengeBtn = page.locator('text=发起挑战').first();
@@ -63,7 +75,7 @@ async function run() {
                 console.log(`6. 等待35秒冷却...`);
                 await sleep(35000);
             } else {
-                console.log('没有挑战次数了');
+                console.log('按钮不可用');
                 break;
             }
         }
