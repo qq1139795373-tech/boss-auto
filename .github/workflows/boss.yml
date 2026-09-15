@@ -1,0 +1,27 @@
+name: Auto Boss
+
+on:
+  schedule:
+    - cron: '55 3 * * *'  # UTC 03:55 = 北京时间11:55
+  workflow_dispatch:
+
+jobs:
+  boss:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install and run
+        env:
+          GAME_ACCOUNT: ${{ secrets.GAME_ACCOUNT }}
+          GAME_PASSWORD: ${{ secrets.GAME_PASSWORD }}
+        run: |
+          npm install
+          npx playwright install chromium
+          node index.js
+
+

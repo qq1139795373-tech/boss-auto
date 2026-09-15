@@ -20,6 +20,11 @@ async function getPageText(page) {
     return await page.textContent('body').catch(() => '');
 }
 
+async function closePopup(page) {
+    await page.mouse.click(100, 100);
+    await sleep(1000);
+}
+
 async function run() {
     const browser = await chromium.launch({ headless: true });
     const context = await browser.newContext();
@@ -41,27 +46,47 @@ async function run() {
         await sleep(3000);
         console.log('进入游戏');
 
-        // 检查是否在广州，不在就导航过去
+        // 检查是否在广州
         let pageText = await getPageText(page);
-        if (!pageText.includes('当前城市：广州')) {
-            console.log('不在广州，导航中...');
-            await clickText(page, '城内地图');
-            await sleep(2000);
-            await clickText(page, '码头');
-            await sleep(2000);
-            await clickText(page, '出航');
-            await sleep(2000);
-            await clickText(page, '东亚');
-            await sleep(1000);
-            await clickText(page, '广州');
-            await sleep(2000);
-            await clickText(page, '立即出发');
-            await sleep(1000);
-            await clickText(page, '自动航行');
-            console.log('航行中...');
-            await sleep(10000);
-        } else {
+        if (pageText.includes('当前城市：广州')) {
             console.log('已在广州');
+        } else {
+            console.log('不在广州，导航中...');
+            await closePopup(page);
+
+            // 如果不在码头，先去码头
+            if (!pageText.includes('出航')) {
+                await clickText(page, '城内地图');
+                await sleep(2000);
+                await clickText(page, '码头');
+                await sleep(2000);
+            }
+
+            // 出航到广州
+            let step = await clickText(page, '出航');
+            console.log(`出航: ${step}`);
+            await sleep(2000);
+            step = await clickText(page, '东亚');
+            console.log(`东亚: ${step}`);
+            await sleep(1000);
+
+            // 找广州
+            for (let s = 0; s < 5; s++) {
+                step = await clickText(page, '广州', 2000);
+                console.log(`广州尝试${s + 1}: ${step}`);
+                if (step) break;
+                await page.mouse.wheel(0, 300);
+                await sleep(1000);
+            }
+
+            await sleep(2000);
+            step = await clickText(page, '立即出发');
+            console.log(`立即出发: ${step}`);
+            await sleep(1000);
+            step = await clickText(page, '自动航行');
+            console.log(`自动航行: ${step}`);
+            console.log('航行中...');
+            await sleep(15000);
         }
 
         // 导航到沙滩
