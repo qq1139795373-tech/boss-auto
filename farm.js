@@ -109,7 +109,16 @@ async function run() {
             step = await clickText(page, '自动航行');
             console.log(`自动航行: ${step}`);
             console.log('航行中...');
-            await sleep(15000);
+            // 等待航行结束，弹窗消失
+            for (let w = 0; w < 20; w++) {
+                await sleep(3000);
+                const stillSailing = await page.locator('text=航行中').first().isVisible({ timeout: 1000 }).catch(() => false);
+                if (!stillSailing) {
+                    console.log('航行完成');
+                    break;
+                }
+            }
+            await sleep(2000);
         }
 
         // 导航到沙滩
