@@ -45,26 +45,33 @@ async function run() {
         let pageText = await getPageText(page);
         if (!pageText.includes('世界boss')) {
             console.log('3. 不在孟买码头，导航中...');
-            await clickText(page, '城内地图');
+            let step = await clickText(page, '城内地图');
+            console.log(`城内地图: ${step}`);
             await sleep(2000);
-            await clickText(page, '码头');
+            step = await clickText(page, '码头');
+            console.log(`码头: ${step}`);
             await sleep(2000);
-            await clickText(page, '出航');
+            step = await clickText(page, '出航');
+            console.log(`出航: ${step}`);
             await sleep(2000);
-            await clickText(page, '印度洋');
+            step = await clickText(page, '印度洋');
+            console.log(`印度洋: ${step}`);
             await sleep(1000);
 
-            // 滚动查找孟买
             for (let s = 0; s < 5; s++) {
-                if (await clickText(page, '孟买', 2000)) break;
+                step = await clickText(page, '孟买', 2000);
+                console.log(`孟买尝试${s + 1}: ${step}`);
+                if (step) break;
                 await page.mouse.wheel(0, 300);
                 await sleep(1000);
             }
 
             await sleep(2000);
-            await clickText(page, '立即出发');
+            step = await clickText(page, '立即出发');
+            console.log(`立即出发: ${step}`);
             await sleep(1000);
-            await clickText(page, '自动航行');
+            step = await clickText(page, '自动航行');
+            console.log(`自动航行: ${step}`);
             console.log('3. 航行中...');
             await sleep(15000);
         } else {
