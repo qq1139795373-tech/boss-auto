@@ -36,15 +36,18 @@ async function run() {
             if (await challengeBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
                 await challengeBtn.click();
                 console.log(`第 ${i + 1} 次挑战`);
-                await sleep(8000);
+                await sleep(5000);
 
                 // 点击关闭
                 const closeBtn = page.locator('text=关闭').first();
                 if (await closeBtn.isVisible({ timeout: 10000 }).catch(() => false)) {
                     await closeBtn.click();
                     console.log(`第 ${i + 1} 次关闭`);
-                    await sleep(2000);
                 }
+
+                // 等待35秒冷却（冗余5秒）
+                console.log(`等待35秒冷却...`);
+                await sleep(35000);
             } else {
                 console.log('没有挑战次数了');
                 break;
