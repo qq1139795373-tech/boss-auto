@@ -85,12 +85,12 @@ async function run() {
             await sleep(1000);
             await clickText(page, '自动航行');
             console.log('3. 航行中...');
-            // 等待航行结束，弹窗消失
-            for (let w = 0; w < 20; w++) {
+            // 等待到达孟买
+            for (let w = 0; w < 30; w++) {
                 await sleep(3000);
-                const stillSailing = await page.locator('text=航行中').first().isVisible({ timeout: 1000 }).catch(() => false);
-                if (!stillSailing) {
-                    console.log('航行完成');
+                const txt = await getPageText(page);
+                if (txt.includes('当前城市：孟买')) {
+                    console.log('到达孟买');
                     break;
                 }
             }
