@@ -2,7 +2,7 @@ name: Auto Boss
 
 on:
   schedule:
-    - cron: '0 4 * * *'  # UTC 04:00 = 北京时间12:00
+    - cron: '0 4 * * *'
   workflow_dispatch:
 
 jobs:
@@ -14,12 +14,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: 'npm'
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Install Playwright browsers
-        run: npx playwright install chromium
+      - run: npm install
+      - run: npx playwright install --with-deps chromium
 
       - name: Run boss script
         env:
