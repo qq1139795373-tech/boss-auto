@@ -20,6 +20,12 @@ async function clickText(page, text, timeout = 5000) {
     return false;
 }
 
+async function closePopup(page) {
+    // 点击空白处关闭弹窗
+    await page.mouse.click(100, 100);
+    await sleep(1000);
+}
+
 async function run() {
     const browser = await chromium.launch({ headless: true });
     const context = await browser.newContext();
@@ -43,44 +49,43 @@ async function run() {
 
         // 3. 检查是否在孟买码头（"你看到"里有"世界boss"就说明到了）
         let pageText = await getPageText(page);
-        if (!pageText.includes('世界boss')) {
+        if (pageText.includes('世界boss') && pageText.includes('当前城市：孟买')) {
+            console.log('3. 已在孟买码头');
+        } else {
             console.log('3. 不在孟买码头，导航中...');
 
-            // 调试：打印页面HTML片段
-            const html = await page.evaluate(() => document.body.innerHTML.substring(0, 2000));
-            console.log('页面HTML:', html);
+            // 先关闭可能存在的弹窗
+            await closePopup(page);
 
-            let step = await clickText(page, '城内地图');
-            console.log(`城内地图: ${step}`);
+            // 如果不在码头，先去码头
+            if (!pageText.includes('出航')) {
+                await clickText(page, '城内地图');
+                await sleep(2000);
+                await clickText(page, '码头');
+                await sleep(2000);
+            }
+
+            // 出航
+            await clickText(page, '出航');
             await sleep(2000);
-            step = await clickText(page, '码头');
-            console.log(`码头: ${step}`);
-            await sleep(2000);
-            step = await clickText(page, '出航');
-            console.log(`出航: ${step}`);
-            await sleep(2000);
-            step = await clickText(page, '印度洋');
-            console.log(`印度洋: ${step}`);
+
+            // 印度洋区域
+            await clickText(page, '印度洋');
             await sleep(1000);
 
+            // 找孟买
             for (let s = 0; s < 5; s++) {
-                step = await clickText(page, '孟买', 2000);
-                console.log(`孟买尝试${s + 1}: ${step}`);
-                if (step) break;
+                if (await clickText(page, '孟买', 2000)) break;
                 await page.mouse.wheel(0, 300);
                 await sleep(1000);
             }
 
             await sleep(2000);
-            step = await clickText(page, '立即出发');
-            console.log(`立即出发: ${step}`);
+            await clickText(page, '立即出发');
             await sleep(1000);
-            step = await clickText(page, '自动航行');
-            console.log(`自动航行: ${step}`);
+            await clickText(page, '自动航行');
             console.log('3. 航行中...');
             await sleep(15000);
-        } else {
-            console.log('3. 已在孟买码头');
         }
 
         // 4. 点击世界boss
