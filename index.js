@@ -7,6 +7,10 @@ async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+async function getPageText(page) {
+    return await page.textContent('body').catch(() => '');
+}
+
 async function run() {
     const browser = await chromium.launch({ headless: true });
     const context = await browser.newContext();
