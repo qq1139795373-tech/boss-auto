@@ -53,7 +53,14 @@ async function run() {
             await sleep(2000);
             await clickText(page, '印度洋');
             await sleep(1000);
-            await clickText(page, '孟买');
+
+            // 滚动查找孟买
+            for (let s = 0; s < 5; s++) {
+                if (await clickText(page, '孟买', 2000)) break;
+                await page.mouse.wheel(0, 300);
+                await sleep(1000);
+            }
+
             await sleep(2000);
             await clickText(page, '立即出发');
             await sleep(1000);
