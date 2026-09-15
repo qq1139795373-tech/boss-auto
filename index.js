@@ -8,6 +8,19 @@ async function sleep(ms) {
 }
 
 async function run() {
+    // 检查北京时间是否在12:00-12:30
+    const now = new Date();
+    const bjHour = (now.getUTCHours() + 8) % 24;
+    const bjMin = now.getUTCMinutes();
+    const inTime = (bjHour === 12 && bjMin < 30);
+
+    console.log(`北京时间: ${bjHour}:${String(bjMin).padStart(2, '0')}`);
+
+    if (!inTime) {
+        console.log('未到开放时间(12:00-12:30)，跳过');
+        return;
+    }
+
     const browser = await chromium.launch({ headless: true });
     const context = await browser.newContext();
     const page = await context.newPage();
@@ -41,6 +54,15 @@ async function run() {
 
         // 4. 发起挑战（最多10次）
         for (let i = 0; i < 10; i++) {
+            // 再次检查时间，超过12:30就停
+            const now2 = new Date();
+            const bjHour2 = (now2.getUTCHours() + 8) % 24;
+            const bjMin2 = now2.getUTCMinutes();
+            if (bjHour2 !== 12 || bjMin2 >= 30) {
+                console.log('开放时间结束，停止');
+                break;
+            }
+
             const challengeBtn = page.locator('text=发起挑战').first();
             if (await challengeBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
                 await challengeBtn.click();
@@ -56,7 +78,7 @@ async function run() {
                 console.log(`6. 等待35秒冷却...`);
                 await sleep(35000);
             } else {
-                console.log('没有挑战次数了或未到开放时间');
+                console.log('没有挑战次数了');
                 break;
             }
         }
