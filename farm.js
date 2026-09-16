@@ -157,23 +157,23 @@ async function run() {
 
                 // 重复点攻击
                 for (let i = 0; i < 20; i++) {
-                    const attacked = await clickText(page, '攻击', 2000);
+                    const attacked = await clickText(page, '攻击', 1000);
                     if (!attacked) break;
-                    await sleep(500);
+                    await sleep(100);
                 }
 
-                await sleep(2000);
+                await sleep(500);
 
                 // 点关闭
                 await clickText(page, '关闭');
-                await sleep(2000);
+                await sleep(500);
 
                 count++;
                 console.log(`第 ${count} 次完成`);
             } else {
                 console.log('没找到经验妖灵，刷新...');
                 await clickText(page, '刷新');
-                await sleep(3000);
+                await sleep(1000);
             }
         }
 
