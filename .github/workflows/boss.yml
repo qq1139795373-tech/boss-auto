@@ -2,7 +2,7 @@ name: Auto Boss
 
 on:
   schedule:
-    - cron: '55 3 * * *'  # UTC 03:55 = 北京时间11:55
+    - cron: '50 3 * * *'  # UTC 03:50 = 北京时间11:50
   workflow_dispatch:
 
 jobs:
