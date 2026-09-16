@@ -37,21 +37,21 @@ async function run() {
     const page = await context.newPage();
 
     try {
-        // 检查北京时间是否在11:55-12:30之间
+        // 检查北京时间是否在12:00-12:30之间
         const now = new Date();
         const bjHour = (now.getUTCHours() + 8) % 24;
         const bjMin = now.getUTCMinutes();
         console.log(`北京时间: ${bjHour}:${String(bjMin).padStart(2, '0')}`);
 
-        if (bjHour < 11 || (bjHour === 11 && bjMin < 55) || bjHour >= 13 || (bjHour === 12 && bjMin >= 30)) {
+        if (bjHour < 12 || (bjHour === 12 && bjMin >= 30) || bjHour >= 13) {
             console.log('未到开放时间，等待...');
-            // 等到11:55再开始
+            // 等到12:00再开始打boss
             while (true) {
                 const now2 = new Date();
                 const h = (now2.getUTCHours() + 8) % 24;
                 const m = now2.getUTCMinutes();
-                if (h === 11 && m >= 55) break;
-                if (h >= 12) break;
+                if (h === 12 && m === 0) break;
+                if (h >= 12 && m > 0) break;
                 await sleep(30000);
             }
         }
