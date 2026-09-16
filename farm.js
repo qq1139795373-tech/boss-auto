@@ -153,27 +153,25 @@ async function run() {
             if (pageText.includes('经验妖灵')) {
                 console.log(`找到经验妖灵`);
                 await clickText(page, '经验妖灵');
-                await sleep(2000);
+                await sleep(500);
 
                 // 重复点攻击
                 for (let i = 0; i < 20; i++) {
-                    const attacked = await clickText(page, '攻击', 1000);
+                    const attacked = await clickText(page, '攻击', 500);
                     if (!attacked) break;
                     await sleep(100);
                 }
 
-                await sleep(500);
-
                 // 点关闭
                 await clickText(page, '关闭');
-                await sleep(500);
+                await sleep(200);
 
                 count++;
                 console.log(`第 ${count} 次完成`);
             } else {
                 console.log('没找到经验妖灵，刷新...');
                 await clickText(page, '刷新');
-                await sleep(1000);
+                await sleep(500);
             }
         }
 
