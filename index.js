@@ -160,6 +160,11 @@ async function run() {
 
         console.log('世界boss完成');
 
+        // 退出boss页面
+        console.log('退出boss页面...');
+        await page.click('text=<').catch(() => {});
+        await sleep(2000);
+
         // 触发Auto Farm
         console.log('等待5分钟后触发Auto Farm...');
         await sleep(300000); // 等5分钟

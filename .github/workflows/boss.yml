@@ -19,6 +19,7 @@ jobs:
         env:
           GAME_ACCOUNT: ${{ secrets.GAME_ACCOUNT }}
           GAME_PASSWORD: ${{ secrets.GAME_PASSWORD }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           npm install
           npx playwright install chromium
