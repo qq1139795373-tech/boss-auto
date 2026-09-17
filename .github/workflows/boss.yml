@@ -1,9 +1,7 @@
 name: Auto Boss
 
 on:
-  schedule:
-    - cron: '50 3 * * *'  # 备用：UTC 03:50 = 北京时间11:50
-  workflow_dispatch:       # 主要：外部触发
+  workflow_dispatch:
 
 jobs:
   boss:
