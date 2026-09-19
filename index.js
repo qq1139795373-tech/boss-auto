@@ -142,6 +142,20 @@ async function run() {
                 }
 
                 // 等待挑战结果弹窗，点击确定
+                await sleep(2000);
+                pageText = await getPageText(page);
+                
+                // 提取奖励信息
+                const rewardMatch = pageText.match(/挑战奖励[\s\S]*?(?=回合数|$)/);
+                const damageMatch = pageText.match(/本次造成伤害[：:]\s*(\d+)/);
+                if (damageMatch) {
+                    console.log(`   伤害: ${damageMatch[1]}`);
+                }
+                if (rewardMatch) {
+                    const items = rewardMatch[0].replace('挑战奖励', '').trim();
+                    console.log(`   奖励: ${items}`);
+                }
+
                 const confirmBtn = page.locator('text=确定').first();
                 if (await confirmBtn.isVisible({ timeout: 10000 }).catch(() => false)) {
                     await confirmBtn.click();
