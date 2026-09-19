@@ -138,16 +138,6 @@ async function run() {
         // 循环打经验妖灵
         let count = 0;
         while (true) {
-            // 检查时间，11:50-12:30跳过
-            const now = new Date();
-            const bjHour = (now.getUTCHours() + 8) % 24;
-            const bjMin = now.getUTCMinutes();
-            if (bjHour === 11 && bjMin >= 50 || (bjHour === 12 && bjMin < 30)) {
-                console.log(`北京时间 ${bjHour}:${String(bjMin).padStart(2, '0')}，boss时间段，等待...`);
-                await sleep(60000);
-                continue;
-            }
-
             pageText = await getPageText(page);
 
             if (pageText.includes('经验妖灵')) {
