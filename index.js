@@ -62,12 +62,10 @@ async function triggerFarm() {
 }
 
 async function fightBoss(page) {
-    // 进入boss页面
     await clickText(page, '世界boss');
     await sleep(3000);
     console.log('4. 进入boss页面');
 
-    // 读取剩余挑战次数
     let pageText = await getPageText(page);
     const timesMatch = pageText.match(/攻击次数[：:]\s*(\d+)\/10/);
     const usedTimes = timesMatch ? parseInt(timesMatch[1]) : 0;
@@ -80,7 +78,6 @@ async function fightBoss(page) {
     }
 
     for (let i = 0; i < remainTimes; i++) {
-        // 检查是否还在挑战时间内
         const { hour, min } = await getBjTime();
         if (hour !== 12 || min >= 30) {
             console.log('挑战时间结束');
@@ -98,7 +95,6 @@ async function fightBoss(page) {
                 break;
             }
 
-            // 等待挑战结果弹窗
             await sleep(2000);
             pageText = await getPageText(page);
 
@@ -116,7 +112,6 @@ async function fightBoss(page) {
                 console.log(`5. 第 ${i + 1} 次挑战完成`);
             }
 
-            // 等待冷却结束
             console.log(`6. 等待30秒冷却...`);
             for (let s = 0; s < 35; s++) {
                 await sleep(1000);
@@ -142,9 +137,12 @@ async function run() {
     const { hour, min } = await getBjTime();
     console.log(`北京时间: ${hour}:${String(min).padStart(2, '0')}`);
 
-    // 不在boss时间(12:00-12:30)直接触发farm
-    if (hour !== 12 || min >= 30) {
-        console.log('不在挑战时间，直接触发farm');
+    const isBossTime = hour === 12 && min < 30;
+    const isBeforeBoss = hour < 12 || (hour === 12 && min < 55);
+
+    // 已过boss时间，直接触发farm
+    if (hour > 12 || (hour === 12 && min >= 30)) {
+        console.log('已过挑战时间，直接触发farm');
         await triggerFarm();
         return;
     }
@@ -211,6 +209,16 @@ async function run() {
                 }
             }
             await sleep(2000);
+        }
+
+        // 如果还没到12:00，等待
+        if (isBeforeBoss) {
+            console.log('等待boss开放...');
+            while (true) {
+                const { hour: h, min: m } = await getBjTime();
+                if (h === 12 && m === 0) break;
+                await sleep(10000);
+            }
         }
 
         // 4-5. 打boss
