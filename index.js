@@ -38,10 +38,10 @@ async function getBjTime() {
 
 async function run() {
     const { hour, min } = await getBjTime();
-    console.log(`BJ Time: ${hour}:${String(min).padStart(2, '0')}`);
+    console.log(`åŒ—äº¬æ—¶é—´: ${hour}:${String(min).padStart(2, '0')}`);
 
     if (hour > 12 || (hour === 12 && min >= 30)) {
-        console.log('Past boss time, skip boss');
+        console.log('å·²è¿‡æŒ‘æˆ˜æ—¶é—´ï¼Œè·³è¿‡boss');
         return;
     }
 
@@ -55,51 +55,51 @@ async function run() {
         const inputs = await page.$$('input');
         await inputs[0].fill(ACCOUNT);
         await inputs[1].fill(PASSWORD);
-        await page.getByText('µÇÂ¼').first().click();
+        await page.getByText('ç™»å½•').first().click();
         await sleep(3000);
-        console.log('1. Login done');
+        console.log('1. ç™»å½•å®Œæˆ');
 
         await closePopup(page);
         await sleep(1000);
-        await clickText(page, '½øÈëÓÎÏ·');
+        await clickText(page, 'è¿›å…¥æ¸¸æˆ');
         await sleep(3000);
-        console.log('2. Entered game');
+        console.log('2. è¿›å…¥æ¸¸æˆ');
 
         let pageText = await getPageText(page);
-        if (pageText.includes('ÊÀ½çboss') && pageText.includes('µ±Ç°³ÇÊĞ£ºÃÏÂò')) {
-            console.log('3. Already at Mumbai');
+        if (pageText.includes('ä¸–ç•Œboss') && pageText.includes('å½“å‰åŸå¸‚ï¼šå­Ÿä¹°')) {
+            console.log('3. å·²åœ¨å­Ÿä¹°ç å¤´');
         } else {
-            console.log('3. Navigating to Mumbai...');
+            console.log('3. ä¸åœ¨å­Ÿä¹°ç å¤´ï¼Œå¯¼èˆªä¸­...');
             await closePopup(page);
 
-            if (!pageText.includes('³öº½')) {
-                await clickText(page, '³ÇÄÚµØÍ¼');
+            if (!pageText.includes('å‡ºèˆª')) {
+                await clickText(page, 'åŸå†…åœ°å›¾');
                 await sleep(2000);
-                await clickText(page, 'ÂëÍ·');
+                await clickText(page, 'ç å¤´');
                 await sleep(2000);
             }
 
-            await clickText(page, '³öº½');
+            await clickText(page, 'å‡ºèˆª');
             await sleep(2000);
-            await clickText(page, 'Ó¡¶ÈÑó');
+            await clickText(page, 'å°åº¦æ´‹');
             await sleep(1000);
 
             for (let s = 0; s < 5; s++) {
-                if (await clickText(page, 'ÃÏÂò', 2000)) break;
+                if (await clickText(page, 'å­Ÿä¹°', 2000)) break;
                 await page.mouse.wheel(0, 300);
                 await sleep(1000);
             }
 
             await sleep(2000);
-            await clickText(page, 'Á¢¼´³ö·¢');
+            await clickText(page, 'ç«‹å³å‡ºå‘');
             await sleep(1000);
-            await clickText(page, '×Ô¶¯º½ĞĞ');
-            console.log('3. Sailing...');
+            await clickText(page, 'è‡ªåŠ¨èˆªè¡Œ');
+            console.log('3. èˆªè¡Œä¸­...');
             for (let w = 0; w < 30; w++) {
                 await sleep(3000);
                 const txt = await getPageText(page);
-                if (txt.includes('µ±Ç°³ÇÊĞ£ºÃÏÂò')) {
-                    console.log('Arrived Mumbai');
+                if (txt.includes('å½“å‰åŸå¸‚ï¼šå­Ÿä¹°')) {
+                    console.log('åˆ°è¾¾å­Ÿä¹°');
                     break;
                 }
             }
@@ -107,7 +107,7 @@ async function run() {
         }
 
         if (hour < 12 || (hour === 12 && min === 0)) {
-            console.log('Waiting for boss...');
+            console.log('ç­‰å¾…bosså¼€æ”¾...');
             while (true) {
                 const { hour: h, min: m } = await getBjTime();
                 if (h === 12 && m >= 0) break;
@@ -115,79 +115,79 @@ async function run() {
             }
         }
 
-        await clickText(page, 'ÊÀ½çboss');
+        await clickText(page, 'ä¸–ç•Œboss');
         await sleep(3000);
-        console.log('4. Boss page');
+        console.log('4. è¿›å…¥bossé¡µé¢');
 
         pageText = await getPageText(page);
-        const timesMatch = pageText.match(/¹¥»÷´ÎÊı[£º:]\s*(\d+)\/10/);
+        const timesMatch = pageText.match(/æ”»å‡»æ¬¡æ•°[ï¼š:]\s*(\d+)\/10/);
         const usedTimes = timesMatch ? parseInt(timesMatch[1]) : 0;
         const remainTimes = 10 - usedTimes;
-        console.log(`Used: ${usedTimes}, Remaining: ${remainTimes}`);
+        console.log(`å·²ç”¨æ¬¡æ•°: ${usedTimes}, å‰©ä½™æ¬¡æ•°: ${remainTimes}`);
 
         if (remainTimes <= 0) {
-            console.log('All challenges used');
+            console.log('ä»Šæ—¥æ¬¡æ•°å·²ç”¨å®Œ');
         }
 
         for (let i = 0; i < remainTimes; i++) {
             const { hour: h, min: m } = await getBjTime();
             if (h !== 12 || m >= 30) {
-                console.log('Boss time ended');
+                console.log('æŒ‘æˆ˜æ—¶é—´ç»“æŸ');
                 break;
             }
 
-            const challengeBtn = page.locator('text=·¢ÆğÌôÕ½').first();
+            const challengeBtn = page.locator('text=å‘èµ·æŒ‘æˆ˜').first();
             if (await challengeBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
                 await challengeBtn.click();
                 await sleep(1000);
 
                 pageText = await getPageText(page);
-                if (pageText.includes('ÒÑ´ïÉÏÏŞ') || pageText.includes('¿ª·ÅÊ±¼ä')) {
-                    console.log('Limit reached or not open');
+                if (pageText.includes('å·²è¾¾ä¸Šé™') || pageText.includes('å¼€æ”¾æ—¶é—´')) {
+                    console.log('æ¬¡æ•°å·²ç”¨å®Œæˆ–æœªå¼€æ”¾');
                     break;
                 }
 
                 await sleep(2000);
                 pageText = await getPageText(page);
 
-                const damageMatch = pageText.match(/±¾´ÎÔì³ÉÉËº¦[£º:]\s*(\d+)/);
-                const rewardMatch = pageText.match(/ÌôÕ½½±Àø[\s\S]*?(?=»ØºÏÊı|$)/);
-                if (damageMatch) console.log(`   Damage: ${damageMatch[1]}`);
+                const damageMatch = pageText.match(/æœ¬æ¬¡é€ æˆä¼¤å®³[ï¼š:]\s*(\d+)/);
+                const rewardMatch = pageText.match(/æŒ‘æˆ˜å¥–åŠ±[\s\S]*?(?=å›åˆæ•°|$)/);
+                if (damageMatch) console.log(`   ä¼¤å®³: ${damageMatch[1]}`);
                 if (rewardMatch) {
-                    const items = rewardMatch[0].replace('ÌôÕ½½±Àø', '').trim();
-                    console.log(`   Reward: ${items}`);
+                    const items = rewardMatch[0].replace('æŒ‘æˆ˜å¥–åŠ±', '').trim();
+                    console.log(`   å¥–åŠ±: ${items}`);
                 }
 
-                const confirmBtn = page.locator('text=È·¶¨').first();
+                const confirmBtn = page.locator('text=ç¡®å®š').first();
                 if (await confirmBtn.isVisible({ timeout: 10000 }).catch(() => false)) {
                     await confirmBtn.click();
-                    console.log(`5. Challenge ${i + 1} done`);
+                    console.log(`5. ç¬¬ ${i + 1} æ¬¡æŒ‘æˆ˜å®Œæˆ`);
                 }
 
-                console.log(`6. Waiting 30s cooldown...`);
+                console.log(`6. ç­‰å¾…30ç§’å†·å´...`);
                 for (let s = 0; s < 35; s++) {
                     await sleep(1000);
                     pageText = await getPageText(page);
-                    if (pageText.includes('·¢ÆğÌôÕ½') && !pageText.includes('ºó¿ÉÔÙ´ÎÌôÕ½')) {
-                        console.log('Cooldown done');
+                    if (pageText.includes('å‘èµ·æŒ‘æˆ˜') && !pageText.includes('åå¯å†æ¬¡æŒ‘æˆ˜')) {
+                        console.log('å†·å´ç»“æŸ');
                         break;
                     }
                     const { hour: h2, min: m2 } = await getBjTime();
                     if (h2 !== 12 || m2 >= 30) {
-                        console.log('Boss time ended');
+                        console.log('æŒ‘æˆ˜æ—¶é—´ç»“æŸ');
                         break;
                     }
                 }
             } else {
-                console.log('Button not available');
+                console.log('æŒ‰é’®ä¸å¯ç”¨');
                 break;
             }
         }
 
-        console.log('Boss finished');
+        console.log('ä¸–ç•Œbosså®Œæˆ');
 
     } catch (e) {
-        console.error('Error:', e.message);
+        console.error('é”™è¯¯:', e.message);
     } finally {
         await browser.close();
     }
