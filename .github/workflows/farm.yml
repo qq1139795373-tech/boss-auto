@@ -7,6 +7,8 @@ jobs:
   farm:
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    env:
+      LANG: zh_CN.UTF-8
     steps:
       - uses: actions/checkout@v4
 
