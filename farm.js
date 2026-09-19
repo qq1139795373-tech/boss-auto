@@ -137,9 +137,7 @@ async function run() {
 
         // 循环打经验妖灵
         let count = 0;
-        const startTime = Date.now();
-        const MAX_TIME = 5.5 * 60 * 60 * 1000;
-        while ((Date.now() - startTime) < MAX_TIME) {
+        while (true) {
             // 检查时间，11:50-12:30跳过
             const now = new Date();
             const bjHour = (now.getUTCHours() + 8) % 24;
