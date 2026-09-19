@@ -7,16 +7,8 @@ jobs:
   boss:
     runs-on: ubuntu-latest
     timeout-minutes: 350
-    env:
-      LANG: zh_CN.UTF-8
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Chinese locale
-        run: |
-          sudo apt-get update && sudo apt-get install -y locales
-          sudo locale-gen zh_CN.UTF-8
-          sudo update-locale LANG=zh_CN.UTF-8
 
       - uses: actions/setup-node@v4
         with:
