@@ -217,8 +217,8 @@ async function run() {
         await sleep(2000);
 
         // 触发Auto Farm
-        console.log('等待5分钟后触发Auto Farm...');
-        await sleep(300000); // 等5分钟
+        console.log('等待1分钟后触发Auto Farm...');
+        await sleep(60000); // 等1分钟
         console.log('正在触发Auto Farm workflow...');
         try {
             const resp = await fetch('https://api.github.com/repos/qq1139795373-tech/boss-auto/actions/workflows/farm.yml/dispatches', {
