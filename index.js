@@ -186,6 +186,22 @@ async function run() {
                         console.log('冷却结束');
                         break;
                     }
+                    // 检查是否还在挑战时间内
+                    const now = new Date();
+                    const bjHour = (now.getUTCHours() + 8) % 24;
+                    const bjMin = now.getUTCMinutes();
+                    if (bjHour === 12 && bjMin >= 30) {
+                        console.log('挑战时间结束');
+                        break;
+                    }
+                }
+                // 检查是否还在挑战时间内
+                const now2 = new Date();
+                const bjHour2 = (now2.getUTCHours() + 8) % 24;
+                const bjMin2 = now2.getUTCMinutes();
+                if (bjHour2 === 12 && bjMin2 >= 30) {
+                    console.log('挑战时间结束，准备去广州');
+                    break;
                 }
             } else {
                 console.log('按钮不可用');
