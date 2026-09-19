@@ -2,7 +2,6 @@ const { chromium } = require('playwright');
 
 const ACCOUNT = process.env.GAME_ACCOUNT;
 const PASSWORD = process.env.GAME_PASSWORD;
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 
 async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -37,113 +36,13 @@ async function getBjTime() {
     return { hour: (now.getUTCHours() + 8) % 24, min: now.getUTCMinutes() };
 }
 
-async function triggerFarm() {
-    console.log('等待1分钟后触发Auto Farm...');
-    await sleep(60000);
-    console.log('正在触发Auto Farm workflow...');
-    try {
-        const resp = await fetch('https://api.github.com/repos/qq1139795373-tech/boss-auto/actions/workflows/farm.yml/dispatches', {
-            method: 'POST',
-            headers: {
-                'Authorization': `token ${GITHUB_TOKEN}`,
-                'Accept': 'application/vnd.github.v3+json',
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ ref: 'farm' })
-        });
-        console.log(`Farm触发结果: ${resp.status}`);
-        if (resp.status !== 204) {
-            const text = await resp.text();
-            console.log(`错误详情: ${text}`);
-        }
-    } catch (e) {
-        console.error('触发Farm失败:', e.message);
-    }
-}
-
-async function fightBoss(page) {
-    await clickText(page, '世界boss');
-    await sleep(3000);
-    console.log('4. 进入boss页面');
-
-    let pageText = await getPageText(page);
-    const timesMatch = pageText.match(/攻击次数[：:]\s*(\d+)\/10/);
-    const usedTimes = timesMatch ? parseInt(timesMatch[1]) : 0;
-    const remainTimes = 10 - usedTimes;
-    console.log(`已用次数: ${usedTimes}, 剩余次数: ${remainTimes}`);
-
-    if (remainTimes <= 0) {
-        console.log('今日次数已用完');
-        return;
-    }
-
-    for (let i = 0; i < remainTimes; i++) {
-        const { hour, min } = await getBjTime();
-        if (hour !== 12 || min >= 30) {
-            console.log('挑战时间结束');
-            break;
-        }
-
-        const challengeBtn = page.locator('text=发起挑战').first();
-        if (await challengeBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
-            await challengeBtn.click();
-            await sleep(1000);
-
-            pageText = await getPageText(page);
-            if (pageText.includes('已达上限') || pageText.includes('开放时间')) {
-                console.log('次数已用完或未开放');
-                break;
-            }
-
-            await sleep(2000);
-            pageText = await getPageText(page);
-
-            const damageMatch = pageText.match(/本次造成伤害[：:]\s*(\d+)/);
-            const rewardMatch = pageText.match(/挑战奖励[\s\S]*?(?=回合数|$)/);
-            if (damageMatch) console.log(`   伤害: ${damageMatch[1]}`);
-            if (rewardMatch) {
-                const items = rewardMatch[0].replace('挑战奖励', '').trim();
-                console.log(`   奖励: ${items}`);
-            }
-
-            const confirmBtn = page.locator('text=确定').first();
-            if (await confirmBtn.isVisible({ timeout: 10000 }).catch(() => false)) {
-                await confirmBtn.click();
-                console.log(`5. 第 ${i + 1} 次挑战完成`);
-            }
-
-            console.log(`6. 等待30秒冷却...`);
-            for (let s = 0; s < 35; s++) {
-                await sleep(1000);
-                pageText = await getPageText(page);
-                if (pageText.includes('发起挑战') && !pageText.includes('后可再次挑战')) {
-                    console.log('冷却结束');
-                    break;
-                }
-                const { hour: h, min: m } = await getBjTime();
-                if (h !== 12 || m >= 30) {
-                    console.log('挑战时间结束');
-                    break;
-                }
-            }
-        } else {
-            console.log('按钮不可用');
-            break;
-        }
-    }
-}
-
 async function run() {
     const { hour, min } = await getBjTime();
     console.log(`北京时间: ${hour}:${String(min).padStart(2, '0')}`);
 
-    const isBossTime = hour === 12 && min < 30;
-    const isBeforeBoss = hour < 12 || (hour === 12 && min < 55);
-
-    // 已过boss时间，直接触发farm
+    // 已过boss时间，直接跳过boss
     if (hour > 12 || (hour === 12 && min >= 30)) {
-        console.log('已过挑战时间，直接触发farm');
-        await triggerFarm();
+        console.log('已过挑战时间，跳过boss');
         return;
     }
 
@@ -212,33 +111,94 @@ async function run() {
         }
 
         // 如果还没到12:00，等待
-        if (isBeforeBoss) {
+        if (hour < 12 || (hour === 12 && min === 0)) {
             console.log('等待boss开放...');
             while (true) {
                 const { hour: h, min: m } = await getBjTime();
-                if (h === 12 && m === 0) break;
+                if (h === 12 && m >= 0) break;
                 await sleep(10000);
             }
         }
 
-        // 4-5. 打boss
-        await fightBoss(page);
+        // 4. 进入boss页面
+        await clickText(page, '世界boss');
+        await sleep(3000);
+        console.log('4. 进入boss页面');
+
+        // 读取剩余挑战次数
+        pageText = await getPageText(page);
+        const timesMatch = pageText.match(/攻击次数[：:]\s*(\d+)\/10/);
+        const usedTimes = timesMatch ? parseInt(timesMatch[1]) : 0;
+        const remainTimes = 10 - usedTimes;
+        console.log(`已用次数: ${usedTimes}, 剩余次数: ${remainTimes}`);
+
+        if (remainTimes <= 0) {
+            console.log('今日次数已用完');
+        }
+
+        // 5. 发起挑战
+        for (let i = 0; i < remainTimes; i++) {
+            const { hour: h, min: m } = await getBjTime();
+            if (h !== 12 || m >= 30) {
+                console.log('挑战时间结束');
+                break;
+            }
+
+            const challengeBtn = page.locator('text=发起挑战').first();
+            if (await challengeBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
+                await challengeBtn.click();
+                await sleep(1000);
+
+                pageText = await getPageText(page);
+                if (pageText.includes('已达上限') || pageText.includes('开放时间')) {
+                    console.log('次数已用完或未开放');
+                    break;
+                }
+
+                await sleep(2000);
+                pageText = await getPageText(page);
+
+                const damageMatch = pageText.match(/本次造成伤害[：:]\s*(\d+)/);
+                const rewardMatch = pageText.match(/挑战奖励[\s\S]*?(?=回合数|$)/);
+                if (damageMatch) console.log(`   伤害: ${damageMatch[1]}`);
+                if (rewardMatch) {
+                    const items = rewardMatch[0].replace('挑战奖励', '').trim();
+                    console.log(`   奖励: ${items}`);
+                }
+
+                const confirmBtn = page.locator('text=确定').first();
+                if (await confirmBtn.isVisible({ timeout: 10000 }).catch(() => false)) {
+                    await confirmBtn.click();
+                    console.log(`5. 第 ${i + 1} 次挑战完成`);
+                }
+
+                console.log(`6. 等待30秒冷却...`);
+                for (let s = 0; s < 35; s++) {
+                    await sleep(1000);
+                    pageText = await getPageText(page);
+                    if (pageText.includes('发起挑战') && !pageText.includes('后可再次挑战')) {
+                        console.log('冷却结束');
+                        break;
+                    }
+                    const { hour: h2, min: m2 } = await getBjTime();
+                    if (h2 !== 12 || m2 >= 30) {
+                        console.log('挑战时间结束');
+                        break;
+                    }
+                }
+            } else {
+                console.log('按钮不可用');
+                break;
+            }
+        }
 
         console.log('世界boss完成');
-
-        // 退出boss页面
-        console.log('退出boss页面...');
-        await page.click('text=<').catch(() => {});
-        await sleep(2000);
 
     } catch (e) {
         console.error('错误:', e.message);
     } finally {
         await browser.close();
     }
-
-    // 触发farm
-    await triggerFarm();
 }
 
 run();

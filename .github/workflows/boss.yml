@@ -6,6 +6,7 @@ on:
 jobs:
   boss:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
 
@@ -13,12 +14,19 @@ jobs:
         with:
           node-version: 22
 
-      - name: Install and run
+      - name: Run Boss
         env:
           GAME_ACCOUNT: ${{ secrets.GAME_ACCOUNT }}
           GAME_PASSWORD: ${{ secrets.GAME_PASSWORD }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           npm install
           npx playwright install chromium
           node index.js
+
+      - name: Run Farm
+        if: success()
+        env:
+          GAME_ACCOUNT: ${{ secrets.GAME_ACCOUNT }}
+          GAME_PASSWORD: ${{ secrets.GAME_PASSWORD }}
+        run: |
+          node farm.js
