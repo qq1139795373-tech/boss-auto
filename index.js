@@ -151,6 +151,10 @@ async function run() {
                     console.log('未到开放时间，停止');
                     break;
                 }
+                if (pageText.includes('已达上限')) {
+                    console.log('今日次数已用完');
+                    break;
+                }
 
                 // 等待挑战结果弹窗，点击确定
                 await sleep(2000);
