@@ -133,7 +133,7 @@ async function run() {
             const challengeBtn = page.locator('text=发起挑战').first();
             if (await challengeBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
                 await challengeBtn.click();
-                await sleep(2000);
+                await sleep(1000);
 
                 pageText = await getPageText(page);
                 if (pageText.includes('12:00') || pageText.includes('开放时间')) {
@@ -141,17 +141,23 @@ async function run() {
                     break;
                 }
 
-                console.log(`5. 第 ${i + 1} 次挑战`);
-                await sleep(5000);
-
-                const closeBtn = page.locator('text=关闭').first();
-                if (await closeBtn.isVisible({ timeout: 10000 }).catch(() => false)) {
-                    await closeBtn.click();
-                    console.log(`6. 第 ${i + 1} 次关闭`);
+                // 等待挑战结果弹窗，点击确定
+                const confirmBtn = page.locator('text=确定').first();
+                if (await confirmBtn.isVisible({ timeout: 10000 }).catch(() => false)) {
+                    await confirmBtn.click();
+                    console.log(`5. 第 ${i + 1} 次挑战完成`);
                 }
 
-                console.log(`7. 等待35秒冷却...`);
-                await sleep(35000);
+                // 等待冷却结束
+                console.log(`6. 等待30秒冷却...`);
+                for (let s = 0; s < 35; s++) {
+                    await sleep(1000);
+                    pageText = await getPageText(page);
+                    if (pageText.includes('发起挑战') && !pageText.includes('后可再次挑战')) {
+                        console.log('冷却结束');
+                        break;
+                    }
+                }
             } else {
                 console.log('按钮不可用');
                 break;
