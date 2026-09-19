@@ -2,6 +2,7 @@ const { chromium } = require('playwright');
 
 const ACCOUNT = process.env.GAME_ACCOUNT;
 const PASSWORD = process.env.GAME_PASSWORD;
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 
 async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -31,214 +32,205 @@ async function closePopup(page) {
     await sleep(1000);
 }
 
+async function getBjTime() {
+    const now = new Date();
+    return { hour: (now.getUTCHours() + 8) % 24, min: now.getUTCMinutes() };
+}
+
+async function triggerFarm() {
+    console.log('µÈ´ı1·ÖÖÓºó´¥·¢Auto Farm...');
+    await sleep(60000);
+    console.log('ÕıÔÚ´¥·¢Auto Farm workflow...');
+    try {
+        const resp = await fetch('https://api.github.com/repos/qq1139795373-tech/boss-auto/actions/workflows/farm.yml/dispatches', {
+            method: 'POST',
+            headers: {
+                'Authorization': `token ${GITHUB_TOKEN}`,
+                'Accept': 'application/vnd.github.v3+json',
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ ref: 'farm' })
+        });
+        console.log(`Farm´¥·¢½á¹û: ${resp.status}`);
+        if (resp.status !== 204) {
+            const text = await resp.text();
+            console.log(`´íÎóÏêÇé: ${text}`);
+        }
+    } catch (e) {
+        console.error('´¥·¢FarmÊ§°Ü:', e.message);
+    }
+}
+
+async function fightBoss(page) {
+    // ½øÈëbossÒ³Ãæ
+    await clickText(page, 'ÊÀ½çboss');
+    await sleep(3000);
+    console.log('4. ½øÈëbossÒ³Ãæ');
+
+    // ¶ÁÈ¡Ê£ÓàÌôÕ½´ÎÊı
+    let pageText = await getPageText(page);
+    const timesMatch = pageText.match(/¹¥»÷´ÎÊı[£º:]\s*(\d+)\/10/);
+    const usedTimes = timesMatch ? parseInt(timesMatch[1]) : 0;
+    const remainTimes = 10 - usedTimes;
+    console.log(`ÒÑÓÃ´ÎÊı: ${usedTimes}, Ê£Óà´ÎÊı: ${remainTimes}`);
+
+    if (remainTimes <= 0) {
+        console.log('½ñÈÕ´ÎÊıÒÑÓÃÍê');
+        return;
+    }
+
+    for (let i = 0; i < remainTimes; i++) {
+        // ¼ì²éÊÇ·ñ»¹ÔÚÌôÕ½Ê±¼äÄÚ
+        const { hour, min } = await getBjTime();
+        if (hour !== 12 || min >= 30) {
+            console.log('ÌôÕ½Ê±¼ä½áÊø');
+            break;
+        }
+
+        const challengeBtn = page.locator('text=·¢ÆğÌôÕ½').first();
+        if (await challengeBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
+            await challengeBtn.click();
+            await sleep(1000);
+
+            pageText = await getPageText(page);
+            if (pageText.includes('ÒÑ´ïÉÏÏŞ') || pageText.includes('¿ª·ÅÊ±¼ä')) {
+                console.log('´ÎÊıÒÑÓÃÍê»òÎ´¿ª·Å');
+                break;
+            }
+
+            // µÈ´ıÌôÕ½½á¹ûµ¯´°
+            await sleep(2000);
+            pageText = await getPageText(page);
+
+            const damageMatch = pageText.match(/±¾´ÎÔì³ÉÉËº¦[£º:]\s*(\d+)/);
+            const rewardMatch = pageText.match(/ÌôÕ½½±Àø[\s\S]*?(?=»ØºÏÊı|$)/);
+            if (damageMatch) console.log(`   ÉËº¦: ${damageMatch[1]}`);
+            if (rewardMatch) {
+                const items = rewardMatch[0].replace('ÌôÕ½½±Àø', '').trim();
+                console.log(`   ½±Àø: ${items}`);
+            }
+
+            const confirmBtn = page.locator('text=È·¶¨').first();
+            if (await confirmBtn.isVisible({ timeout: 10000 }).catch(() => false)) {
+                await confirmBtn.click();
+                console.log(`5. µÚ ${i + 1} ´ÎÌôÕ½Íê³É`);
+            }
+
+            // µÈ´ıÀäÈ´½áÊø
+            console.log(`6. µÈ´ı30ÃëÀäÈ´...`);
+            for (let s = 0; s < 35; s++) {
+                await sleep(1000);
+                pageText = await getPageText(page);
+                if (pageText.includes('·¢ÆğÌôÕ½') && !pageText.includes('ºó¿ÉÔÙ´ÎÌôÕ½')) {
+                    console.log('ÀäÈ´½áÊø');
+                    break;
+                }
+                const { hour: h, min: m } = await getBjTime();
+                if (h !== 12 || m >= 30) {
+                    console.log('ÌôÕ½Ê±¼ä½áÊø');
+                    break;
+                }
+            }
+        } else {
+            console.log('°´Å¥²»¿ÉÓÃ');
+            break;
+        }
+    }
+}
+
 async function run() {
+    const { hour, min } = await getBjTime();
+    console.log(`±±¾©Ê±¼ä: ${hour}:${String(min).padStart(2, '0')}`);
+
+    // ²»ÔÚbossÊ±¼ä(12:00-12:30)Ö±½Ó´¥·¢farm
+    if (hour !== 12 || min >= 30) {
+        console.log('²»ÔÚÌôÕ½Ê±¼ä£¬Ö±½Ó´¥·¢farm');
+        await triggerFarm();
+        return;
+    }
+
     const browser = await chromium.launch({ headless: true });
     const context = await browser.newContext();
     const page = await context.newPage();
 
     try {
-        // æ£€æŸ¥åŒ—äº¬æ—¶é—´æ˜¯å¦åœ¨12:00-12:30ä¹‹é—´
-        const now = new Date();
-        const bjHour = (now.getUTCHours() + 8) % 24;
-        const bjMin = now.getUTCMinutes();
-        console.log(`åŒ—äº¬æ—¶é—´: ${bjHour}:${String(bjMin).padStart(2, '0')}`);
-
-        if (bjHour < 12 || (bjHour === 12 && bjMin >= 30) || bjHour >= 13) {
-            console.log('æœªåˆ°å¼€æ”¾æ—¶é—´ï¼Œç­‰å¾…...');
-            // ç­‰åˆ°12:00å†å¼€å§‹æ‰“boss
-            while (true) {
-                const now2 = new Date();
-                const h = (now2.getUTCHours() + 8) % 24;
-                const m = now2.getUTCMinutes();
-                if (h === 12 && m === 0) break;
-                if (h >= 12 && m > 0) break;
-                await sleep(30000);
-            }
-        }
-
-        // 1. ç™»å½•
+        // 1. µÇÂ¼
         await page.goto('http://yiyu.yiyutx.top/yysh/#/pages/login/login');
         await page.waitForTimeout(3000);
         const inputs = await page.$$('input');
         await inputs[0].fill(ACCOUNT);
         await inputs[1].fill(PASSWORD);
-        await page.getByText('ç™»å½•').first().click();
+        await page.getByText('µÇÂ¼').first().click();
         await sleep(3000);
-        console.log('1. ç™»å½•å®Œæˆ');
+        console.log('1. µÇÂ¼Íê³É');
 
-        // 2. è¿›å…¥æ¸¸æˆ
+        // 2. ½øÈëÓÎÏ·
         await closePopup(page);
         await sleep(1000);
-        await clickText(page, 'è¿›å…¥æ¸¸æˆ');
+        await clickText(page, '½øÈëÓÎÏ·');
         await sleep(3000);
-        console.log('2. è¿›å…¥æ¸¸æˆ');
+        console.log('2. ½øÈëÓÎÏ·');
 
-        // 3. æ£€æŸ¥æ˜¯å¦åœ¨å­Ÿä¹°ç å¤´ï¼ˆ"ä½ çœ‹åˆ°"é‡Œæœ‰"ä¸–ç•Œboss"å°±è¯´æ˜åˆ°äº†ï¼‰
+        // 3. µ¼º½µ½ÃÏÂòÂëÍ·
         let pageText = await getPageText(page);
-        if (pageText.includes('ä¸–ç•Œboss') && pageText.includes('å½“å‰åŸå¸‚ï¼šå­Ÿä¹°')) {
-            console.log('3. å·²åœ¨å­Ÿä¹°ç å¤´');
+        if (pageText.includes('ÊÀ½çboss') && pageText.includes('µ±Ç°³ÇÊĞ£ºÃÏÂò')) {
+            console.log('3. ÒÑÔÚÃÏÂòÂëÍ·');
         } else {
-            console.log('3. ä¸åœ¨å­Ÿä¹°ç å¤´ï¼Œå¯¼èˆªä¸­...');
-
-            // å…ˆå…³é—­å¯èƒ½å­˜åœ¨çš„å¼¹çª—
+            console.log('3. ²»ÔÚÃÏÂòÂëÍ·£¬µ¼º½ÖĞ...');
             await closePopup(page);
 
-            // å¦‚æœä¸åœ¨ç å¤´ï¼Œå…ˆå»ç å¤´
-            if (!pageText.includes('å‡ºèˆª')) {
-                await clickText(page, 'åŸå†…åœ°å›¾');
+            if (!pageText.includes('³öº½')) {
+                await clickText(page, '³ÇÄÚµØÍ¼');
                 await sleep(2000);
-                await clickText(page, 'ç å¤´');
+                await clickText(page, 'ÂëÍ·');
                 await sleep(2000);
             }
 
-            // å‡ºèˆª
-            await clickText(page, 'å‡ºèˆª');
+            await clickText(page, '³öº½');
             await sleep(2000);
-
-            // å°åº¦æ´‹åŒºåŸŸ
-            await clickText(page, 'å°åº¦æ´‹');
+            await clickText(page, 'Ó¡¶ÈÑó');
             await sleep(1000);
 
-            // æ‰¾å­Ÿä¹°
             for (let s = 0; s < 5; s++) {
-                if (await clickText(page, 'å­Ÿä¹°', 2000)) break;
+                if (await clickText(page, 'ÃÏÂò', 2000)) break;
                 await page.mouse.wheel(0, 300);
                 await sleep(1000);
             }
 
             await sleep(2000);
-            await clickText(page, 'ç«‹å³å‡ºå‘');
+            await clickText(page, 'Á¢¼´³ö·¢');
             await sleep(1000);
-            await clickText(page, 'è‡ªåŠ¨èˆªè¡Œ');
-            console.log('3. èˆªè¡Œä¸­...');
-            // ç­‰å¾…åˆ°è¾¾å­Ÿä¹°
+            await clickText(page, '×Ô¶¯º½ĞĞ');
+            console.log('3. º½ĞĞÖĞ...');
             for (let w = 0; w < 30; w++) {
                 await sleep(3000);
                 const txt = await getPageText(page);
-                if (txt.includes('å½“å‰åŸå¸‚ï¼šå­Ÿä¹°')) {
-                    console.log('åˆ°è¾¾å­Ÿä¹°');
+                if (txt.includes('µ±Ç°³ÇÊĞ£ºÃÏÂò')) {
+                    console.log('µ½´ïÃÏÂò');
                     break;
                 }
             }
             await sleep(2000);
         }
 
-        // 4. ç‚¹å‡»ä¸–ç•Œboss
-        await clickText(page, 'ä¸–ç•Œboss');
-        await sleep(3000);
-        console.log('4. è¿›å…¥bossé¡µé¢');
+        // 4-5. ´òboss
+        await fightBoss(page);
 
-        // è¯»å–å‰©ä½™æŒ‘æˆ˜æ¬¡æ•°
-        pageText = await getPageText(page);
-        const timesMatch = pageText.match(/æ”»å‡»æ¬¡æ•°[ï¼š:]\s*(\d+)\/10/);
-        const usedTimes = timesMatch ? parseInt(timesMatch[1]) : 0;
-        const remainTimes = 10 - usedTimes;
-        console.log(`å·²ç”¨æ¬¡æ•°: ${usedTimes}, å‰©ä½™æ¬¡æ•°: ${remainTimes}`);
+        console.log('ÊÀ½çbossÍê³É');
 
-        if (remainTimes <= 0) {
-            console.log('ä»Šæ—¥æ¬¡æ•°å·²ç”¨å®Œ');
-        }
-
-        // 5. å‘èµ·æŒ‘æˆ˜ï¼ˆæ ¹æ®å‰©ä½™æ¬¡æ•°ï¼‰
-        for (let i = 0; i < remainTimes; i++) {
-            const challengeBtn = page.locator('text=å‘èµ·æŒ‘æˆ˜').first();
-            if (await challengeBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
-                await challengeBtn.click();
-                await sleep(1000);
-
-                pageText = await getPageText(page);
-                if (pageText.includes('12:00') || pageText.includes('å¼€æ”¾æ—¶é—´')) {
-                    console.log('æœªåˆ°å¼€æ”¾æ—¶é—´ï¼Œåœæ­¢');
-                    break;
-                }
-                if (pageText.includes('å·²è¾¾ä¸Šé™')) {
-                    console.log('ä»Šæ—¥æ¬¡æ•°å·²ç”¨å®Œ');
-                    break;
-                }
-
-                // ç­‰å¾…æŒ‘æˆ˜ç»“æœå¼¹çª—ï¼Œç‚¹å‡»ç¡®å®š
-                await sleep(2000);
-                pageText = await getPageText(page);
-                
-                // æå–å¥–åŠ±ä¿¡æ¯
-                const rewardMatch = pageText.match(/æŒ‘æˆ˜å¥–åŠ±[\s\S]*?(?=å›åˆæ•°|$)/);
-                const damageMatch = pageText.match(/æœ¬æ¬¡é€ æˆä¼¤å®³[ï¼š:]\s*(\d+)/);
-                if (damageMatch) {
-                    console.log(`   ä¼¤å®³: ${damageMatch[1]}`);
-                }
-                if (rewardMatch) {
-                    const items = rewardMatch[0].replace('æŒ‘æˆ˜å¥–åŠ±', '').trim();
-                    console.log(`   å¥–åŠ±: ${items}`);
-                }
-
-                const confirmBtn = page.locator('text=ç¡®å®š').first();
-                if (await confirmBtn.isVisible({ timeout: 10000 }).catch(() => false)) {
-                    await confirmBtn.click();
-                    console.log(`5. ç¬¬ ${i + 1} æ¬¡æŒ‘æˆ˜å®Œæˆ`);
-                }
-
-                // ç­‰å¾…å†·å´ç»“æŸ
-                console.log(`6. ç­‰å¾…30ç§’å†·å´...`);
-                for (let s = 0; s < 35; s++) {
-                    await sleep(1000);
-                    pageText = await getPageText(page);
-                    if (pageText.includes('å‘èµ·æŒ‘æˆ˜') && !pageText.includes('åå¯å†æ¬¡æŒ‘æˆ˜')) {
-                        console.log('å†·å´ç»“æŸ');
-                        break;
-                    }
-                    // æ£€æŸ¥æ˜¯å¦è¿˜åœ¨æŒ‘æˆ˜æ—¶é—´å†…
-                    const now = new Date();
-                    const bjHour = (now.getUTCHours() + 8) % 24;
-                    const bjMin = now.getUTCMinutes();
-                    if (bjHour === 12 && bjMin >= 30) {
-                        console.log('æŒ‘æˆ˜æ—¶é—´ç»“æŸ');
-                        break;
-                    }
-                }
-                // æ£€æŸ¥æ˜¯å¦è¿˜åœ¨æŒ‘æˆ˜æ—¶é—´å†…
-                const now2 = new Date();
-                const bjHour2 = (now2.getUTCHours() + 8) % 24;
-                const bjMin2 = now2.getUTCMinutes();
-                if (bjHour2 === 12 && bjMin2 >= 30) {
-                    console.log('æŒ‘æˆ˜æ—¶é—´ç»“æŸï¼Œå‡†å¤‡å»å¹¿å·');
-                    break;
-                }
-            } else {
-                console.log('æŒ‰é’®ä¸å¯ç”¨');
-                break;
-            }
-        }
-
-        console.log('ä¸–ç•Œbosså®Œæˆ');
-
-        // é€€å‡ºbossé¡µé¢
-        console.log('é€€å‡ºbossé¡µé¢...');
+        // ÍË³öbossÒ³Ãæ
+        console.log('ÍË³öbossÒ³Ãæ...');
         await page.click('text=<').catch(() => {});
         await sleep(2000);
 
-        // è§¦å‘Auto Farm
-        console.log('ç­‰å¾…1åˆ†é’Ÿåè§¦å‘Auto Farm...');
-        await sleep(60000); // ç­‰1åˆ†é’Ÿ
-        console.log('æ­£åœ¨è§¦å‘Auto Farm workflow...');
-        try {
-            const resp = await fetch('https://api.github.com/repos/qq1139795373-tech/boss-auto/actions/workflows/farm.yml/dispatches', {
-                method: 'POST',
-                headers: {
-                    'Authorization': `token ${process.env.GITHUB_TOKEN}`,
-                    'Accept': 'application/vnd.github.v3+json',
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({ ref: 'farm' })
-            });
-            console.log(`Farmè§¦å‘ç»“æœ: ${resp.status}`);
-        } catch (e) {
-            console.error('è§¦å‘Farmå¤±è´¥:', e.message);
-        }
     } catch (e) {
-        console.error('é”™è¯¯:', e.message);
+        console.error('´íÎó:', e.message);
     } finally {
         await browser.close();
     }
+
+    // ´¥·¢farm
+    await triggerFarm();
 }
 
 run();
