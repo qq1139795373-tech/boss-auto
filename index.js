@@ -128,8 +128,19 @@ async function run() {
         await sleep(3000);
         console.log('4. 进入boss页面');
 
-        // 5. 发起挑战（最多10次）
-        for (let i = 0; i < 10; i++) {
+        // 读取剩余挑战次数
+        pageText = await getPageText(page);
+        const timesMatch = pageText.match(/攻击次数[：:]\s*(\d+)\/10/);
+        const usedTimes = timesMatch ? parseInt(timesMatch[1]) : 0;
+        const remainTimes = 10 - usedTimes;
+        console.log(`已用次数: ${usedTimes}, 剩余次数: ${remainTimes}`);
+
+        if (remainTimes <= 0) {
+            console.log('今日次数已用完');
+        }
+
+        // 5. 发起挑战（根据剩余次数）
+        for (let i = 0; i < remainTimes; i++) {
             const challengeBtn = page.locator('text=发起挑战').first();
             if (await challengeBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
                 await challengeBtn.click();
