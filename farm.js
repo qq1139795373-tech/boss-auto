@@ -174,7 +174,7 @@ async function run() {
             } else {
                 console.log('没找到经验妖灵，刷新...');
                 await clickText(page, '刷新');
-                await sleep(500);
+                await sleep(2000); // 多等2秒让怪物刷新
             }
         }
 
