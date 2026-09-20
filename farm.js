@@ -14,7 +14,8 @@ async function clickText(page, text, timeout = 5000) {
         await el.scrollIntoViewIfNeeded().catch(() => {});
         await el.click({ force: true, timeout: 3000 });
         return true;
-    } catch {
+    } catch (e1) {
+        console.log(`getByText"${text}"失败: ${e1.message.substring(0, 100)}`);
         try {
             const pos = await page.evaluate((t) => {
                 const all = document.querySelectorAll('*');
