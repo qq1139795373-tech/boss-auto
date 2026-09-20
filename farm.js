@@ -15,7 +15,23 @@ async function clickText(page, text, timeout = 5000) {
         await el.click({ force: true, timeout: 3000 });
         return true;
     } catch {
-        return false;
+        // 备选：用evaluate直接在DOM里找包含文字的可点击元素
+        try {
+            const clicked = await page.evaluate((t) => {
+                const all = document.querySelectorAll('*');
+                for (const el of all) {
+                    if (el.children.length === 0 && el.textContent.includes(t)) {
+                        el.scrollIntoView();
+                        el.click();
+                        return true;
+                    }
+                }
+                return false;
+            }, text);
+            return clicked;
+        } catch {
+            return false;
+        }
     }
 }
 
