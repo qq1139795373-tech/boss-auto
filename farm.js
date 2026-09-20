@@ -141,38 +141,26 @@ async function run() {
             pageText = await getPageText(page);
 
             if (pageText.includes('经验妖灵')) {
-                console.log(`找到经验妖灵`);
+                console.log('找到经验妖灵');
                 await clickText(page, '经验妖灵');
-                await sleep(300);
+                await sleep(50);
 
-                // 高速攻击：直接用locator点击，缩短超时
-                const attackBtn = page.locator('text=攻击').first();
-                for (let i = 0; i < 20; i++) {
-                    if (await attackBtn.isVisible({ timeout: 200 }).catch(() => false)) {
-                        await attackBtn.click({ force: true }).catch(() => {});
-                        await sleep(50);
-                    } else {
-                        break;
-                    }
-                }
+                // 一击必杀：直接点攻击，不循环
+                await page.locator('text=攻击').first().click({ force: true, timeout: 500 }).catch(() => {});
+                await sleep(50);
 
-                // 快速关闭
-                const closeBtn = page.locator('text=关闭').first();
-                if (await closeBtn.isVisible({ timeout: 1000 }).catch(() => false)) {
-                    await closeBtn.click({ force: true }).catch(() => {});
-                }
-                await sleep(100);
+                // 直接点关闭
+                await page.locator('text=关闭').first().click({ force: true, timeout: 500 }).catch(() => {});
+                await sleep(50);
 
                 count++;
                 console.log(`第 ${count} 次完成`);
             } else {
-                console.log('没找到经验妖灵，刷新...');
+                console.log('页面内容:', pageText.substring(0, 100));
                 await clickText(page, '刷新');
-                await sleep(300);
+                await sleep(50);
             }
         }
-
-        console.log(`打怪结束，共 ${count} 次`);
 
     } catch (e) {
         console.error('错误:', e.message);
