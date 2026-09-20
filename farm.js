@@ -8,12 +8,15 @@ async function sleep(ms) {
 }
 
 async function clickText(page, text, timeout = 5000) {
-    const el = page.getByText(text, { exact: false }).first();
-    if (await el.isVisible({ timeout }).catch(() => false)) {
-        await el.click({ force: true }).catch(() => {});
+    try {
+        const el = page.getByText(text, { exact: false }).first();
+        await el.waitFor({ state: 'attached', timeout });
+        await el.scrollIntoViewIfNeeded().catch(() => {});
+        await el.click({ force: true, timeout: 3000 });
         return true;
+    } catch {
+        return false;
     }
-    return false;
 }
 
 async function getPageText(page) {
@@ -79,8 +82,10 @@ async function run() {
             console.log('不在广州，导航中...');
             await closePopup(page);
 
-            // 如果不在码头，先去码头
-            if (!pageText.includes('出航')) {
+            // 去码头：城内地图→码头导航按钮
+            const atDock = await clickText(page, '出航', 2000);
+            if (!atDock) {
+                // 不在码头，先通过城内地图导航到码头
                 await clickText(page, '城内地图');
                 await sleep(2000);
                 await clickText(page, '码头');
