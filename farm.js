@@ -19,12 +19,20 @@ async function clickText(page, text, timeout = 5000) {
         try {
             const clicked = await page.evaluate((t) => {
                 const all = document.querySelectorAll('*');
+                let best = null;
+                let bestLen = Infinity;
                 for (const el of all) {
-                    if (el.children.length === 0 && el.textContent.includes(t)) {
-                        el.scrollIntoView();
-                        el.click();
-                        return true;
+                    if (el.textContent.includes(t) && el.offsetParent !== null) {
+                        if (el.textContent.length < bestLen) {
+                            best = el;
+                            bestLen = el.textContent.length;
+                        }
                     }
+                }
+                if (best) {
+                    best.scrollIntoView({ block: 'center', inline: 'center' });
+                    best.click();
+                    return true;
                 }
                 return false;
             }, text);
