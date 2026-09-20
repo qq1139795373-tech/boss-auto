@@ -40,8 +40,8 @@ async function clickText(page, text, timeout = 5000) {
                 await page.mouse.click(pos.x, pos.y);
                 return true;
             }
-        } catch {
-            // ignore
+        } catch (e) {
+            console.log(`evaluate点击"${text}"失败: ${e.message}`);
         }
         return false;
     }
@@ -110,19 +110,25 @@ async function run() {
             console.log('不在广州，导航中...');
             await closePopup(page);
 
-            // 去码头：城内地图→码头导航按钮
-            const atDock = await clickText(page, '出航', 2000);
-            if (!atDock) {
-                // 不在码头，先通过城内地图导航到码头
-                await clickText(page, '城内地图');
+            // 先尝试点出航（如果已在码头）
+            let step = await clickText(page, '出航', 2000);
+            console.log(`第一次出航尝试: ${step}`);
+            
+            if (!step) {
+                // 不在码头，需要导航到码头
+                console.log('不在码头，尝试导航到码头...');
+                step = await clickText(page, '城内地图');
+                console.log(`城内地图: ${step}`);
                 await sleep(2000);
-                await clickText(page, '码头');
-                await sleep(2000);
+                
+                step = await clickText(page, '码头');
+                console.log(`码头: ${step}`);
+                await sleep(3000);
+                
+                // 到码头后再点出航
+                step = await clickText(page, '出航');
+                console.log(`第二次出航尝试: ${step}`);
             }
-
-            // 出航到广州
-            let step = await clickText(page, '出航');
-            console.log(`出航: ${step}`);
             await sleep(2000);
             step = await clickText(page, '东亚');
             console.log(`东亚: ${step}`);
