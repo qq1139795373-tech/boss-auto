@@ -15,52 +15,33 @@ async function clickText(page, text, timeout = 5000) {
         await el.click({ force: true, timeout: 3000 });
         return true;
     } catch {
-        // 备选：用evaluate找到元素坐标，再用mouse.click模拟真实点击
         try {
-            const result = await page.evaluate((t) => {
+            const pos = await page.evaluate((t) => {
                 const all = document.querySelectorAll('*');
-                const matches = [];
-                for (const el of all) {
-                    if (el.textContent.includes(t)) {
-                        matches.push({
-                            tag: el.tagName,
-                            text: el.textContent.substring(0, 50),
-                            textLen: el.textContent.length,
-                            visible: el.offsetParent !== null,
-                            rect: el.getBoundingClientRect()
-                        });
-                    }
-                }
-                // 找最小的可见元素
                 let best = null;
                 let bestLen = Infinity;
-                for (const m of matches) {
-                    if (m.visible && m.textLen < bestLen) {
-                        best = m;
-                        bestLen = m.textLen;
-                    }
-                }
-                // 如果没找到可见的，用最小的
-                if (!best) {
-                    for (const m of matches) {
-                        if (m.textLen < bestLen) {
-                            best = m;
-                            bestLen = m.textLen;
+                for (const el of all) {
+                    const rect = el.getBoundingClientRect();
+                    if (el.textContent.includes(t) && rect.width > 0 && rect.height > 0) {
+                        if (el.textContent.length < bestLen) {
+                            best = el;
+                            bestLen = el.textContent.length;
                         }
                     }
                 }
-                return { total: matches.length, matches: matches.slice(0, 5), best };
+                if (best) {
+                    best.scrollIntoView({ block: 'center', inline: 'center' });
+                    const rect = best.getBoundingClientRect();
+                    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+                }
+                return null;
             }, text);
-            console.log(`evaluate搜索"${text}": 找到${result.total}个元素, best=${JSON.stringify(result.best)}`);
-            if (result.best) {
-                const x = result.best.rect.x + result.best.rect.width / 2;
-                const y = result.best.rect.y + result.best.rect.height / 2;
-                console.log(`点击坐标: (${x}, ${y})`);
-                await page.mouse.click(x, y);
+            if (pos && pos.x > 0 && pos.y > 0) {
+                await page.mouse.click(pos.x, pos.y);
                 return true;
             }
-        } catch (e) {
-            console.log(`evaluate点击"${text}"失败: ${e.message}`);
+        } catch {
+            // ignore
         }
         return false;
     }
@@ -113,9 +94,9 @@ async function run() {
         let pageText = await getPageText(page);
         console.log('页面文本前200字:', pageText.substring(0, 200));
 
-        // 尝试关闭弹窗
-        await closePopup(page);
-        await sleep(3000);
+        // 尝试关闭弹窗（只按ESC，不点屏幕避免误操作）
+        await page.keyboard.press('Escape');
+        await sleep(2000);
 
         // 再次检查
         pageText = await getPageText(page);
@@ -127,7 +108,6 @@ async function run() {
             console.log('已在广州');
         } else {
             console.log('不在广州，导航中...');
-            await closePopup(page);
 
             // 先尝试点出航（如果已在码头）
             let step = await clickText(page, '出航', 2000);
