@@ -71,11 +71,11 @@ async function run() {
     const { hour, min } = await getBjTime();
     console.log(`北京时间: ${hour}:${String(min).padStart(2, '0')}`);
 
-    // 只有11:50-12:30才打boss，其他时间跳过
-    if (hour > 12 || (hour === 12 && min >= 30) || hour < 11 || (hour === 11 && min < 50)) {
-        console.log('非boss时间，跳过boss');
-        return;
-    }
+    // TODO: 测试完加回时间检查
+    // if (hour > 12 || (hour === 12 && min >= 30) || hour < 11 || (hour === 11 && min < 50)) {
+    //     console.log('非boss时间，跳过boss');
+    //     return;
+    // }
 
     const browser = await chromium.launch({ headless: true });
     const context = await browser.newContext();
