@@ -17,27 +17,46 @@ async function clickText(page, text, timeout = 5000) {
     } catch {
         // 备选：用evaluate找到元素坐标，再用mouse.click模拟真实点击
         try {
-            const pos = await page.evaluate((t) => {
+            const result = await page.evaluate((t) => {
                 const all = document.querySelectorAll('*');
+                const matches = [];
+                for (const el of all) {
+                    if (el.textContent.includes(t)) {
+                        matches.push({
+                            tag: el.tagName,
+                            text: el.textContent.substring(0, 50),
+                            textLen: el.textContent.length,
+                            visible: el.offsetParent !== null,
+                            rect: el.getBoundingClientRect()
+                        });
+                    }
+                }
+                // 找最小的可见元素
                 let best = null;
                 let bestLen = Infinity;
-                for (const el of all) {
-                    if (el.textContent.includes(t) && el.offsetParent !== null) {
-                        if (el.textContent.length < bestLen) {
-                            best = el;
-                            bestLen = el.textContent.length;
+                for (const m of matches) {
+                    if (m.visible && m.textLen < bestLen) {
+                        best = m;
+                        bestLen = m.textLen;
+                    }
+                }
+                // 如果没找到可见的，用最小的
+                if (!best) {
+                    for (const m of matches) {
+                        if (m.textLen < bestLen) {
+                            best = m;
+                            bestLen = m.textLen;
                         }
                     }
                 }
-                if (best) {
-                    best.scrollIntoView({ block: 'center', inline: 'center' });
-                    const rect = best.getBoundingClientRect();
-                    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-                }
-                return null;
+                return { total: matches.length, matches: matches.slice(0, 5), best };
             }, text);
-            if (pos) {
-                await page.mouse.click(pos.x, pos.y);
+            console.log(`evaluate搜索"${text}": 找到${result.total}个元素, best=${JSON.stringify(result.best)}`);
+            if (result.best) {
+                const x = result.best.rect.x + result.best.rect.width / 2;
+                const y = result.best.rect.y + result.best.rect.height / 2;
+                console.log(`点击坐标: (${x}, ${y})`);
+                await page.mouse.click(x, y);
                 return true;
             }
         } catch (e) {
