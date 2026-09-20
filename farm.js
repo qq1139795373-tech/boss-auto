@@ -15,9 +15,9 @@ async function clickText(page, text, timeout = 5000) {
         await el.click({ force: true, timeout: 3000 });
         return true;
     } catch {
-        // 备选：用evaluate直接在DOM里找包含文字的可点击元素
+        // 备选：用evaluate找到元素坐标，再用mouse.click模拟真实点击
         try {
-            const clicked = await page.evaluate((t) => {
+            const pos = await page.evaluate((t) => {
                 const all = document.querySelectorAll('*');
                 let best = null;
                 let bestLen = Infinity;
@@ -31,15 +31,19 @@ async function clickText(page, text, timeout = 5000) {
                 }
                 if (best) {
                     best.scrollIntoView({ block: 'center', inline: 'center' });
-                    best.click();
-                    return true;
+                    const rect = best.getBoundingClientRect();
+                    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
                 }
-                return false;
+                return null;
             }, text);
-            return clicked;
+            if (pos) {
+                await page.mouse.click(pos.x, pos.y);
+                return true;
+            }
         } catch {
-            return false;
+            // ignore
         }
+        return false;
     }
 }
 
