@@ -8,44 +8,24 @@ async function sleep(ms) {
 }
 
 async function clickText(page, text, timeout = 5000) {
-    try {
-        const el = page.getByText(text, { exact: false }).first();
-        await el.waitFor({ state: 'attached', timeout });
-        await el.scrollIntoViewIfNeeded().catch(() => {});
-        await el.click({ force: true, timeout: 3000 });
+    // 主路径：用isVisible检查元素是否真正可见
+    const el = page.getByText(text, { exact: false }).first();
+    if (await el.isVisible({ timeout }).catch(() => false)) {
+        await el.click({ force: true }).catch(() => {});
         return true;
-    } catch (e1) {
-        console.log(`getByText"${text}"失败: ${e1.message.substring(0, 100)}`);
-        try {
-            const pos = await page.evaluate((t) => {
-                const all = document.querySelectorAll('*');
-                let best = null;
-                let bestLen = Infinity;
-                for (const el of all) {
-                    const rect = el.getBoundingClientRect();
-                    if (el.textContent.includes(t) && rect.width > 0 && rect.height > 0) {
-                        if (el.textContent.length < bestLen) {
-                            best = el;
-                            bestLen = el.textContent.length;
-                        }
-                    }
-                }
-                if (best) {
-                    best.scrollIntoView({ block: 'center', inline: 'center' });
-                    const rect = best.getBoundingClientRect();
-                    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-                }
-                return null;
-            }, text);
-            if (pos && pos.x > 0 && pos.y > 0) {
-                await page.mouse.click(pos.x, pos.y);
-                return true;
-            }
-        } catch {
-            // ignore
-        }
-        return false;
     }
+    // 兜底：先滚动到元素位置，再检查可见性
+    try {
+        await el.scrollIntoViewIfNeeded().catch(() => {});
+        await sleep(500);
+        if (await el.isVisible({ timeout: 2000 }).catch(() => false)) {
+            await el.click({ force: true }).catch(() => {});
+            return true;
+        }
+    } catch {
+        // ignore
+    }
+    return false;
 }
 
 async function getPageText(page) {
@@ -110,25 +90,17 @@ async function run() {
         } else {
             console.log('不在广州，导航中...');
 
-            // 先尝试点出航（如果已在码头）
-            let step = await clickText(page, '出航', 2000);
-            console.log(`第一次出航尝试: ${step}`);
-            
-            if (!step) {
-                // 不在码头，需要导航到码头
-                console.log('不在码头，尝试导航到码头...');
-                step = await clickText(page, '城内地图');
-                console.log(`城内地图: ${step}`);
+            // 如果不在码头，先去码头
+            if (!pageText.includes('出航')) {
+                await clickText(page, '城内地图');
                 await sleep(2000);
-                
-                step = await clickText(page, '码头');
-                console.log(`码头: ${step}`);
-                await sleep(3000);
-                
-                // 到码头后再点出航
-                step = await clickText(page, '出航');
-                console.log(`第二次出航尝试: ${step}`);
+                await clickText(page, '码头');
+                await sleep(2000);
             }
+
+            // 出航到广州
+            let step = await clickText(page, '出航');
+            console.log(`出航: ${step}`);
             await sleep(2000);
             step = await clickText(page, '东亚');
             console.log(`东亚: ${step}`);

@@ -12,43 +12,24 @@ async function getPageText(page) {
 }
 
 async function clickText(page, text, timeout = 5000) {
-    try {
-        const el = page.getByText(text, { exact: false }).first();
-        await el.waitFor({ state: 'attached', timeout });
-        await el.scrollIntoViewIfNeeded().catch(() => {});
-        await el.click({ force: true, timeout: 3000 });
+    // 主路径：用isVisible检查元素是否真正可见
+    const el = page.getByText(text, { exact: false }).first();
+    if (await el.isVisible({ timeout }).catch(() => false)) {
+        await el.click({ force: true }).catch(() => {});
         return true;
-    } catch {
-        try {
-            const pos = await page.evaluate((t) => {
-                const all = document.querySelectorAll('*');
-                let best = null;
-                let bestLen = Infinity;
-                for (const el of all) {
-                    const rect = el.getBoundingClientRect();
-                    if (el.textContent.includes(t) && rect.width > 0 && rect.height > 0) {
-                        if (el.textContent.length < bestLen) {
-                            best = el;
-                            bestLen = el.textContent.length;
-                        }
-                    }
-                }
-                if (best) {
-                    best.scrollIntoView({ block: 'center', inline: 'center' });
-                    const rect = best.getBoundingClientRect();
-                    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-                }
-                return null;
-            }, text);
-            if (pos && pos.x > 0 && pos.y > 0) {
-                await page.mouse.click(pos.x, pos.y);
-                return true;
-            }
-        } catch {
-            // ignore
-        }
-        return false;
     }
+    // 兜底：先滚动到元素位置，再检查可见性
+    try {
+        await el.scrollIntoViewIfNeeded().catch(() => {});
+        await sleep(500);
+        if (await el.isVisible({ timeout: 2000 }).catch(() => false)) {
+            await el.click({ force: true }).catch(() => {});
+            return true;
+        }
+    } catch {
+        // ignore
+    }
+    return false;
 }
 
 async function closePopup(page) {
