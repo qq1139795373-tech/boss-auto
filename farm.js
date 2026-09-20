@@ -53,11 +53,11 @@ async function run() {
         await closePopup(page);
         await sleep(1000);
         await clickText(page, '进入游戏');
-        await sleep(5000);
+        await sleep(8000);
         console.log('进入游戏');
 
         // 等待页面加载完成
-        await sleep(3000);
+        await sleep(5000);
 
         // 检查是否有弹窗并关闭
         let pageText = await getPageText(page);
@@ -65,7 +65,7 @@ async function run() {
 
         // 尝试关闭弹窗
         await closePopup(page);
-        await sleep(2000);
+        await sleep(3000);
 
         // 再次检查
         pageText = await getPageText(page);
