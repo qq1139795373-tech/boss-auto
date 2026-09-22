@@ -79,8 +79,15 @@ async function run() {
             await clickText(page, '进入游戏');
             await sleep(5000);
             let pageText = await getPageText(page);
-            // 如果页面包含游戏内容（非登录页），说明成功
-            if (!pageText.includes('请输入账号密码') && !pageText.includes('登录注册')) {
+            // 如果是选角界面（有"选择角色"或Lv.），需要再点一次进入游戏
+            if (pageText.includes('选择角色') || pageText.includes('Lv.')) {
+                console.log('在选角界面，点击进入游戏选角色...');
+                await clickText(page, '进入游戏');
+                await sleep(5000);
+                pageText = await getPageText(page);
+            }
+            // 如果页面包含游戏内容（有"你看到"或"当前城市"），说明成功
+            if (pageText.includes('你看到') || pageText.includes('当前城市')) {
                 console.log('进入游戏成功');
                 break;
             }
@@ -91,10 +98,10 @@ async function run() {
         // 等待页面加载完成
         await sleep(5000);
 
-        // 最终验证：确认已进入游戏（不是登录页）
+        // 最终验证：确认已进入游戏（不是登录页或选角界面）
         let pageText = await getPageText(page);
-        if (pageText.includes('请输入账号密码') || pageText.includes('登录注册')) {
-            console.log('ERROR: 仍停留在登录页，退出');
+        if (pageText.includes('请输入账号密码') || pageText.includes('登录注册') || pageText.includes('选择角色')) {
+            console.log('ERROR: 未进入游戏主界面，退出');
             await browser.close();
             return;
         }
