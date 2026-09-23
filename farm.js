@@ -58,8 +58,22 @@ async function run() {
         // 登录（带重试）
         for (let attempt = 0; attempt < 3; attempt++) {
             const inputs = await page.$$('input');
-            await inputs[0].fill(ACCOUNT);
-            await inputs[1].fill(PASSWORD);
+            if (inputs.length < 2) {
+                console.log('找不到输入框，刷新页面...');
+                await page.goto('http://yiyu.yiyutx.top/yysh/#/pages/login/login');
+                await page.waitForTimeout(3000);
+                const newInputs = await page.$$('input');
+                if (newInputs.length < 2) {
+                    console.log('刷新后仍找不到输入框，重试...');
+                    await sleep(2000);
+                    continue;
+                }
+                await newInputs[0].fill(ACCOUNT);
+                await newInputs[1].fill(PASSWORD);
+            } else {
+                await inputs[0].fill(ACCOUNT);
+                await inputs[1].fill(PASSWORD);
+            }
             await page.getByText('登录').first().click();
             await sleep(3000);
             console.log(`登录尝试${attempt + 1}`);
