@@ -127,44 +127,6 @@ async function run() {
         await page.keyboard.press('Escape');
         await sleep(2000);
 
-        // 关闭 Cancel Cancel OK 弹窗：用DOM定位OK按钮真实坐标点击
-        pageText = await getPageText(page);
-        if (pageText.includes('Cancel') && pageText.includes('OK')) {
-            console.log('检测到Cancel/OK弹窗，尝试关闭...');
-            await page.screenshot({ path: 'popup-1.png' });
-            for (let p = 0; p < 3; p++) {
-                const pos = await page.evaluate(() => {
-                    const all = document.querySelectorAll('div, span, button, uni-button, text');
-                    let best = null;
-                    for (const el of all) {
-                        const rect = el.getBoundingClientRect();
-                        const t = (el.textContent || '').trim();
-                        // 找最短的、可见的 "OK" 元素
-                        if (t === 'OK' && rect.width > 0 && rect.height > 0) {
-                            best = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-                            break;
-                        }
-                    }
-                    return best;
-                });
-                if (pos) {
-                    console.log(`点OK按钮 (${p + 1}): (${Math.round(pos.x)}, ${Math.round(pos.y)})`);
-                    await page.mouse.click(pos.x, pos.y);
-                    await sleep(1500);
-                } else {
-                    console.log(`OK按钮没找到 (${p + 1})`);
-                    break;
-                }
-                pageText = await getPageText(page);
-                if (!(pageText.includes('Cancel') && pageText.includes('OK'))) {
-                    console.log('弹窗已关闭');
-                    break;
-                }
-            }
-            await page.screenshot({ path: 'popup-2.png' });
-            console.log('弹窗处理完成');
-        }
-
         // 再次检查
         pageText = await getPageText(page);
         console.log('关闭弹窗后前200字:', pageText.substring(0, 200));
@@ -220,53 +182,40 @@ async function run() {
             await sleep(2000);
         }
 
-        // 导航到沙滩
+        // 导航到沙滩（带检测）
         console.log('导航到沙滩...');
-        await clickText(page, '城内地图');
+        let s1 = await clickText(page, '城内地图');
+        console.log(`[nav] 城内地图: ${s1}`);
         await sleep(2000);
-        await clickText(page, '东城门');
+        await page.screenshot({ path: 'nav-1-map.png' });
+
+        let s2 = await clickText(page, '东城门');
+        console.log(`[nav] 东城门: ${s2}`);
         await sleep(2000);
-        await clickText(page, '沙滩294');
+        await page.screenshot({ path: 'nav-2-gate.png' });
+
+        let s3 = await clickText(page, '沙滩294');
+        console.log(`[nav] 沙滩294: ${s3}`);
         await sleep(2000);
-        await clickText(page, '沙滩');
+        await page.screenshot({ path: 'nav-3-294.png' });
+
+        let s4 = await clickText(page, '沙滩');
+        console.log(`[nav] 沙滩: ${s4}`);
         await sleep(2000);
+        await page.screenshot({ path: 'nav-4-beach.png' });
+
+        pageText = await getPageText(page);
+        console.log('[nav] 到达后页面前150字:', pageText.substring(0, 150));
         console.log('到达沙滩');
-
-        // 验证是否真的到了沙滩
-        pageText = await getPageText(page);
-        console.log('导航后页面前150字:', pageText.substring(0, 150));
-        if (!pageText.includes('沙滩')) {
-            console.log('未到达沙滩，重试导航...');
-            await clickText(page, '城内地图');
-            await sleep(2000);
-            await clickText(page, '东城门');
-            await sleep(2000);
-            await clickText(page, '沙滩294');
-            await sleep(2000);
-            await clickText(page, '沙滩');
-            await sleep(3000);
-            pageText = await getPageText(page);
-            console.log('重试后页面前150字:', pageText.substring(0, 150));
-        }
-
-        // 诊断：打印沙滩页面完整文本
-        pageText = await getPageText(page);
-        console.log('沙滩页面文本长度:', pageText.length);
-        console.log('沙滩页面全文:', pageText);
-        console.log('包含"经验妖灵":', pageText.includes('经验妖灵'));
-        console.log('包含"妖灵":', pageText.includes('妖灵'));
-        console.log('包含"经验":', pageText.includes('经验'));
 
         // 循环打经验妖灵
         let count = 0;
-        let noMonsterShots = 0;
         while (true) {
-            // 用locator检测（pageText抓不到所有文本）
-            const hasMonster = await page.locator('text=经验妖灵').first().isVisible().catch(() => false);
+            pageText = await getPageText(page);
 
-            if (hasMonster) {
+            if (pageText.includes('经验妖灵')) {
                 console.log('找到经验妖灵');
-                await page.locator('text=经验妖灵').first().click({ force: true }).catch(() => {});
+                await clickText(page, '经验妖灵');
                 await sleep(50);
 
                 // 一击必杀：直接点攻击，不循环
@@ -280,31 +229,10 @@ async function run() {
                 count++;
                 console.log(`第 ${count} 次完成`);
             } else {
-                const freshText = await getPageText(page);
-                console.log('页面内容:', freshText.substring(0, 500));
-                // 卡住时截图（前3次）
-                if (count === 0 && noMonsterShots < 3) {
-                    noMonsterShots++;
-                    await page.screenshot({ path: `nostuck-${noMonsterShots}.png` });
-                }
-                // 弹窗处理
-                if (freshText.includes('Cancel') && freshText.includes('OK')) {
-                    const pos = await page.evaluate(() => {
-                        const all = document.querySelectorAll('div, span, button, uni-button, text');
-                        for (const el of all) {
-                            const rect = el.getBoundingClientRect();
-                            const t = (el.textContent || '').trim();
-                            if (t === 'OK' && rect.width > 0 && rect.height > 0) {
-                                return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-                            }
-                        }
-                        return null;
-                    });
-                    if (pos) {
-                        console.log(`循环内关弹窗: (${Math.round(pos.x)}, ${Math.round(pos.y)})`);
-                        await page.mouse.click(pos.x, pos.y);
-                        await sleep(500);
-                    }
+                console.log('页面内容:', pageText.substring(0, 100));
+                if (count === 0 && !global.__shot) {
+                    global.__shot = true;
+                    await page.screenshot({ path: 'stuck-beach.png' });
                 }
                 await clickText(page, '刷新');
                 await sleep(50);
