@@ -2,6 +2,8 @@ const { chromium } = require('playwright');
 
 const ACCOUNT = process.env.GAME_ACCOUNT;
 const PASSWORD = process.env.GAME_PASSWORD;
+// BOSS_FORCE=true 时跳过所有时间闸门（测试登录+导航用）
+const FORCE = process.env.BOSS_FORCE === 'true' || process.env.BOSS_FORCE === '1';
 
 async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -53,7 +55,7 @@ async function run() {
     console.log(`北京时间: ${hour}:${String(min).padStart(2, '0')}`);
 
     // 只有11:50-12:30才打boss，其他时间跳过
-    if (hour > 12 || (hour === 12 && min >= 30) || hour < 11 || (hour === 11 && min < 50)) {
+    if (!FORCE && (hour > 12 || (hour === 12 && min >= 30) || hour < 11 || (hour === 11 && min < 50))) {
         console.log('非boss时间，跳过boss');
         return;
     }
@@ -118,7 +120,7 @@ async function run() {
             await sleep(2000);
         }
 
-        if (hour < 12 || (hour === 12 && min === 0)) {
+        if (!FORCE && (hour < 12 || (hour === 12 && min === 0))) {
             console.log('等待boss开放...');
             while (true) {
                 const { hour: h, min: m } = await getBjTime();
@@ -143,7 +145,7 @@ async function run() {
 
         for (let i = 0; i < remainTimes; i++) {
             const { hour: h, min: m } = await getBjTime();
-            if (h !== 12 || m >= 30) {
+            if (!FORCE && (h !== 12 || m >= 30)) {
                 console.log('挑战时间结束');
                 break;
             }
@@ -185,7 +187,7 @@ async function run() {
                         break;
                     }
                     const { hour: h2, min: m2 } = await getBjTime();
-                    if (h2 !== 12 || m2 >= 30) {
+                    if (!FORCE && (h2 !== 12 || m2 >= 30)) {
                         console.log('挑战时间结束');
                         break;
                     }

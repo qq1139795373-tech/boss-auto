@@ -2,11 +2,36 @@ name: Auto Boss
 
 on:
   workflow_dispatch:
+    inputs:
+      force:
+        description: 'BOSS_FORCE: 跳过时间闸门（测试登录+导航用）'
+        type: boolean
+        default: false
 
 jobs:
-  boss:
+  prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - id: set
+        env:
+          JSON: ${{ secrets.GAME_ACCOUNTS_JSON }}
+        run: |
+          if [ -z "$JSON" ]; then
+            echo "错误: 仓库 secret GAME_ACCOUNTS_JSON 未配置"
+            exit 1
+          fi
+          echo "matrix=$JSON" >> "$GITHUB_OUTPUT"
+
+  boss:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        account: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -16,25 +41,20 @@ jobs:
 
       - name: Run Boss
         env:
-          GAME_ACCOUNT: ${{ secrets.GAME_ACCOUNT }}
-          GAME_PASSWORD: ${{ secrets.GAME_PASSWORD }}
+          GAME_ACCOUNT: ${{ matrix.account.account }}
+          GAME_PASSWORD: ${{ matrix.account.password }}
+          BOSS_FORCE: ${{ inputs.force }}
         run: |
           npm install
           npx playwright install chromium
           node index.js
 
-      - name: Run Farm
-        if: success()
-        env:
-          GAME_ACCOUNT: ${{ secrets.GAME_ACCOUNT }}
-          GAME_PASSWORD: ${{ secrets.GAME_PASSWORD }}
-        run: |
-          node farm.js
-
       - name: Upload Screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: screenshots
+          name: screenshots-${{ matrix.account.account }}
           path: "*.png"
           if-no-files-found: ignore
+          compression-level: 6
+          overwrite: false
