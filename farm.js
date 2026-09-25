@@ -205,11 +205,12 @@ async function run() {
         // 循环打经验妖灵
         let count = 0;
         while (true) {
-            pageText = await getPageText(page);
+            // 用locator检测（pageText抓不到所有文本）
+            const hasMonster = await page.locator('text=经验妖灵').first().isVisible().catch(() => false);
 
-            if (pageText.includes('经验妖灵')) {
+            if (hasMonster) {
                 console.log('找到经验妖灵');
-                await clickText(page, '经验妖灵');
+                await page.locator('text=经验妖灵').first().click({ force: true }).catch(() => {});
                 await sleep(50);
 
                 // 一击必杀：直接点攻击，不循环
@@ -223,7 +224,8 @@ async function run() {
                 count++;
                 console.log(`第 ${count} 次完成`);
             } else {
-                console.log('页面内容:', pageText.substring(0, 500));
+                const freshText = await getPageText(page);
+                console.log('页面内容:', freshText.substring(0, 500));
                 await clickText(page, '刷新');
                 await sleep(50);
             }
