@@ -194,6 +194,14 @@ async function run() {
         await sleep(2000);
         console.log('到达沙滩');
 
+        // 诊断：打印沙滩页面完整文本
+        pageText = await getPageText(page);
+        console.log('沙滩页面文本长度:', pageText.length);
+        console.log('沙滩页面全文:', pageText);
+        console.log('包含"经验妖灵":', pageText.includes('经验妖灵'));
+        console.log('包含"妖灵":', pageText.includes('妖灵'));
+        console.log('包含"经验":', pageText.includes('经验'));
+
         // 循环打经验妖灵
         let count = 0;
         while (true) {
@@ -215,7 +223,7 @@ async function run() {
                 count++;
                 console.log(`第 ${count} 次完成`);
             } else {
-                console.log('页面内容:', pageText.substring(0, 100));
+                console.log('页面内容:', pageText.substring(0, 500));
                 await clickText(page, '刷新');
                 await sleep(50);
             }
