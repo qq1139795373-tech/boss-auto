@@ -121,10 +121,15 @@ async function teleportToDest(page) {
         await page.goto('http://yiyu.yiyutx.top/yysh/#/pages/login/login');
         await page.waitForTimeout(3000);
         const inputs = await page.$$('input');
-        await inputs[0].fill(ACCOUNT);
-        await inputs[1].fill(PASSWORD);
-        await page.getByText('登录').first().click();
-        await sleep(3000);
+        if (inputs.length >= 2) {
+            await inputs[0].fill(ACCOUNT);
+            await inputs[1].fill(PASSWORD);
+            await page.getByText('登录').first().click();
+            await sleep(3000);
+        } else {
+            // 会话仍有效时登录页会自动跳回游戏，无需重新填账号
+            console.log('传送兜底: 会话有效，页面已自动进入游戏');
+        }
         await closePopup(page);
         await sleep(1000);
         await clickText(page, '进入游戏');
