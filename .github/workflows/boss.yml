@@ -15,6 +15,10 @@ on:
         description: '测试用：出航区域标签（如 东亚/印度洋）'
         type: string
         default: ''
+      test_fallback:
+        description: '测试用：跳过出航直接走传送兜底'
+        type: boolean
+        default: false
 
 jobs:
   prepare:
@@ -63,6 +67,7 @@ jobs:
           BOSS_FORCE: ${{ inputs.force }}
           NAV_DEST: ${{ inputs.nav_dest }}
           NAV_REGION: ${{ inputs.nav_region }}
+          TEST_FALLBACK: ${{ inputs.test_fallback }}
         run: |
           npm install
           npx playwright install chromium
