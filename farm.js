@@ -32,13 +32,21 @@ async function getPageText(page) {
     return await page.textContent('body').catch(() => '');
 }
 
+// 截取"当前城市"到"【聊天】"之间的地图区块，用于日志观察位置变化
+function mapBlock(txt) {
+    const a = txt.indexOf('当前城市');
+    if (a < 0) return '(无当前城市)';
+    const b = txt.indexOf('【聊天】', a);
+    return txt.substring(a, b > a ? b : a + 120).replace(/\s+/g, ' ');
+}
+
 // JS直接向元素派发鼠标事件，绕过全屏遮罩（城内地图弹窗的遮罩会吃掉坐标点击）
 async function jsClick(page, text, exclude = '') {
     return await page.evaluate(({ t, ex }) => {
         const all = [...document.querySelectorAll('body *')].filter(el => {
             const s = el.textContent || '';
             const r = el.getBoundingClientRect();
-            return el.children.length === 0 && s.includes(t) && !s.includes(ex) &&
+            return el.children.length === 0 && s.includes(t) && (!ex || !s.includes(ex)) &&
                 r.width > 0 && r.height > 0;
         });
         if (!all.length) return false;
@@ -215,16 +223,18 @@ async function run() {
                 console.log('[nav] 已在东城门附近（看到沙滩294）');
                 break;
             }
-            if (!pageText.includes('东城门')) {
-                console.log('[nav] 打开城内地图:', await jsClick(page, '城内地图'));
+            let ok = await jsClick(page, '东城门');
+            if (!ok || i >= 1) {
+                console.log(`[nav] 打开城内地图(${i + 1}):`, await jsClick(page, '城内地图'));
                 await sleep(2000);
+                ok = await jsClick(page, '东城门');
             }
-            console.log(`[nav] 点东城门(${i + 1}):`, await jsClick(page, '东城门'));
+            console.log(`[nav] 点东城门(${i + 1}):`, ok, i >= 1 ? '(经城内地图)' : '(主页面)');
             await sleep(3000);
             await page.screenshot({ path: `nav-2-gate-${i + 1}.png` });
         }
         pageText = await getPageText(page);
-        console.log('[nav] 第1步后前150字:', pageText.substring(0, 150));
+        console.log('[nav] 第1步后地图:', mapBlock(pageText), '| 沙滩294=' + pageText.includes('沙滩294'));
 
         // 第2步：点沙滩294（只在还站在东城门方向上时点）
         for (let i = 0; i < 3; i++) {
@@ -235,7 +245,7 @@ async function run() {
             await page.screenshot({ path: `nav-3-294-${i + 1}.png` });
         }
         pageText = await getPageText(page);
-        console.log('[nav] 第2步后前150字:', pageText.substring(0, 150));
+        console.log('[nav] 第2步后地图:', mapBlock(pageText), '| 东向沙滩294=' + (pageText.includes('东：沙滩294') || pageText.includes('东:沙滩294')));
 
         // 第3步：进沙滩
         for (let i = 0; i < 3; i++) {
@@ -247,7 +257,7 @@ async function run() {
         }
 
         pageText = await getPageText(page);
-        console.log('[nav] 到达后页面前150字:', pageText.substring(0, 150));
+        console.log('[nav] 到达后地图:', mapBlock(pageText), '| 经验妖灵=' + pageText.includes('经验妖灵'));
         console.log('到达沙滩');
 
         // 循环打经验妖灵
