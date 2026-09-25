@@ -127,6 +127,21 @@ async function run() {
         await page.keyboard.press('Escape');
         await sleep(2000);
 
+        // 关闭 Cancel Cancel OK 弹窗（ESC关不掉，需要点OK）
+        pageText = await getPageText(page);
+        if (pageText.includes('Cancel') && pageText.includes('OK')) {
+            console.log('检测到Cancel/OK弹窗，尝试关闭...');
+            await page.getByText('OK', { exact: true }).first().click({ force: true, timeout: 3000 }).catch(() => {});
+            await sleep(1500);
+            // 可能有多层弹窗
+            pageText = await getPageText(page);
+            if (pageText.includes('Cancel') && pageText.includes('OK')) {
+                await page.getByText('OK', { exact: true }).first().click({ force: true, timeout: 3000 }).catch(() => {});
+                await sleep(1500);
+            }
+            console.log('弹窗处理完成');
+        }
+
         // 再次检查
         pageText = await getPageText(page);
         console.log('关闭弹窗后前200字:', pageText.substring(0, 200));
@@ -194,6 +209,23 @@ async function run() {
         await sleep(2000);
         console.log('到达沙滩');
 
+        // 验证是否真的到了沙滩
+        pageText = await getPageText(page);
+        console.log('导航后页面前150字:', pageText.substring(0, 150));
+        if (!pageText.includes('沙滩')) {
+            console.log('未到达沙滩，重试导航...');
+            await clickText(page, '城内地图');
+            await sleep(2000);
+            await clickText(page, '东城门');
+            await sleep(2000);
+            await clickText(page, '沙滩294');
+            await sleep(2000);
+            await clickText(page, '沙滩');
+            await sleep(3000);
+            pageText = await getPageText(page);
+            console.log('重试后页面前150字:', pageText.substring(0, 150));
+        }
+
         // 诊断：打印沙滩页面完整文本
         pageText = await getPageText(page);
         console.log('沙滩页面文本长度:', pageText.length);
@@ -226,6 +258,11 @@ async function run() {
             } else {
                 const freshText = await getPageText(page);
                 console.log('页面内容:', freshText.substring(0, 500));
+                // 弹窗处理
+                if (freshText.includes('Cancel') && freshText.includes('OK')) {
+                    await page.getByText('OK', { exact: true }).first().click({ force: true, timeout: 2000 }).catch(() => {});
+                    await sleep(500);
+                }
                 await clickText(page, '刷新');
                 await sleep(50);
             }
