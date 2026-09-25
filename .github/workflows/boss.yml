@@ -30,3 +30,11 @@ jobs:
           GAME_PASSWORD: ${{ secrets.GAME_PASSWORD }}
         run: |
           node farm.js
+
+      - name: Upload Screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: "*.png"
+          if-no-files-found: ignore

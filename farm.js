@@ -127,18 +127,41 @@ async function run() {
         await page.keyboard.press('Escape');
         await sleep(2000);
 
-        // 关闭 Cancel Cancel OK 弹窗（ESC关不掉，需要点OK）
+        // 关闭 Cancel Cancel OK 弹窗：用DOM定位OK按钮真实坐标点击
         pageText = await getPageText(page);
         if (pageText.includes('Cancel') && pageText.includes('OK')) {
             console.log('检测到Cancel/OK弹窗，尝试关闭...');
-            await page.getByText('OK', { exact: true }).first().click({ force: true, timeout: 3000 }).catch(() => {});
-            await sleep(1500);
-            // 可能有多层弹窗
-            pageText = await getPageText(page);
-            if (pageText.includes('Cancel') && pageText.includes('OK')) {
-                await page.getByText('OK', { exact: true }).first().click({ force: true, timeout: 3000 }).catch(() => {});
-                await sleep(1500);
+            await page.screenshot({ path: 'popup-1.png' });
+            for (let p = 0; p < 3; p++) {
+                const pos = await page.evaluate(() => {
+                    const all = document.querySelectorAll('div, span, button, uni-button, text');
+                    let best = null;
+                    for (const el of all) {
+                        const rect = el.getBoundingClientRect();
+                        const t = (el.textContent || '').trim();
+                        // 找最短的、可见的 "OK" 元素
+                        if (t === 'OK' && rect.width > 0 && rect.height > 0) {
+                            best = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+                            break;
+                        }
+                    }
+                    return best;
+                });
+                if (pos) {
+                    console.log(`点OK按钮 (${p + 1}): (${Math.round(pos.x)}, ${Math.round(pos.y)})`);
+                    await page.mouse.click(pos.x, pos.y);
+                    await sleep(1500);
+                } else {
+                    console.log(`OK按钮没找到 (${p + 1})`);
+                    break;
+                }
+                pageText = await getPageText(page);
+                if (!(pageText.includes('Cancel') && pageText.includes('OK'))) {
+                    console.log('弹窗已关闭');
+                    break;
+                }
             }
+            await page.screenshot({ path: 'popup-2.png' });
             console.log('弹窗处理完成');
         }
 
@@ -236,6 +259,7 @@ async function run() {
 
         // 循环打经验妖灵
         let count = 0;
+        let noMonsterShots = 0;
         while (true) {
             // 用locator检测（pageText抓不到所有文本）
             const hasMonster = await page.locator('text=经验妖灵').first().isVisible().catch(() => false);
@@ -258,10 +282,29 @@ async function run() {
             } else {
                 const freshText = await getPageText(page);
                 console.log('页面内容:', freshText.substring(0, 500));
+                // 卡住时截图（前3次）
+                if (count === 0 && noMonsterShots < 3) {
+                    noMonsterShots++;
+                    await page.screenshot({ path: `nostuck-${noMonsterShots}.png` });
+                }
                 // 弹窗处理
                 if (freshText.includes('Cancel') && freshText.includes('OK')) {
-                    await page.getByText('OK', { exact: true }).first().click({ force: true, timeout: 2000 }).catch(() => {});
-                    await sleep(500);
+                    const pos = await page.evaluate(() => {
+                        const all = document.querySelectorAll('div, span, button, uni-button, text');
+                        for (const el of all) {
+                            const rect = el.getBoundingClientRect();
+                            const t = (el.textContent || '').trim();
+                            if (t === 'OK' && rect.width > 0 && rect.height > 0) {
+                                return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+                            }
+                        }
+                        return null;
+                    });
+                    if (pos) {
+                        console.log(`循环内关弹窗: (${Math.round(pos.x)}, ${Math.round(pos.y)})`);
+                        await page.mouse.click(pos.x, pos.y);
+                        await sleep(500);
+                    }
                 }
                 await clickText(page, '刷新');
                 await sleep(50);
