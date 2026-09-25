@@ -194,6 +194,43 @@ async function run() {
         await sleep(2000);
         await page.screenshot({ path: 'nav-2-gate.png' });
 
+        // dump地图对话框实际文本，看地点名是否变了
+        const popupText = await page.evaluate(() => {
+            const out = [];
+            document.querySelectorAll('*').forEach(p => {
+                const cls = (p.className || '') + ' ' + p.tagName;
+                if (/popup|modal|dialog/i.test(cls)) {
+                    const r = p.getBoundingClientRect();
+                    if (r.width > 50 && r.height > 50) {
+                        out.push(`[${p.tagName}.${p.className}] ${p.innerText}`);
+                    }
+                }
+            });
+            return out.join('\n---\n');
+        });
+        console.log('[nav] 对话框文本 dump:');
+        console.log(popupText || '(未找到popup元素)');
+
+        // 兜底：dump屏幕中央区域所有短文本元素
+        const centerTexts = await page.evaluate(() => {
+            const out = [];
+            document.querySelectorAll('*').forEach(el => {
+                const r = el.getBoundingClientRect();
+                const t = (el.textContent || '').trim();
+                if (t && t.length <= 20 && r.width > 0 && r.height > 0
+                    && r.x > 300 && r.x < 900 && r.y > 150 && r.y < 600
+                    && el.children.length === 0) {
+                    out.push(`"${t}" @(${Math.round(r.x)},${Math.round(r.y)})`);
+                }
+            });
+            return out;
+        });
+        console.log('[nav] 中央区域短文本:', JSON.stringify(centerTexts));
+
+        const bodyText = await getPageText(page);
+        const idx = bodyText.indexOf('东城门');
+        console.log('[nav] 东城门上下文:', bodyText.substring(Math.max(0, idx - 50), idx + 200));
+
         let s3 = await clickText(page, '沙滩294');
         console.log(`[nav] 沙滩294: ${s3}`);
         await sleep(2000);
