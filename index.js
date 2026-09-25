@@ -4,6 +4,9 @@ const ACCOUNT = process.env.GAME_ACCOUNT;
 const PASSWORD = process.env.GAME_PASSWORD;
 // BOSS_FORCE=true 时跳过所有时间闸门（测试登录+导航用）
 const FORCE = process.env.BOSS_FORCE === 'true' || process.env.BOSS_FORCE === '1';
+// 测试用：NAV_DEST/NAV_REGION 覆盖航行目的地（如 广州/东亚），默认孟买/印度洋
+const NAV_DEST = process.env.NAV_DEST || '孟买';
+const NAV_REGION = process.env.NAV_REGION || '印度洋';
 
 async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -32,6 +35,16 @@ async function clickText(page, text, timeout = 5000) {
         // ignore
     }
     return false;
+}
+
+// 精确匹配整段文本的按钮（避免“避战”匹配到“迎战或避战”说明文字、“自动航行”匹配到“停止自动航行”）
+async function clickExact(page, text, timeout = 3000) {
+    try {
+        await page.getByText(text, { exact: true }).first().click({ timeout, force: true });
+        return true;
+    } catch {
+        return false;
+    }
 }
 
 async function closePopup(page) {
@@ -81,10 +94,10 @@ async function run() {
         console.log('2. 进入游戏');
 
         let pageText = await getPageText(page);
-        if (pageText.includes('世界boss') && pageText.includes('当前城市：孟买')) {
-            console.log('3. 已在孟买码头');
+        if (pageText.includes(`当前城市：${NAV_DEST}`)) {
+            console.log(`3. 已在${NAV_DEST}`);
         } else {
-            console.log('3. 不在孟买码头，导航中...');
+            console.log(`3. 不在${NAV_DEST}，导航中...`);
 
             let step = await clickText(page, '出航', 2000);
             if (!step) {
@@ -95,27 +108,58 @@ async function run() {
                 step = await clickText(page, '出航');
             }
             await sleep(2000);
-            await clickText(page, '印度洋');
+            await clickExact(page, NAV_REGION);
             await sleep(1000);
 
+            let picked = false;
             for (let s = 0; s < 5; s++) {
-                if (await clickText(page, '孟买', 2000)) break;
+                if (await clickText(page, NAV_DEST, 2000)) {
+                    await sleep(1500);
+                    if ((await getPageText(page)).includes('出航确认')) {
+                        picked = true;
+                        break;
+                    }
+                }
                 await page.mouse.wheel(0, 300);
                 await sleep(1000);
             }
+            if (!picked) console.log('未看到出航确认框，继续尝试...');
 
-            await sleep(2000);
-            await clickText(page, '立即出发');
             await sleep(1000);
-            await clickText(page, '自动航行');
+            await clickText(page, '立即出发');
+            await sleep(2000);
+            await clickExact(page, '自动航行', 5000);
             console.log('3. 航行中...');
-            for (let w = 0; w < 30; w++) {
+
+            let arrived = false;
+            for (let w = 0; w < 80; w++) {
                 await sleep(3000);
                 const txt = await getPageText(page);
-                if (txt.includes('当前城市：孟买')) {
-                    console.log('到达孟买');
+                if (txt.includes(`当前城市：${NAV_DEST}`)) {
+                    console.log(`到达${NAV_DEST}`);
+                    arrived = true;
                     break;
                 }
+                if (txt.includes('遭遇海盗')) {
+                    console.log('遭遇海盗，选择避战...');
+                    await page.screenshot({ path: 'sail-pirate.png' }).catch(() => {});
+                    await clickExact(page, '避战', 3000);
+                    await sleep(2000);
+                    const t2 = await getPageText(page);
+                    if (t2.includes('成功避战')) console.log('成功避战');
+                    if (!t2.includes('停止自动航行')) {
+                        if (await clickExact(page, '自动航行', 3000)) console.log('恢复自动航行');
+                    }
+                    continue;
+                }
+                if (!txt.includes('停止自动航行') && await clickExact(page, '自动航行', 1500)) {
+                    console.log('自动航行(重新)启动');
+                }
+            }
+            if (!arrived) {
+                const txt = await getPageText(page);
+                console.log('航行未完成，页面文本:', txt.substring(0, 300));
+                await page.screenshot({ path: 'nav-fail.png' }).catch(() => {});
             }
             await sleep(2000);
         }

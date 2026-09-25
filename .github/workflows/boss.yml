@@ -7,6 +7,14 @@ on:
         description: 'BOSS_FORCE: 跳过时间闸门（测试登录+导航用）'
         type: boolean
         default: false
+      nav_dest:
+        description: '测试用：航行目的地（默认孟买，如 广州）'
+        type: string
+        default: ''
+      nav_region:
+        description: '测试用：出航区域标签（如 东亚/印度洋）'
+        type: string
+        default: ''
 
 jobs:
   prepare:
@@ -53,6 +61,8 @@ jobs:
       - name: Run Boss
         env:
           BOSS_FORCE: ${{ inputs.force }}
+          NAV_DEST: ${{ inputs.nav_dest }}
+          NAV_REGION: ${{ inputs.nav_region }}
         run: |
           npm install
           npx playwright install chromium
