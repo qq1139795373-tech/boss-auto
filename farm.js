@@ -32,6 +32,26 @@ async function getPageText(page) {
     return await page.textContent('body').catch(() => '');
 }
 
+// JS直接向元素派发鼠标事件，绕过全屏遮罩（城内地图弹窗的遮罩会吃掉坐标点击）
+async function jsClick(page, text, exclude = '') {
+    return await page.evaluate(({ t, ex }) => {
+        const all = [...document.querySelectorAll('body *')].filter(el => {
+            const s = el.textContent || '';
+            const r = el.getBoundingClientRect();
+            return el.children.length === 0 && s.includes(t) && !s.includes(ex) &&
+                r.width > 0 && r.height > 0;
+        });
+        if (!all.length) return false;
+        all.sort((a, b) => a.textContent.trim().length - b.textContent.trim().length);
+        const el = all.find(e => e.textContent.trim() === t) || all[0];
+        const opts = { bubbles: true, cancelable: true, view: window };
+        for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click']) {
+            el.dispatchEvent(new MouseEvent(type, opts));
+        }
+        return true;
+    }, { t: text, ex: exclude });
+}
+
 async function closePopup(page) {
     // 尝试点击不同位置关闭弹窗
     await page.mouse.click(10, 10);
@@ -182,64 +202,49 @@ async function run() {
             await sleep(2000);
         }
 
-        // 导航到沙滩（带检测）
+        // 导航到沙滩：东城门 -> 沙滩294 -> 沙滩（手机手动验证过的路径）
+        // 到达东城门的标志：主页面出现"东：沙滩294"
         console.log('导航到沙滩...');
-        let s1 = await clickText(page, '城内地图');
-        console.log(`[nav] 城内地图: ${s1}`);
-        await sleep(2000);
-        await page.screenshot({ path: 'nav-1-map.png' });
+        await page.keyboard.press('Escape');
+        await sleep(1000);
 
-        let s2 = await clickText(page, '东城门');
-        console.log(`[nav] 东城门: ${s2}`);
-        await sleep(2000);
-        await page.screenshot({ path: 'nav-2-gate.png' });
+        // 第1步：走到东城门
+        for (let i = 0; i < 4; i++) {
+            pageText = await getPageText(page);
+            if (pageText.includes('沙滩294')) {
+                console.log('[nav] 已在东城门附近（看到沙滩294）');
+                break;
+            }
+            if (!pageText.includes('东城门')) {
+                console.log('[nav] 打开城内地图:', await jsClick(page, '城内地图'));
+                await sleep(2000);
+            }
+            console.log(`[nav] 点东城门(${i + 1}):`, await jsClick(page, '东城门'));
+            await sleep(3000);
+            await page.screenshot({ path: `nav-2-gate-${i + 1}.png` });
+        }
+        pageText = await getPageText(page);
+        console.log('[nav] 第1步后前150字:', pageText.substring(0, 150));
 
-        // dump地图对话框实际文本，看地点名是否变了
-        const popupText = await page.evaluate(() => {
-            const out = [];
-            document.querySelectorAll('*').forEach(p => {
-                const cls = (p.className || '') + ' ' + p.tagName;
-                if (/popup|modal|dialog/i.test(cls)) {
-                    const r = p.getBoundingClientRect();
-                    if (r.width > 50 && r.height > 50) {
-                        out.push(`[${p.tagName}.${p.className}] ${p.innerText}`);
-                    }
-                }
-            });
-            return out.join('\n---\n');
-        });
-        console.log('[nav] 对话框文本 dump:');
-        console.log(popupText || '(未找到popup元素)');
+        // 第2步：点沙滩294（只在还站在东城门方向上时点）
+        for (let i = 0; i < 3; i++) {
+            pageText = await getPageText(page);
+            if (!pageText.includes('东：沙滩294') && !pageText.includes('东:沙滩294')) break;
+            console.log(`[nav] 点沙滩294(${i + 1}):`, await jsClick(page, '沙滩294'));
+            await sleep(3000);
+            await page.screenshot({ path: `nav-3-294-${i + 1}.png` });
+        }
+        pageText = await getPageText(page);
+        console.log('[nav] 第2步后前150字:', pageText.substring(0, 150));
 
-        // 兜底：dump屏幕中央区域所有短文本元素
-        const centerTexts = await page.evaluate(() => {
-            const out = [];
-            document.querySelectorAll('*').forEach(el => {
-                const r = el.getBoundingClientRect();
-                const t = (el.textContent || '').trim();
-                if (t && t.length <= 20 && r.width > 0 && r.height > 0
-                    && r.x > 300 && r.x < 900 && r.y > 150 && r.y < 600
-                    && el.children.length === 0) {
-                    out.push(`"${t}" @(${Math.round(r.x)},${Math.round(r.y)})`);
-                }
-            });
-            return out;
-        });
-        console.log('[nav] 中央区域短文本:', JSON.stringify(centerTexts));
-
-        const bodyText = await getPageText(page);
-        const idx = bodyText.indexOf('东城门');
-        console.log('[nav] 东城门上下文:', bodyText.substring(Math.max(0, idx - 50), idx + 200));
-
-        let s3 = await clickText(page, '沙滩294');
-        console.log(`[nav] 沙滩294: ${s3}`);
-        await sleep(2000);
-        await page.screenshot({ path: 'nav-3-294.png' });
-
-        let s4 = await clickText(page, '沙滩');
-        console.log(`[nav] 沙滩: ${s4}`);
-        await sleep(2000);
-        await page.screenshot({ path: 'nav-4-beach.png' });
+        // 第3步：进沙滩
+        for (let i = 0; i < 3; i++) {
+            pageText = await getPageText(page);
+            if (pageText.includes('经验妖灵')) break;
+            console.log(`[nav] 点沙滩(${i + 1}):`, await jsClick(page, '沙滩', '294'));
+            await sleep(3000);
+            await page.screenshot({ path: `nav-4-beach-${i + 1}.png` });
+        }
 
         pageText = await getPageText(page);
         console.log('[nav] 到达后页面前150字:', pageText.substring(0, 150));
