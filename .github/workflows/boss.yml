@@ -22,7 +22,11 @@ jobs:
             echo "错误: 仓库 secret GAME_ACCOUNTS_JSON 未配置"
             exit 1
           fi
-          echo "matrix=$JSON" >> "$GITHUB_OUTPUT"
+          if ! echo "$JSON" | jq -e 'type=="array" and length>0' >/dev/null; then
+            echo "错误: GAME_ACCOUNTS_JSON 应为非空JSON数组"
+            exit 1
+          fi
+          echo "matrix=$(echo "$JSON" | jq -c '[range(length)]')" >> "$GITHUB_OUTPUT"
 
   boss:
     needs: prepare
@@ -31,7 +35,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        account: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+        idx: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    env:
+      GAME_ACCOUNTS_JSON: ${{ secrets.GAME_ACCOUNTS_JSON }}
     steps:
       - uses: actions/checkout@v4
 
@@ -39,10 +45,13 @@ jobs:
         with:
           node-version: 22
 
+      - name: 解析第idx个账号
+        run: |
+          echo "GAME_ACCOUNT=$(echo "$GAME_ACCOUNTS_JSON" | jq -r '.[${{ matrix.idx }}].account')" >> "$GITHUB_ENV"
+          echo "GAME_PASSWORD=$(echo "$GAME_ACCOUNTS_JSON" | jq -r '.[${{ matrix.idx }}].password')" >> "$GITHUB_ENV"
+
       - name: Run Boss
         env:
-          GAME_ACCOUNT: ${{ matrix.account.account }}
-          GAME_PASSWORD: ${{ matrix.account.password }}
           BOSS_FORCE: ${{ inputs.force }}
         run: |
           npm install
@@ -53,7 +62,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: screenshots-${{ matrix.account.account }}
+          name: screenshots-${{ matrix.idx }}
           path: "*.png"
           if-no-files-found: ignore
           compression-level: 6
