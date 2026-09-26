@@ -208,8 +208,8 @@ async function run() {
     const { hour, min } = await getBjTime();
     console.log(`北京时间: ${hour}:${String(min).padStart(2, '0')}`);
 
-    // 只有11:50-12:30才打boss，其他时间跳过
-    if (!FORCE && (hour > 12 || (hour === 12 && min >= 30) || hour < 11 || (hour === 11 && min < 50))) {
+    // 只有11:45-12:30才打boss，其他时间跳过（11:45出门，12:00开打，兼容3:45 UTC的cron触发）
+    if (!FORCE && (hour > 12 || (hour === 12 && min >= 30) || hour < 11 || (hour === 11 && min < 45))) {
         console.log('非boss时间，跳过boss');
         return;
     }
