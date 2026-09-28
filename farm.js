@@ -2,6 +2,9 @@ const { chromium } = require('playwright');
 
 const ACCOUNT = process.env.GAME_ACCOUNT;
 const PASSWORD = process.env.GAME_PASSWORD;
+// 农场固定去广州沙滩
+const NAV_DEST = '广州';
+const NAV_REGION = '东亚';
 
 async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -71,6 +74,152 @@ async function closePopup(page) {
     // 尝试按ESC
     await page.keyboard.press('Escape');
     await sleep(1000);
+}
+
+// 精确匹配整段文本的按钮（避免“避战”匹配到“迎战或避战”说明文字、“自动航行”匹配到“停止自动航行”）
+async function clickExact(page, text, timeout = 3000) {
+    try {
+        await page.getByText(text, { exact: true }).first().click({ timeout, force: true });
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+// 出航流程：出航菜单→区域→城市→出航确认→自动航行→航行循环（海盗避战/恢复），返回是否到达
+async function sailFlow(page) {
+    let step = await clickText(page, '出航', 2000);
+    if (!step) {
+        await clickText(page, '城内地图');
+        await sleep(2000);
+        await clickText(page, '码头');
+        await sleep(3000);
+        step = await clickText(page, '出航');
+    }
+    await sleep(2000);
+    await clickExact(page, NAV_REGION);
+    await sleep(1000);
+
+    let picked = false;
+    for (let s = 0; s < 5; s++) {
+        if (await clickText(page, NAV_DEST, 2000)) {
+            await sleep(1500);
+            if ((await getPageText(page)).includes('出航确认')) {
+                picked = true;
+                break;
+            }
+        }
+        await page.mouse.wheel(0, 300);
+        await sleep(1000);
+    }
+    if (!picked) console.log('未看到出航确认框，继续尝试...');
+
+    await sleep(1000);
+    await clickText(page, '立即出发');
+    await sleep(2000);
+    await clickExact(page, '自动航行', 5000);
+    console.log('航行中...');
+
+    for (let w = 0; w < 80; w++) {
+        await sleep(3000);
+        const txt = await getPageText(page);
+        if (txt.includes(`当前城市：${NAV_DEST}`)) {
+            console.log(`到达${NAV_DEST}`);
+            return true;
+        }
+        if (txt.includes('遭遇海盗')) {
+            console.log('遭遇海盗，选择避战...');
+            await page.screenshot({ path: 'sail-pirate.png' }).catch(() => {});
+            await clickExact(page, '避战', 3000);
+            await sleep(2000);
+            const t2 = await getPageText(page);
+            if (t2.includes('成功避战')) console.log('成功避战');
+            if (!t2.includes('停止自动航行')) {
+                if (await clickExact(page, '自动航行', 3000)) console.log('恢复自动航行');
+            }
+            continue;
+        }
+        if (!txt.includes('停止自动航行') && await clickExact(page, '自动航行', 1500)) {
+            console.log('自动航行(重新)启动');
+        }
+    }
+    const txt = await getPageText(page);
+    console.log('航行未完成（约5分钟），页面文本:', txt.substring(0, 300));
+    return false;
+}
+
+// 传送兜底：出航流程失败后重新登录 → 码头点传送 → 点目标城市瞬间到达
+async function teleportToDest(page) {
+    console.log('传送兜底: 重新登录游戏...');
+    try {
+        await page.goto('http://yiyu.yiyutx.top/yysh/#/pages/login/login');
+        await page.waitForTimeout(3000);
+        const inputs = await page.$$('input');
+        if (inputs.length >= 2) {
+            await inputs[0].fill(ACCOUNT);
+            await inputs[1].fill(PASSWORD);
+            await page.getByText('登录').first().click();
+            await sleep(3000);
+        } else {
+            // 会话仍有效时登录页会自动跳回游戏，无需重新填账号
+            console.log('传送兜底: 会话有效，页面已自动进入游戏');
+        }
+        await closePopup(page);
+        await sleep(1000);
+        await clickText(page, '进入游戏');
+        await sleep(3000);
+        console.log('传送兜底: 重新登录完成');
+
+        let ok = await clickText(page, '传送', 2000);
+        if (!ok) {
+            await clickText(page, '城内地图');
+            await sleep(2000);
+            await clickText(page, '码头');
+            await sleep(3000);
+            ok = await clickText(page, '传送');
+        }
+        if (!ok) {
+            console.log('传送兜底: 找不到传送入口');
+            await page.screenshot({ path: 'teleport-fail.png' }).catch(() => {});
+            return false;
+        }
+        await sleep(2000);
+
+        await clickExact(page, NAV_REGION);
+        await sleep(1000);
+
+        let picked = false;
+        for (let s = 0; s < 5; s++) {
+            if (await clickText(page, NAV_DEST, 2000)) {
+                picked = true;
+                break;
+            }
+            await page.mouse.wheel(0, 300);
+            await sleep(1000);
+        }
+        if (!picked) console.log('传送兜底: 列表中找不到目的地');
+
+        await sleep(3000);
+        let txt = await getPageText(page);
+        if (!txt.includes(`当前城市：${NAV_DEST}`)) {
+            await clickText(page, '确定');
+            await sleep(2000);
+            await clickText(page, '确认');
+            await sleep(2000);
+            txt = await getPageText(page);
+        }
+        if (txt.includes(`当前城市：${NAV_DEST}`)) {
+            console.log(`传送兜底: 已到达${NAV_DEST}`);
+            return true;
+        }
+        console.log('传送兜底: 未检测到到达，页面文本:', txt.substring(0, 300));
+        await page.screenshot({ path: 'teleport-fail.png' }).catch(() => {});
+        return false;
+    } catch (e) {
+        console.log('传送兜底错误:', e.message);
+        await page.screenshot({ path: 'teleport-fail.png' }).catch(() => {});
+        return false;
+    }
 }
 
 async function run() {
@@ -166,48 +315,23 @@ async function run() {
         } else {
             console.log('不在广州，导航中...');
 
-            // 如果不在码头，先去码头
-            if (!pageText.includes('出航')) {
-                await clickText(page, '城内地图');
-                await sleep(2000);
-                await clickText(page, '码头');
-                await sleep(2000);
-            }
-
-            // 出航到广州
-            let step = await clickText(page, '出航');
-            console.log(`出航: ${step}`);
-            await sleep(2000);
-            step = await clickText(page, '东亚');
-            console.log(`东亚: ${step}`);
-            await sleep(1000);
-
-            // 找广州
-            for (let s = 0; s < 5; s++) {
-                step = await clickText(page, '广州', 2000);
-                console.log(`广州尝试${s + 1}: ${step}`);
-                if (step) break;
-                await page.mouse.wheel(0, 300);
-                await sleep(1000);
-            }
-
-            await sleep(2000);
-            step = await clickText(page, '立即出发');
-            console.log(`立即出发: ${step}`);
-            await sleep(1000);
-            step = await clickText(page, '自动航行');
-            console.log(`自动航行: ${step}`);
-            console.log('航行中...');
-            // 等待到达广州
-            for (let w = 0; w < 30; w++) {
-                await sleep(3000);
-                pageText = await getPageText(page);
-                if (pageText.includes('当前城市：广州')) {
-                    console.log('到达广州');
-                    break;
-                }
+            const arrived = await sailFlow(page);
+            if (!arrived) {
+                console.log('出航约5分钟未完成，改用传送兜底...');
+                await page.screenshot({ path: 'nav-fail.png' }).catch(() => {});
+                await teleportToDest(page);
             }
             await sleep(2000);
+
+            // 严格校验：没到广州绝不往下走（否则会在错误城市空转数小时）
+            pageText = await getPageText(page);
+            if (!pageText.includes('当前城市：广州')) {
+                console.log('未到达广州，跳过农场');
+                await page.screenshot({ path: 'farm-nav-fail.png' }).catch(() => {});
+                await browser.close();
+                return;
+            }
+            console.log('到达广州');
         }
 
         // 导航到沙滩：东城门 -> 沙滩294 -> 沙滩（手机手动验证过的路径）
@@ -258,7 +382,15 @@ async function run() {
 
         pageText = await getPageText(page);
         console.log('[nav] 到达后地图:', mapBlock(pageText), '| 经验妖灵=' + pageText.includes('经验妖灵'));
-        console.log('到达沙滩');
+        if (pageText.includes('经验妖灵') || pageText.includes('当前城市：广州')) {
+            console.log('到达沙滩');
+        } else {
+            // 不在广州时“沙滩导航”会在错误城市空转，直接退出而不是假装到达
+            console.log('不在广州，沙滩导航失败，退出农场');
+            await page.screenshot({ path: 'farm-nav-fail.png' }).catch(() => {});
+            await browser.close();
+            return;
+        }
 
         // 循环打经验妖灵
         let count = 0;
