@@ -2,8 +2,8 @@ const { chromium } = require('playwright');
 
 const ACCOUNT = process.env.GAME_ACCOUNT;
 const PASSWORD = process.env.GAME_PASSWORD;
-// 农场固定去广州沙滩
-const NAV_DEST = '广州';
+// 农场固定去杭州西湖打水怪
+const NAV_DEST = '杭州';
 const NAV_REGION = '东亚';
 
 async function sleep(ms) {
@@ -33,26 +33,6 @@ async function clickText(page, text, timeout = 5000) {
 
 async function getPageText(page) {
     return await page.textContent('body').catch(() => '');
-}
-
-// 轮询选择器变为可见，返回等待毫秒数；超时返回 -1
-async function waitUntil(page, selector, timeoutMs, every = 10) {
-    const t0 = Date.now();
-    while (Date.now() - t0 < timeoutMs) {
-        if (await page.locator(selector).first().isVisible().catch(() => false)) return Date.now() - t0;
-        await sleep(every);
-    }
-    return -1;
-}
-
-// 轮询选择器消失（只观察不点击），返回等待毫秒数；超时返回 -1
-async function waitUntilGone(page, selector, timeoutMs, every = 10) {
-    const t0 = Date.now();
-    while (Date.now() - t0 < timeoutMs) {
-        if (!(await page.locator(selector).first().isVisible().catch(() => false))) return Date.now() - t0;
-        await sleep(every);
-    }
-    return -1;
 }
 
 // 截取"当前城市"到"【聊天】"之间的地图区块，用于日志观察位置变化
@@ -253,7 +233,7 @@ async function run() {
         await page.waitForTimeout(3000);
 
         // 登录（带重试）
-        for (let attempt = 0; attempt < 3; attempt++) {
+        for (let attempt = 0; attempt < 10; attempt++) {
             const inputs = await page.$$('input');
             if (inputs.length < 2) {
                 console.log('找不到输入框，刷新页面...');
@@ -286,7 +266,7 @@ async function run() {
         }
 
         // 点击进入游戏（带重试）
-        for (let i = 0; i < 3; i++) {
+        for (let i = 0; i < 10; i++) {
             await clickText(page, '进入游戏');
             await sleep(5000);
             let pageText = await getPageText(page);
@@ -328,12 +308,12 @@ async function run() {
         pageText = await getPageText(page);
         console.log('关闭弹窗后前200字:', pageText.substring(0, 200));
 
-        // 检查是否在广州
+        // 检查是否在杭州
         pageText = await getPageText(page);
-        if (pageText.includes('当前城市：广州')) {
-            console.log('已在广州');
+        if (pageText.includes('当前城市：杭州')) {
+            console.log('已在杭州');
         } else {
-            console.log('不在广州，导航中...');
+            console.log('不在杭州，导航中...');
 
             const arrived = await sailFlow(page);
             if (!arrived) {
@@ -343,158 +323,104 @@ async function run() {
             }
             await sleep(2000);
 
-            // 严格校验：没到广州绝不往下走（否则会在错误城市空转数小时）
+            // 严格校验：没到杭州绝不往下走（否则会在错误城市空转数小时）
             pageText = await getPageText(page);
-            if (!pageText.includes('当前城市：广州')) {
-                console.log('未到达广州，跳过农场');
+            if (!pageText.includes('当前城市：杭州')) {
+                console.log('未到达杭州，跳过农场');
                 await page.screenshot({ path: 'farm-nav-fail.png' }).catch(() => {});
                 await browser.close();
                 return;
             }
-            console.log('到达广州');
+            console.log('到达杭州');
         }
 
-        // 导航到沙滩：东城门 -> 沙滩294 -> 沙滩（手机手动验证过的路径）
-        // 到达东城门的标志：主页面出现"东：沙滩294"
-        console.log('导航到沙滩...');
+        // 导航到西湖：西城门 -> 龙井村 -> 西湖（手机手动验证过的路径）
+        // 到达西城门的标志：状态行出现"西：龙井村"
+        console.log('导航到西湖...');
         await page.keyboard.press('Escape');
         await sleep(1000);
 
-        // 第1步：走到东城门
+        // 第1步：走到西城门
         for (let i = 0; i < 4; i++) {
             pageText = await getPageText(page);
-            if (pageText.includes('沙滩294')) {
-                console.log('[nav] 已在东城门附近（看到沙滩294）');
+            if (pageText.includes('西：龙井村') || pageText.includes('西:龙井村')) {
+                console.log('[nav] 已在西城门（看到龙井村）');
                 break;
             }
-            let ok = await jsClick(page, '东城门');
+            let ok = await jsClick(page, '西城门');
             if (!ok || i >= 1) {
                 console.log(`[nav] 打开城内地图(${i + 1}):`, await jsClick(page, '城内地图'));
                 await sleep(2000);
-                ok = await jsClick(page, '东城门');
+                ok = await jsClick(page, '西城门');
             }
-            console.log(`[nav] 点东城门(${i + 1}):`, ok, i >= 1 ? '(经城内地图)' : '(主页面)');
+            console.log(`[nav] 点西城门(${i + 1}):`, ok, i >= 1 ? '(经城内地图)' : '(主页面)');
             await sleep(3000);
             await page.screenshot({ path: `nav-2-gate-${i + 1}.png` });
         }
         pageText = await getPageText(page);
-        console.log('[nav] 第1步后地图:', mapBlock(pageText), '| 沙滩294=' + pageText.includes('沙滩294'));
+        console.log('[nav] 第1步后地图:', mapBlock(pageText), '| 西向龙井村=' + (pageText.includes('西：龙井村') || pageText.includes('西:龙井村')));
 
-        // 第2步：点沙滩294（只在还站在东城门方向上时点）
+        // 第2步：点龙井村（只在还站在西城门方向上时点）
         for (let i = 0; i < 3; i++) {
             pageText = await getPageText(page);
-            if (!pageText.includes('东：沙滩294') && !pageText.includes('东:沙滩294')) break;
-            console.log(`[nav] 点沙滩294(${i + 1}):`, await jsClick(page, '沙滩294'));
+            if (!pageText.includes('西：龙井村') && !pageText.includes('西:龙井村')) break;
+            console.log(`[nav] 点龙井村(${i + 1}):`, await jsClick(page, '龙井村'));
             await sleep(3000);
-            await page.screenshot({ path: `nav-3-294-${i + 1}.png` });
+            await page.screenshot({ path: `nav-3-ljc-${i + 1}.png` });
         }
         pageText = await getPageText(page);
-        console.log('[nav] 第2步后地图:', mapBlock(pageText), '| 东向沙滩294=' + (pageText.includes('东：沙滩294') || pageText.includes('东:沙滩294')));
+        console.log('[nav] 第2步后地图:', mapBlock(pageText), '| 北向西湖=' + (pageText.includes('北：西湖') || pageText.includes('北:西湖')));
 
-        // 第3步：进沙滩
+        // 第3步：进西湖
         for (let i = 0; i < 3; i++) {
             pageText = await getPageText(page);
-            if (pageText.includes('经验妖灵')) break;
-            console.log(`[nav] 点沙滩(${i + 1}):`, await jsClick(page, '沙滩', '294'));
+            if (pageText.includes('水怪')) break;
+            console.log(`[nav] 点西湖(${i + 1}):`, await jsClick(page, '西湖'));
             await sleep(3000);
-            await page.screenshot({ path: `nav-4-beach-${i + 1}.png` });
+            await page.screenshot({ path: `nav-4-xihu-${i + 1}.png` });
         }
 
         pageText = await getPageText(page);
-        console.log('[nav] 到达后地图:', mapBlock(pageText), '| 经验妖灵=' + pageText.includes('经验妖灵'));
-        if (pageText.includes('经验妖灵') || pageText.includes('当前城市：广州')) {
-            console.log('到达沙滩');
+        console.log('[nav] 到达后地图:', mapBlock(pageText), '| 水怪=' + pageText.includes('水怪'));
+        if (pageText.includes('水怪') || pageText.includes('当前城市：杭州')) {
+            console.log('到达西湖');
         } else {
-            // 不在广州时“沙滩导航”会在错误城市空转，直接退出而不是假装到达
-            console.log('不在广州，沙滩导航失败，退出农场');
+            // 不在杭州时“西湖导航”会在错误城市空转，直接退出而不是假装到达
+            console.log('不在杭州，西湖导航失败，退出农场');
             await page.screenshot({ path: 'farm-nav-fail.png' }).catch(() => {});
             await browser.close();
             return;
         }
 
-        // 循环打经验妖灵（事件驱动两刀版）
+        // 循环打水怪（选怪→50→攻击→50→关闭→50，一刀一个）
         let count = 0;
-        let failShot = false;
-        let r1Captured = false;
         while (true) {
-            const t0 = Date.now();
+            pageText = await getPageText(page);
 
-            // 阶段1：等上一局结算面板真正移除（只轮询不重点，重点会拖慢移除）
-            let tGone = -2;
-            if (await page.locator('text=你战胜了 >> visible=true').first().isVisible().catch(() => false)) {
-                tGone = await waitUntilGone(page, 'text=你战胜了 >> visible=true', 1500);
-            }
+            if (pageText.includes('水怪')) {
+                console.log('找到水怪');
+                await clickText(page, '水怪');
+                await sleep(50);
 
-            // 阶段2：选怪
-            const tSel = await waitUntil(page, 'text=经验妖灵 >> visible=true', 1500);
-            if (tSel < 0) {
-                console.log('页面内容:', (await getPageText(page)).substring(0, 100));
+                // 一击必杀：直接点攻击，不循环
+                await page.locator('text=攻击').first().click({ force: true, timeout: 500 }).catch(() => {});
+                await sleep(50);
+
+                // 直接点关闭
+                await page.locator('text=关闭').first().click({ force: true, timeout: 500 }).catch(() => {});
+                await sleep(50);
+
+                count++;
+                console.log(`第 ${count} 次完成`);
+            } else {
+                console.log('页面内容:', pageText.substring(0, 100));
                 if (count === 0 && !global.__shot) {
                     global.__shot = true;
                     await page.screenshot({ path: 'stuck-beach.png' });
                 }
                 await clickText(page, '刷新');
                 await sleep(50);
-                continue;
             }
-            await page.locator('text=经验妖灵 >> visible=true').first().click({ force: true, timeout: 500 }).catch(() => {});
-
-            // 阶段3：等战斗打开（可见攻击按钮）
-            const tOpen = await waitUntil(page, 'text=攻击 >> visible=true', 1000);
-            if (tOpen < 0) {
-                if (!failShot) { failShot = true; await page.screenshot({ path: 'fail-nobattle.png' }).catch(() => {}); }
-                console.log(`[ed] 战斗未打开，跳过`);
-                await clickText(page, '关闭');
-                await clickText(page, '刷新');
-                await sleep(50);
-                continue;
-            }
-
-            // 阶段4：第一刀，盯"第1回合"出现（结算完可落第二刀）或暴击早胜
-            const tA1 = Date.now();
-            const a1 = await page.locator('text=攻击 >> visible=true').first().click({ force: true, timeout: 500 }).then(() => true).catch(() => false);
-            const msA1 = Date.now() - tA1;
-            let wonEarly = false;
-            const tR1 = Date.now();
-            while (Date.now() - tR1 < 300) {
-                if (await page.locator('text=你战胜了 >> visible=true').first().isVisible().catch(() => false)) { wonEarly = true; break; }
-                if (await page.locator('text=第1回合 >> visible=true').first().isVisible().catch(() => false)) break;
-                await sleep(10);
-            }
-            const msR1 = Date.now() - tR1;
-
-            let a2 = false, msA2 = 0;
-            if (!wonEarly) {
-                if (process.env.FARM_DEBUG === '1' && !r1Captured) {
-                    r1Captured = true;
-                    const bt = await getPageText(page);
-                    const i = bt.indexOf('自动攻击');
-                    console.log('[ed] 第一刀后战斗文本:', i >= 0 ? bt.substring(i, i + 300) : bt.substring(0, 300));
-                }
-                const tA2 = Date.now();
-                a2 = await page.locator('text=攻击 >> visible=true').first().click({ force: true, timeout: 500 }).then(() => true).catch(() => false);
-                msA2 = Date.now() - tA2;
-            }
-
-            // 阶段5：等胜利结算
-            const tWin = wonEarly ? msR1 : await waitUntil(page, 'text=你战胜了 >> visible=true', 2000);
-            if (tWin < 0) {
-                if (!failShot) { failShot = true; await page.screenshot({ path: 'fail-nowin.png' }).catch(() => {}); }
-                console.log(`[ed] 未见胜利，跳过 a1=${a1} a2=${a2}`);
-                await clickText(page, '关闭');
-                await sleep(50);
-                continue;
-            }
-
-            // 阶段6：点关闭启动面板移除（下一轮开头等它消失）
-            await page.locator('text=关闭 >> visible=true').first().click({ force: true, timeout: 500 }).catch(() => {});
-
-            count++;
-            const total = Date.now() - t0;
-            if (process.env.FARM_DEBUG === '1') {
-                console.log(`[ed] 第${count}杀 面板移除=${tGone} 选怪=${tSel} 战斗开=${tOpen} 攻击1=${a1}(${msA1}ms) 首刀结算=${msR1} 早胜=${wonEarly ? 1 : 0} 攻击2=${a2}(${msA2}ms) 胜利=${tWin} 总=${total}ms`);
-            }
-            console.log(`第 ${count} 次完成`);
         }
 
     } catch (e) {
