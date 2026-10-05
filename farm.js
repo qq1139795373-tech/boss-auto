@@ -35,6 +35,26 @@ async function getPageText(page) {
     return await page.textContent('body').catch(() => '');
 }
 
+// 轮询选择器变为可见，返回等待毫秒数；超时返回 -1
+async function waitUntil(page, selector, timeoutMs, every = 10) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+        if (await page.locator(selector).first().isVisible().catch(() => false)) return Date.now() - t0;
+        await sleep(every);
+    }
+    return -1;
+}
+
+// 轮询选择器消失（只观察不点击），返回等待毫秒数；超时返回 -1
+async function waitUntilGone(page, selector, timeoutMs, every = 10) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+        if (!(await page.locator(selector).first().isVisible().catch(() => false))) return Date.now() - t0;
+        await sleep(every);
+    }
+    return -1;
+}
+
 // 截取"当前城市"到"【聊天】"之间的地图区块，用于日志观察位置变化
 function mapBlock(txt) {
     const a = txt.indexOf('当前城市');
@@ -392,73 +412,89 @@ async function run() {
             return;
         }
 
-        // 循环打经验妖灵
+        // 循环打经验妖灵（事件驱动两刀版）
         let count = 0;
+        let failShot = false;
+        let r1Captured = false;
         while (true) {
-            pageText = await getPageText(page);
+            const t0 = Date.now();
 
-            if (pageText.includes('经验妖灵')) {
-                console.log('找到经验妖灵');
-                const sel = await clickText(page, '经验妖灵');
+            // 阶段1：等上一局结算面板真正移除（只轮询不重点，重点会拖慢移除）
+            let tGone = -2;
+            if (await page.locator('text=你战胜了 >> visible=true').first().isVisible().catch(() => false)) {
+                tGone = await waitUntilGone(page, 'text=你战胜了 >> visible=true', 1500);
+            }
 
-                // 两刀一怪：选怪-攻击-攻击-关闭
-                const tA1 = Date.now();
-                const a1 = await page.locator('text=攻击').first().click({ force: true, timeout: 500 }).then(() => true).catch(() => false);
-                const msA1 = Date.now() - tA1;
-                await sleep(200);
-                const tA2 = Date.now();
-                const a2 = await page.locator('text=攻击').first().click({ force: true, timeout: 500 }).then(() => true).catch(() => false);
-                const msA2 = Date.now() - tA2;
-
-                if (process.env.FARM_DEBUG === '1') {
-                    if (!a2 && global.__a2Shot === undefined) {
-                        global.__a2Shot = true;
-                        await page.screenshot({ path: 'debug-a2fail.png' }).catch(() => {});
-                        console.log('[调试] a2失败瞬间页面:', (await getPageText(page)).substring(0, 200));
-                    }
-                    const t0 = Date.now();
-                    let won = false;
-                    for (let w = 0; w < 20; w++) {
-                        if ((await getPageText(page)).includes('你战胜了')) { won = true; break; }
-                        await sleep(100);
-                    }
-                    console.log(`[调试] 选怪=${sel} 攻击1=${a1}(${msA1}ms) 攻击2=${a2}(${msA2}ms) ${won ? `胜利+${Date.now() - t0}ms` : `${Date.now() - t0}ms未见胜利`}`);
-                    if (!won && global.__failShot === undefined) {
-                        global.__failShot = true;
-                        await page.screenshot({ path: 'debug-fail.png' }).catch(() => {});
-                    }
-                }
-
-                // 直接点关闭，并等结算框真正消失（面板点关后会慢半拍才移除）
-                const tClose = Date.now();
-                await page.locator('text=关闭').first().click({ force: true, timeout: 2000 }).catch(() => {});
-                const msClose = Date.now() - tClose;
-                const tGone = Date.now();
-                for (let w = 0; w < 15 && await page.locator('text=关闭').first().isVisible().catch(() => false); w++) {
-                    await page.locator('text=关闭').first().click({ force: true, timeout: 500 }).catch(() => {});
-                    await sleep(200);
-                }
-                const msGone = Date.now() - tGone;
-
-                if (process.env.FARM_DEBUG === '1') {
-                    const left = await page.locator('text=关闭').first().isVisible().catch(() => false);
-                    console.log(left ? '[调试] 关闭后结算框仍在' : `[调试] 结算框已关 关闭=${msClose}ms 残留=${msGone}ms`);
-                }
-
-                // 残留轮询已等结算框消失，再等300ms过场景切换（砍太狠会点不进下一场战斗）
-                await sleep(300);
-
-                count++;
-                console.log(`第 ${count} 次完成`);
-            } else {
-                console.log('页面内容:', pageText.substring(0, 100));
+            // 阶段2：选怪
+            const tSel = await waitUntil(page, 'text=经验妖灵 >> visible=true', 1500);
+            if (tSel < 0) {
+                console.log('页面内容:', (await getPageText(page)).substring(0, 100));
                 if (count === 0 && !global.__shot) {
                     global.__shot = true;
                     await page.screenshot({ path: 'stuck-beach.png' });
                 }
                 await clickText(page, '刷新');
                 await sleep(50);
+                continue;
             }
+            await page.locator('text=经验妖灵 >> visible=true').first().click({ force: true, timeout: 500 }).catch(() => {});
+
+            // 阶段3：等战斗打开（可见攻击按钮）
+            const tOpen = await waitUntil(page, 'text=攻击 >> visible=true', 1000);
+            if (tOpen < 0) {
+                if (!failShot) { failShot = true; await page.screenshot({ path: 'fail-nobattle.png' }).catch(() => {}); }
+                console.log(`[ed] 战斗未打开，跳过`);
+                await clickText(page, '关闭');
+                await clickText(page, '刷新');
+                await sleep(50);
+                continue;
+            }
+
+            // 阶段4：第一刀，盯"第1回合"出现（结算完可落第二刀）或暴击早胜
+            const tA1 = Date.now();
+            const a1 = await page.locator('text=攻击 >> visible=true').first().click({ force: true, timeout: 500 }).then(() => true).catch(() => false);
+            const msA1 = Date.now() - tA1;
+            let wonEarly = false;
+            const tR1 = Date.now();
+            while (Date.now() - tR1 < 300) {
+                if (await page.locator('text=你战胜了 >> visible=true').first().isVisible().catch(() => false)) { wonEarly = true; break; }
+                if (await page.locator('text=第1回合 >> visible=true').first().isVisible().catch(() => false)) break;
+                await sleep(10);
+            }
+            const msR1 = Date.now() - tR1;
+
+            let a2 = false, msA2 = 0;
+            if (!wonEarly) {
+                if (process.env.FARM_DEBUG === '1' && !r1Captured) {
+                    r1Captured = true;
+                    const bt = await getPageText(page);
+                    const i = bt.indexOf('自动攻击');
+                    console.log('[ed] 第一刀后战斗文本:', i >= 0 ? bt.substring(i, i + 300) : bt.substring(0, 300));
+                }
+                const tA2 = Date.now();
+                a2 = await page.locator('text=攻击 >> visible=true').first().click({ force: true, timeout: 500 }).then(() => true).catch(() => false);
+                msA2 = Date.now() - tA2;
+            }
+
+            // 阶段5：等胜利结算
+            const tWin = wonEarly ? msR1 : await waitUntil(page, 'text=你战胜了 >> visible=true', 2000);
+            if (tWin < 0) {
+                if (!failShot) { failShot = true; await page.screenshot({ path: 'fail-nowin.png' }).catch(() => {}); }
+                console.log(`[ed] 未见胜利，跳过 a1=${a1} a2=${a2}`);
+                await clickText(page, '关闭');
+                await sleep(50);
+                continue;
+            }
+
+            // 阶段6：点关闭启动面板移除（下一轮开头等它消失）
+            await page.locator('text=关闭 >> visible=true').first().click({ force: true, timeout: 500 }).catch(() => {});
+
+            count++;
+            const total = Date.now() - t0;
+            if (process.env.FARM_DEBUG === '1') {
+                console.log(`[ed] 第${count}杀 面板移除=${tGone} 选怪=${tSel} 战斗开=${tOpen} 攻击1=${a1}(${msA1}ms) 首刀结算=${msR1} 早胜=${wonEarly ? 1 : 0} 攻击2=${a2}(${msA2}ms) 胜利=${tWin} 总=${total}ms`);
+            }
+            console.log(`第 ${count} 次完成`);
         }
 
     } catch (e) {
