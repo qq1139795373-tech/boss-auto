@@ -233,7 +233,7 @@ async function run() {
         await page.waitForTimeout(3000);
 
         // 登录（带重试）
-        for (let attempt = 0; attempt < 3; attempt++) {
+        for (let attempt = 0; attempt < 10; attempt++) {
             const inputs = await page.$$('input');
             if (inputs.length < 2) {
                 console.log('找不到输入框，刷新页面...');
@@ -266,7 +266,7 @@ async function run() {
         }
 
         // 点击进入游戏（带重试）
-        for (let i = 0; i < 3; i++) {
+        for (let i = 0; i < 10; i++) {
             await clickText(page, '进入游戏');
             await sleep(5000);
             let pageText = await getPageText(page);
