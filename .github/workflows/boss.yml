@@ -43,7 +43,7 @@ jobs:
   boss:
     needs: prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -72,6 +72,10 @@ jobs:
           npm install
           npx playwright install chromium
           node index.js
+
+      - name: Run Farm
+        if: ${{ !inputs.force }}
+        run: node farm.js
 
       - name: Upload Screenshots
         if: always()
