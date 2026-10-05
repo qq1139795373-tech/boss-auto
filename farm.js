@@ -236,11 +236,22 @@ async function run() {
         for (let attempt = 0; attempt < 10; attempt++) {
             const inputs = await page.$$('input');
             if (inputs.length < 2) {
+                // 会话已生效时登录页无表单（直接停在游戏/选角页），跳过登录
+                let t = await getPageText(page);
+                if (t.includes('进入游戏') || t.includes('你看到') || t.includes('当前城市')) {
+                    console.log('无表单但已在游戏流程中（会话有效），跳过登录');
+                    break;
+                }
                 console.log('找不到输入框，刷新页面...');
                 await page.goto('http://yiyu.yiyutx.top/yysh/#/pages/login/login');
                 await page.waitForTimeout(3000);
                 const newInputs = await page.$$('input');
                 if (newInputs.length < 2) {
+                    t = await getPageText(page);
+                    if (t.includes('进入游戏') || t.includes('你看到') || t.includes('当前城市')) {
+                        console.log('无表单但已在游戏流程中（会话有效），跳过登录');
+                        break;
+                    }
                     console.log('刷新后仍找不到输入框，重试...');
                     await sleep(2000);
                     continue;
@@ -255,10 +266,14 @@ async function run() {
             await sleep(3000);
             console.log(`登录尝试${attempt + 1}`);
 
-            // 检查是否出现"进入游戏"
+            // 检查是否出现"进入游戏"或已直接进入游戏主界面
             let pageText = await getPageText(page);
             if (pageText.includes('进入游戏')) {
                 console.log('登录成功，进入游戏');
+                break;
+            }
+            if (pageText.includes('你看到') || pageText.includes('当前城市')) {
+                console.log('登录成功，已在游戏内');
                 break;
             }
             console.log('登录未成功，重试...');
