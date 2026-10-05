@@ -400,13 +400,15 @@ async function run() {
             if (pageText.includes('经验妖灵')) {
                 console.log('找到经验妖灵');
                 const sel = await clickText(page, '经验妖灵');
-                await sleep(50);
 
-                // 两刀一怪：选怪-攻击-攻击-关闭（间隔半秒让第一刀先结算）
+                // 两刀一怪：选怪-攻击-攻击-关闭
+                const tA1 = Date.now();
                 const a1 = await page.locator('text=攻击').first().click({ force: true, timeout: 500 }).then(() => true).catch(() => false);
-                await sleep(500);
+                const msA1 = Date.now() - tA1;
+                await sleep(200);
+                const tA2 = Date.now();
                 const a2 = await page.locator('text=攻击').first().click({ force: true, timeout: 500 }).then(() => true).catch(() => false);
-                await sleep(50);
+                const msA2 = Date.now() - tA2;
 
                 if (process.env.FARM_DEBUG === '1') {
                     if (!a2 && global.__a2Shot === undefined) {
@@ -420,7 +422,7 @@ async function run() {
                         if ((await getPageText(page)).includes('你战胜了')) { won = true; break; }
                         await sleep(100);
                     }
-                    console.log(`[调试] 选怪=${sel} 攻击1=${a1} 攻击2=${a2} ${won ? `胜利+${Date.now() - t0}ms` : `${Date.now() - t0}ms未见胜利`}`);
+                    console.log(`[调试] 选怪=${sel} 攻击1=${a1}(${msA1}ms) 攻击2=${a2}(${msA2}ms) ${won ? `胜利+${Date.now() - t0}ms` : `${Date.now() - t0}ms未见胜利`}`);
                     if (!won && global.__failShot === undefined) {
                         global.__failShot = true;
                         await page.screenshot({ path: 'debug-fail.png' }).catch(() => {});
@@ -428,19 +430,23 @@ async function run() {
                 }
 
                 // 直接点关闭，并等结算框真正消失（面板点关后会慢半拍才移除）
+                const tClose = Date.now();
                 await page.locator('text=关闭').first().click({ force: true, timeout: 2000 }).catch(() => {});
+                const msClose = Date.now() - tClose;
+                const tGone = Date.now();
                 for (let w = 0; w < 15 && await page.locator('text=关闭').first().isVisible().catch(() => false); w++) {
                     await page.locator('text=关闭').first().click({ force: true, timeout: 500 }).catch(() => {});
                     await sleep(200);
                 }
+                const msGone = Date.now() - tGone;
 
                 if (process.env.FARM_DEBUG === '1') {
                     const left = await page.locator('text=关闭').first().isVisible().catch(() => false);
-                    console.log(left ? '[调试] 关闭后结算框仍在' : '[调试] 结算框已关');
+                    console.log(left ? '[调试] 关闭后结算框仍在' : `[调试] 结算框已关 关闭=${msClose}ms 残留=${msGone}ms`);
                 }
 
-                // 等结算框关闭后的场景切换稳定，太快点下一只会点不进战斗
-                await sleep(1000);
+                // 残留轮询已等结算框消失，再等300ms过场景切换（砍太狠会点不进下一场战斗）
+                await sleep(300);
 
                 count++;
                 console.log(`第 ${count} 次完成`);
