@@ -488,7 +488,7 @@ async function run() {
                 const tail = pageText.includes('水怪')
                     ? ''
                     : ` | 未见水怪，页面: ${pageText.substring(0, 80)}`;
-                console.log(`农场进行中：已完成 ${count} 次，已运行 ${mins} 分钟${tail}`);
+                console.log(`打怪进行中：已完成 ${count} 次，已运行 ${mins} 分钟${tail}`);
             }
         }
 

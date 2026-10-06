@@ -12,6 +12,23 @@ async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+async function gotoGame(page, retries = 3) {
+    // runner到游戏服务器慢时，等load事件会30s超时；domcontentloaded不等全量资源，失败重试
+    for (let i = 1; i <= retries; i++) {
+        try {
+            await page.goto('http://yiyu.yiyutx.top/yysh/#/pages/login/login', {
+                waitUntil: 'domcontentloaded',
+                timeout: 60000,
+            });
+            return;
+        } catch (e) {
+            console.log(`打开页面第${i}/${retries}次失败:`, (e.message || '').split('\n')[0]);
+            await sleep(3000);
+        }
+    }
+    throw new Error('打开游戏页失败(3次重试均超时)');
+}
+
 async function getPageText(page) {
     return await page.textContent('body').catch(() => '');
 }
@@ -152,7 +169,7 @@ async function sailFlow(page) {
 async function teleportToDest(page) {
     console.log('传送兜底: 重新登录游戏...');
     try {
-        await page.goto('http://yiyu.yiyutx.top/yysh/#/pages/login/login');
+        await gotoGame(page);
         await page.waitForTimeout(3000);
         const inputs = await page.$$('input');
         if (inputs.length >= 2) {
@@ -256,7 +273,7 @@ async function run() {
     const page = await context.newPage();
 
     try {
-        await page.goto('http://yiyu.yiyutx.top/yysh/#/pages/login/login');
+        await gotoGame(page);
         await page.waitForTimeout(3000);
         const inputs = await page.$$('input');
         await inputs[0].fill(ACCOUNT);
