@@ -408,12 +408,15 @@ async function run() {
         }
 
         // 循环打经验妖灵
+        // 日志节流：每轮都打印会刷出几MB日志、拖垮runner，改为每60秒汇报一次进度
         let count = 0;
+        const loopStart = Date.now();
+        let lastLogAt = Date.now();
+        console.log('进入打怪循环（进度每60秒汇报一次）');
         while (true) {
             pageText = await getPageText(page);
 
             if (pageText.includes('经验妖灵')) {
-                console.log('找到经验妖灵');
                 await clickText(page, '经验妖灵');
                 await sleep(50);
 
@@ -426,15 +429,23 @@ async function run() {
                 await sleep(50);
 
                 count++;
-                console.log(`第 ${count} 次完成`);
             } else {
-                console.log('页面内容:', pageText.substring(0, 100));
                 if (count === 0 && !global.__shot) {
                     global.__shot = true;
                     await page.screenshot({ path: 'stuck-beach.png' });
                 }
                 await clickText(page, '刷新');
                 await sleep(50);
+            }
+
+            const now = Date.now();
+            if (now - lastLogAt >= 60000) {
+                lastLogAt = now;
+                const mins = Math.round((now - loopStart) / 60000);
+                const tail = pageText.includes('经验妖灵')
+                    ? ''
+                    : ` | 未见经验妖灵，页面: ${pageText.substring(0, 80)}`;
+                console.log(`打怪进行中：已完成 ${count} 次，已运行 ${mins} 分钟${tail}`);
             }
         }
 
