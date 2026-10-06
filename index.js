@@ -320,13 +320,6 @@ async function run() {
                 if (!(await loginToGame(page))) {
                     console.log('登录/进入游戏失败');
                 } else {
-                    if ((await getPageText(page)).includes(`当前城市：${NAV_DEST}`)) {
-                        console.log(`3. 已在${NAV_DEST}`);
-                    } else {
-                        console.log(`3. 不在${NAV_DEST}，导航中...`);
-                        if (!(await navigateToDest(page, useTeleport))) useTeleport = true;
-                    }
-
                     const t0 = await getBjTime();
                     if (!FORCE && (t0.hour < 12 || (t0.hour === 12 && t0.min === 0))) {
                         console.log('等待boss开放...');
@@ -341,12 +334,12 @@ async function run() {
                     await sleep(500);
                     if (!(await clickBtn(page, '世界boss'))) await clickText(page, '世界boss');
                     await sleep(3000);
-                    console.log('4. 进入boss页面');
+                    console.log('次数预检: 打开boss页');
 
                     let pageText = await getPageText(page);
-                    const timesMatch = pageText.match(/攻击次数[：:]\s*(\d+)\/10/);
-                    const usedTimes = timesMatch ? parseInt(timesMatch[1]) : 0;
-                    const roundRemain = 10 - usedTimes;
+                    let timesMatch = pageText.match(/攻击次数[：:]\s*(\d+)\/10/);
+                    let usedTimes = timesMatch ? parseInt(timesMatch[1]) : 0;
+                    let roundRemain = 10 - usedTimes;
                     if (remain < 0) remain = roundRemain;
                     console.log(`已用次数: ${usedTimes}, 剩余次数: ${roundRemain}`);
 
@@ -354,6 +347,34 @@ async function run() {
                         console.log('今日次数已用完');
                         remain = 0;
                         stop = true;
+                    }
+
+                    if (!stop) {
+                        if ((await getPageText(page)).includes(`当前城市：${NAV_DEST}`)) {
+                            console.log(`3. 已在${NAV_DEST}`);
+                        } else {
+                            console.log(`3. 不在${NAV_DEST}，导航中...`);
+                            if (!(await navigateToDest(page, useTeleport))) useTeleport = true;
+                        }
+
+                        await page.keyboard.press('Escape');
+                        await sleep(500);
+                        if (!(await clickBtn(page, '世界boss'))) await clickText(page, '世界boss');
+                        await sleep(3000);
+                        console.log('4. 进入boss页面');
+
+                        pageText = await getPageText(page);
+                        timesMatch = pageText.match(/攻击次数[：:]\s*(\d+)\/10/);
+                        usedTimes = timesMatch ? parseInt(timesMatch[1]) : 0;
+                        roundRemain = 10 - usedTimes;
+                        if (remain < 0) remain = roundRemain;
+                        console.log(`已用次数: ${usedTimes}, 剩余次数: ${roundRemain}`);
+
+                        if (roundRemain <= 0) {
+                            console.log('今日次数已用完');
+                            remain = 0;
+                            stop = true;
+                        }
                     }
 
                     if (!stop) {
@@ -438,6 +459,13 @@ async function run() {
                 console.log(`第 ${attempt} 轮异常:`, e.message);
             }
 
+            if (!stop && !FORCE) {
+                const te = await getBjTime();
+                if (te.hour > 12 || (te.hour === 12 && te.min >= 30)) {
+                    console.log('已过12:30，boss时间结束，停止重试');
+                    stop = true;
+                }
+            }
             if (stop) break;
             if (attempt < MAX_ATTEMPTS) await sleep(15000);
         }
@@ -445,7 +473,7 @@ async function run() {
         if (remain === 0 || completed > 0) {
             console.log(`世界boss完成，累计 ${completed} 次`);
         } else {
-            console.error('::error::世界boss失败: 12:00-12:30 窗口内完成 0 次挑战');
+            console.error('::error::世界boss失败: 12:00-12:30 窗口内完成 0 次挑战（农场步骤仍会继续）');
             await page.screenshot({ path: 'boss-fail.png' }).catch(() => {});
             process.exitCode = 1;
         }

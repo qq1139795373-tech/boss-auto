@@ -74,7 +74,7 @@ jobs:
           node index.js
 
       - name: Run Farm
-        if: ${{ !inputs.force }}
+        if: ${{ always() && !inputs.force }}
         run: node farm.js
 
       - name: Upload Screenshots
