@@ -2,6 +2,11 @@ name: Auto Boss
 
 on:
   workflow_dispatch:
+    inputs:
+      tasks_mode:
+        description: '任务流程：auto按北京时间(00:00竞技场钓鱼/18:00山寨)，或强制 dawn/dusk/skip'
+        type: string
+        default: 'auto'
 
 jobs:
   boss:
@@ -14,14 +19,23 @@ jobs:
         with:
           node-version: 22
 
+      - name: Setup
+        run: |
+          npm install
+          npx playwright install chromium
+
+      - name: Run Tasks
+        env:
+          GAME_ACCOUNT: ${{ secrets.GAME_ACCOUNT }}
+          GAME_PASSWORD: ${{ secrets.GAME_PASSWORD }}
+          TASKS_MODE: ${{ inputs.tasks_mode }}
+        run: node tasks.js
+
       - name: Run Boss
         env:
           GAME_ACCOUNT: ${{ secrets.GAME_ACCOUNT }}
           GAME_PASSWORD: ${{ secrets.GAME_PASSWORD }}
-        run: |
-          npm install
-          npx playwright install chromium
-          node index.js
+        run: node index.js
 
       - name: Run Farm
         if: success()
