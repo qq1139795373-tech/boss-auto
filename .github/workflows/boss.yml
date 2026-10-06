@@ -19,6 +19,10 @@ on:
         description: '测试用：跳过出航直接走传送兜底'
         type: boolean
         default: false
+      tasks_mode:
+        description: '任务流程：auto按北京时间(00:00钓鱼等/18:00山寨)，或强制 dawn/dusk/skip'
+        type: string
+        default: 'auto'
 
 jobs:
   prepare:
@@ -62,16 +66,23 @@ jobs:
           echo "GAME_ACCOUNT=$(echo "$GAME_ACCOUNTS_JSON" | jq -r '.[${{ matrix.idx }}].account')" >> "$GITHUB_ENV"
           echo "GAME_PASSWORD=$(echo "$GAME_ACCOUNTS_JSON" | jq -r '.[${{ matrix.idx }}].password')" >> "$GITHUB_ENV"
 
+      - name: Setup
+        run: |
+          npm install
+          npx playwright install chromium
+
+      - name: Run Tasks
+        env:
+          TASKS_MODE: ${{ inputs.tasks_mode }}
+        run: node tasks.js
+
       - name: Run Boss
         env:
           BOSS_FORCE: ${{ inputs.force }}
           NAV_DEST: ${{ inputs.nav_dest }}
           NAV_REGION: ${{ inputs.nav_region }}
           TEST_FALLBACK: ${{ inputs.test_fallback }}
-        run: |
-          npm install
-          npx playwright install chromium
-          node index.js
+        run: node index.js
 
       - name: Run Farm
         if: ${{ !inputs.force }}
