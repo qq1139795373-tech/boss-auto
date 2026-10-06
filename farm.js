@@ -10,6 +10,23 @@ async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+async function gotoGame(page, retries = 3) {
+    // runner到游戏服务器慢时，等load事件会30s超时；domcontentloaded不等全量资源，失败重试
+    for (let i = 1; i <= retries; i++) {
+        try {
+            await page.goto('http://yiyu.yiyutx.top/yysh/#/pages/login/login', {
+                waitUntil: 'domcontentloaded',
+                timeout: 60000,
+            });
+            return true;
+        } catch (e) {
+            console.log(`打开页面第${i}/${retries}次失败:`, (e.message || '').split('\n')[0]);
+            await sleep(3000);
+        }
+    }
+    return false;
+}
+
 async function clickText(page, text, timeout = 5000) {
     // 主路径：用isVisible检查元素是否真正可见
     const el = page.getByText(text, { exact: false }).first();
@@ -63,6 +80,12 @@ async function jsClick(page, text, exclude = '') {
     }, { t: text, ex: exclude });
 }
 
+// jsClick优先（穿遮罩），失败退回文本点击
+async function clickBtn(page, text, timeout = 3000) {
+    if (await jsClick(page, text)) return true;
+    return await clickText(page, text, timeout);
+}
+
 async function closePopup(page) {
     // 尝试点击不同位置关闭弹窗
     await page.mouse.click(10, 10);
@@ -88,21 +111,29 @@ async function clickExact(page, text, timeout = 3000) {
 
 // 出航流程：出航菜单→区域→城市→出航确认→自动航行→航行循环（海盗避战/恢复），返回是否到达
 async function sailFlow(page) {
-    let step = await clickText(page, '出航', 2000);
+    // Escape清掉残留弹窗/遮罩，再进出航（遮罩会吃掉坐标点击，改用jsClick穿遮罩）
+    await page.keyboard.press('Escape');
+    await sleep(500);
+
+    let step = await clickBtn(page, '出航', 2000);
     if (!step) {
-        await clickText(page, '城内地图');
+        await clickBtn(page, '城内地图');
         await sleep(2000);
-        await clickText(page, '码头');
+        await clickBtn(page, '码头');
         await sleep(3000);
-        step = await clickText(page, '出航');
+        step = await clickBtn(page, '出航');
+    }
+    if (!step) {
+        console.log('找不到出航入口，页面文本:', (await getPageText(page)).substring(0, 300));
+        return false;
     }
     await sleep(2000);
-    await clickExact(page, NAV_REGION);
+    await clickBtn(page, NAV_REGION);
     await sleep(1000);
 
     let picked = false;
     for (let s = 0; s < 5; s++) {
-        if (await clickText(page, NAV_DEST, 2000)) {
+        if (await clickBtn(page, NAV_DEST, 2000)) {
             await sleep(1500);
             if ((await getPageText(page)).includes('出航确认')) {
                 picked = true;
@@ -112,10 +143,13 @@ async function sailFlow(page) {
         await page.mouse.wheel(0, 300);
         await sleep(1000);
     }
-    if (!picked) console.log('未看到出航确认框，继续尝试...');
+    if (!picked) {
+        console.log('未看到出航确认框，中止出航。页面文本:', (await getPageText(page)).substring(0, 300));
+        return false;
+    }
 
     await sleep(1000);
-    await clickText(page, '立即出发');
+    await clickBtn(page, '立即出发');
     await sleep(2000);
     await clickExact(page, '自动航行', 5000);
     console.log('航行中...');
@@ -152,7 +186,10 @@ async function sailFlow(page) {
 async function teleportToDest(page) {
     console.log('传送兜底: 重新登录游戏...');
     try {
-        await page.goto('http://yiyu.yiyutx.top/yysh/#/pages/login/login');
+        if (!(await gotoGame(page))) {
+            console.log('传送兜底: 打开页面失败(3次重试均超时)');
+            return false;
+        }
         await page.waitForTimeout(3000);
         const inputs = await page.$$('input');
         if (inputs.length >= 2) {
@@ -170,13 +207,16 @@ async function teleportToDest(page) {
         await sleep(3000);
         console.log('传送兜底: 重新登录完成');
 
-        let ok = await clickText(page, '传送', 2000);
+        await page.keyboard.press('Escape');
+        await sleep(500);
+
+        let ok = await clickBtn(page, '传送', 2000);
         if (!ok) {
-            await clickText(page, '城内地图');
+            await clickBtn(page, '城内地图');
             await sleep(2000);
-            await clickText(page, '码头');
+            await clickBtn(page, '码头');
             await sleep(3000);
-            ok = await clickText(page, '传送');
+            ok = await clickBtn(page, '传送');
         }
         if (!ok) {
             console.log('传送兜底: 找不到传送入口');
@@ -185,12 +225,12 @@ async function teleportToDest(page) {
         }
         await sleep(2000);
 
-        await clickExact(page, NAV_REGION);
+        await clickBtn(page, NAV_REGION);
         await sleep(1000);
 
         let picked = false;
         for (let s = 0; s < 5; s++) {
-            if (await clickText(page, NAV_DEST, 2000)) {
+            if (await clickBtn(page, NAV_DEST, 2000)) {
                 picked = true;
                 break;
             }
@@ -202,9 +242,9 @@ async function teleportToDest(page) {
         await sleep(3000);
         let txt = await getPageText(page);
         if (!txt.includes(`当前城市：${NAV_DEST}`)) {
-            await clickText(page, '确定');
+            await clickBtn(page, '确定');
             await sleep(2000);
-            await clickText(page, '确认');
+            await clickBtn(page, '确认');
             await sleep(2000);
             txt = await getPageText(page);
         }
@@ -229,7 +269,7 @@ async function run() {
 
     try {
         // 登录
-        await page.goto('http://yiyu.yiyutx.top/yysh/#/pages/login/login');
+        if (!(await gotoGame(page))) throw new Error('打开游戏页失败(3次重试均超时)');
         await page.waitForTimeout(3000);
 
         // 登录（带重试）
@@ -243,7 +283,10 @@ async function run() {
                     break;
                 }
                 console.log('找不到输入框，刷新页面...');
-                await page.goto('http://yiyu.yiyutx.top/yysh/#/pages/login/login');
+                if (!(await gotoGame(page))) {
+                    await sleep(2000);
+                    continue;
+                }
                 await page.waitForTimeout(3000);
                 const newInputs = await page.$$('input');
                 if (newInputs.length < 2) {
@@ -332,7 +375,7 @@ async function run() {
 
             const arrived = await sailFlow(page);
             if (!arrived) {
-                console.log('出航约5分钟未完成，改用传送兜底...');
+                console.log('出航未完成（中止或约5分钟超时），改用传送兜底...');
                 await page.screenshot({ path: 'nav-fail.png' }).catch(() => {});
                 await teleportToDest(page);
             }
