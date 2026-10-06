@@ -259,6 +259,123 @@ async function ensureDock(page) {
     return atDockView(await getPageText(page));
 }
 
+// 关闭包裹回游戏视图（左上角返回/历史后退/Escape，逐个尝试）
+async function closeBag(page) {
+    for (let i = 0; i < 4; i++) {
+        const t = await getPageText(page);
+        if (t.includes('鱼老板') || t.includes('当前城市：')) return true;
+        // 左上角返回键（按class启发式找页头左上的返回元素）
+        await page.evaluate(() => {
+            const cands = [...document.querySelectorAll('[class*=back],[class*=arrow],[class*=return]')];
+            const el = cands.find(e => {
+                const r = e.getBoundingClientRect();
+                return r.width > 0 && r.height > 0 && r.x < 80 && r.y < 140;
+            });
+            if (el) el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+        }).catch(() => {});
+        await sleep(1200);
+        let t2 = await getPageText(page);
+        if (!(t2.includes('鱼老板') || t2.includes('当前城市：'))) {
+            await page.evaluate(() => history.back()).catch(() => {});
+            await sleep(1500);
+        }
+        t2 = await getPageText(page);
+        if (!(t2.includes('鱼老板') || t2.includes('当前城市：'))) {
+            await page.keyboard.press('Escape');
+            await sleep(1000);
+        }
+    }
+    return (await getPageText(page)).includes('鱼老板') ||
+        (await getPageText(page)).includes('当前城市：');
+}
+
+// 标签行右滑（jsClick点不到“其他”时的兜底）
+async function dragTabRow(page) {
+    try {
+        const box = await page.evaluate(() => {
+            const rows = [...document.querySelectorAll('body *')].filter(el => {
+                const s = el.textContent || '';
+                return s.includes('装备') && s.includes('其他') &&
+                    el.children.length >= 6 && el.children.length <= 15;
+            });
+            if (!rows.length) return null;
+            const r = rows[rows.length - 1].getBoundingClientRect();
+            return { x: r.x, y: r.y, w: r.width, h: r.height };
+        });
+        if (!box || box.w < 50) return;
+        const y = box.y + box.h / 2;
+        const x0 = box.x + box.w - 40;
+        await page.mouse.move(x0, y);
+        await page.mouse.down();
+        for (let s = 1; s <= 8; s++) {
+            await page.mouse.move(x0 - s * 45, y);
+            await sleep(30);
+        }
+        await page.mouse.up();
+        await sleep(600);
+    } catch (e) { /* ignore */ }
+}
+
+// 其他标签里向下滚到出现“已加载全部数据”（列表懒加载，没到底不能下结论）
+async function scrollBagToBottom(page) {
+    for (let i = 0; i < 25; i++) {
+        const t = await getPageText(page);
+        if (t.includes('已加载全部数据')) return true;
+        await page.mouse.move(400, 650).catch(() => {});
+        await page.mouse.wheel(0, 700).catch(() => {});
+        await sleep(450);
+    }
+    return (await getPageText(page)).includes('已加载全部数据');
+}
+
+// 查小鱼活饵库存：包裹→其他标签→必须滚到“已加载全部数据”→读数量。
+// 看到鱼饵=记数量（调用方补差额到100）；滚到底没显示=没有(0)→买100；
+// 打不开包裹/切不过去/滚不到底=null（调用方按100购买，宁可买也不断钓）
+async function getBaitStock(page) {
+    try {
+        if (!(await clickText(page, '包裹', 3000))) {
+            await jsClick(page, '包裹');
+        }
+        await sleep(1500);
+        let t = await getPageText(page);
+        if (!t.includes('负重') && !t.includes('详情')) {
+            console.log('未打开包裹，页面:', t.substring(0, 122));
+            await closeBag(page);
+            return null;
+        }
+        // 切到“其他”标签（必要时右滑标签行），确认切过去（出现地图/鱼饵物品）
+        let switched = false;
+        for (let i = 0; i < 3 && !switched; i++) {
+            if (i === 1) await dragTabRow(page);
+            await jsClick(page, '其他');
+            await sleep(800);
+            t = await getPageText(page);
+            switched = /地图|小鱼活饵/.test(t);
+        }
+        if (!switched) {
+            console.log('未切换到“其他”标签，库存判定失败');
+            await closeBag(page);
+            return null;
+        }
+        // 必须滚到“已加载全部数据”才下结论（防止鱼饵在下方看不见）
+        if (!(await scrollBagToBottom(page))) {
+            console.log('其他标签未滚到“已加载全部数据”，库存判定失败');
+            await closeBag(page);
+            return null;
+        }
+        t = await getPageText(page);
+        const m = t.match(/小鱼活饵[\s\S]{0,160}?数量[：:]\s*(\d+)/);
+        const stock = m ? parseInt(m[1], 10) : 0;
+        console.log(m ? `滚动中看到鱼饵，库存: ${stock}` : '滚到底未见鱼饵 = 库存0');
+        await closeBag(page);
+        return stock;
+    } catch (e) {
+        console.log('库存检查异常:', e.message);
+        await closeBag(page).catch(() => {});
+        return null;
+    }
+}
+
 // 打开鱼老板页
 async function openBoss(page) {
     if (!(await clickText(page, '鱼老板', 3000))) {
@@ -274,8 +391,8 @@ async function openBoss(page) {
     return true;
 }
 
-// 买100个小鱼活饵
-async function buyBait(page) {
+// 买鱼饵，qty=补齐数量
+async function buyBait(page, qty = 100) {
     const ok = await page.evaluate(() => {
         const cands = [...document.querySelectorAll('body *')].filter(el => {
             const r = el.getBoundingClientRect();
@@ -283,17 +400,25 @@ async function buyBait(page) {
                 r.width > 0 && r.height > 0;
         });
         if (!cands.length) return false;
-        const row = cands.filter(el => {
-            let p = el.parentElement;
-            for (let d = 0; d < 4 && p; d++, p = p.parentElement) {
-                if ((p.textContent || '').includes('小鱼活饵')) return true;
+        // 锁定“小鱼活饵”的购买按钮：找同时含物品名和银贝金额的最小行（小鱼活饵 50 银贝 购买），
+        // 避免点到蚯蚓等其他鱼饵；锁不到就失败，绝不乱点
+        let best = null;
+        let bestLen = Infinity;
+        for (const b of cands) {
+            let p = b.parentElement;
+            for (let d = 0; d < 6 && p; d++, p = p.parentElement) {
+                const txt = p.textContent || '';
+                if (txt.includes('小鱼活饵') && txt.includes('银贝') && txt.length < bestLen) {
+                    best = b;
+                    bestLen = txt.length;
+                    break;
+                }
             }
-            return false;
-        });
-        const el = row.length ? row[row.length - 1] : cands[cands.length - 1];
+        }
+        if (!best) return false;
         const opts = { bubbles: true, cancelable: true, view: window };
         for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click']) {
-            el.dispatchEvent(new MouseEvent(type, opts));
+            best.dispatchEvent(new MouseEvent(type, opts));
         }
         return true;
     });
@@ -308,16 +433,16 @@ async function buyBait(page) {
         await page.screenshot({ path: 'fish-buy-dialog-fail.png' }).catch(() => {});
         return false;
     }
-    // 填购买数量100（页面上唯一的输入框）
+    // 填购买数量（页面上唯一的输入框）
     const inputs = await page.$$('input');
     let filled = false;
     for (const inp of inputs) {
         if (await inp.isVisible().catch(() => false)) {
-            await inp.fill('100').catch(() => {});
+            await inp.fill(String(qty)).catch(() => {});
             filled = true;
         }
     }
-    console.log('购买数量填100:', filled);
+    console.log(`购买数量填${qty}:`, filled);
     await clickExact(page, '确认购买');
     await sleep(2000);
     t = await getPageText(page);
@@ -585,21 +710,35 @@ async function run() {
             return;
         }
         console.log('到达威尼斯码头');
-        if (!(await openBoss(page))) {
+        // 先查包裹鱼饵库存：≥100直接出航钓，<100在鱼老板处补到100
+        const stock = await getBaitStock(page);
+        if (!(await ensureDock(page))) {
+            console.log('查库存后未回码头视图，退出');
+            await page.screenshot({ path: 'fish-dock-fail.png' }).catch(() => {});
             await browser.close();
             return;
         }
-        if (!(await buyBait(page))) {
-            await browser.close();
-            return;
+        if (stock !== null && stock >= 100) {
+            console.log(`鱼饵库存${stock}≥100，跳过购买直接出航`);
+        } else {
+            const qty = stock === null ? 100 : 100 - stock;
+            console.log(stock === null ? '库存未知，按100购买' : `库存${stock}，补齐${qty}个`);
+            if (!(await openBoss(page))) {
+                await browser.close();
+                return;
+            }
+            if (!(await buyBait(page, qty))) {
+                await browser.close();
+                return;
+            }
+            if (!(await backToDock(page))) {
+                console.log('买饵后返回码头失败，退出');
+                await page.screenshot({ path: 'fish-back-fail.png' }).catch(() => {});
+                await browser.close();
+                return;
+            }
+            console.log('买饵完成，回到码头');
         }
-        if (!(await backToDock(page))) {
-            console.log('买饵后返回码头失败，退出');
-            await page.screenshot({ path: 'fish-back-fail.png' }).catch(() => {});
-            await browser.close();
-            return;
-        }
-        console.log('买饵完成，回到码头');
 
         // 3. 出航马赛开钓
         if (!(await departForFishing(page))) {
