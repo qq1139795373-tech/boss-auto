@@ -7,8 +7,6 @@ const FORCE = process.env.BOSS_FORCE === 'true' || process.env.BOSS_FORCE === '1
 // 测试用：NAV_DEST/NAV_REGION 覆盖航行目的地（如 广州/东亚），默认孟买/印度洋
 const NAV_DEST = process.env.NAV_DEST || '孟买';
 const NAV_REGION = process.env.NAV_REGION || '印度洋';
-// 12:00-12:30 窗口内失败重试的最大轮数
-const MAX_ATTEMPTS = FORCE ? 2 : 5;
 
 async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -227,55 +225,6 @@ async function teleportToDest(page) {
     }
 }
 
-// 导航到目的地：先出航，失败改传送，最后强校验当前城市
-async function navigateToDest(page, preferTeleport) {
-    let arrived;
-    if (preferTeleport) {
-        console.log('上轮已出航失败，本轮直接走传送兜底...');
-        arrived = await teleportToDest(page);
-    } else {
-        arrived = await sailFlow(page);
-        if (!arrived) {
-            await page.screenshot({ path: 'nav-fail.png' }).catch(() => {});
-            console.log('出航未完成，改用传送兜底...');
-            arrived = await teleportToDest(page);
-        }
-    }
-    await sleep(2000);
-    const txt = await getPageText(page);
-    if (arrived && txt.includes(`当前城市：${NAV_DEST}`)) return true;
-    await page.screenshot({ path: 'nav-final-fail.png' }).catch(() => {});
-    console.log(`导航失败，当前未在${NAV_DEST}。页面文本:`, txt.substring(0, 300));
-    return false;
-}
-
-// 登录→进入游戏，返回是否看到游戏主界面
-async function loginToGame(page) {
-    try {
-        await page.goto('http://yiyu.yiyutx.top/yysh/#/pages/login/login');
-        await page.waitForTimeout(3000);
-        const inputs = await page.$$('input');
-        if (inputs.length >= 2) {
-            await inputs[0].fill(ACCOUNT);
-            await inputs[1].fill(PASSWORD);
-            await page.getByText('登录').first().click();
-            await sleep(3000);
-            console.log('1. 登录完成');
-        } else {
-            console.log('1. 会话有效，页面已自动进入游戏');
-        }
-        await closePopup(page);
-        await sleep(1000);
-        await clickText(page, '进入游戏');
-        await sleep(3000);
-        console.log('2. 进入游戏');
-        return (await getPageText(page)).includes('当前城市');
-    } catch (e) {
-        console.log('登录失败:', e.message);
-        return false;
-    }
-}
-
 async function closePopup(page) {
     await page.mouse.click(10, 10);
     await sleep(500);
@@ -306,184 +255,119 @@ async function run() {
     const context = await browser.newContext();
     const page = await context.newPage();
 
-    let remain = -1;
-    let completed = 0;
-    let useTeleport = false;
-
     try {
-        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-            console.log(`===== 第 ${attempt}/${MAX_ATTEMPTS} 轮 =====`);
-            let stop = false;
-            let timeUp = false;
+        await page.goto('http://yiyu.yiyutx.top/yysh/#/pages/login/login');
+        await page.waitForTimeout(3000);
+        const inputs = await page.$$('input');
+        await inputs[0].fill(ACCOUNT);
+        await inputs[1].fill(PASSWORD);
+        await page.getByText('登录').first().click();
+        await sleep(3000);
+        console.log('1. 登录完成');
 
-            try {
-                if (!(await loginToGame(page))) {
-                    console.log('登录/进入游戏失败');
-                } else {
-                    const t0 = await getBjTime();
-                    if (!FORCE && (t0.hour < 12 || (t0.hour === 12 && t0.min === 0))) {
-                        console.log('等待boss开放...');
-                        while (true) {
-                            const t = await getBjTime();
-                            if (t.hour >= 12) break;
-                            await sleep(10000);
-                        }
-                    }
+        await closePopup(page);
+        await sleep(1000);
+        await clickText(page, '进入游戏');
+        await sleep(3000);
+        console.log('2. 进入游戏');
 
-                    await page.keyboard.press('Escape');
-                    await sleep(500);
-                    if (!(await clickBtn(page, '世界boss'))) await clickText(page, '世界boss');
-                    await sleep(3000);
-                    console.log('次数预检: 打开boss页');
-
-                    let pageText = await getPageText(page);
-                    let timesMatch = pageText.match(/攻击次数[：:]\s*(\d+)\/10/);
-                    let usedTimes = timesMatch ? parseInt(timesMatch[1]) : 0;
-                    let roundRemain = 10 - usedTimes;
-                    if (remain < 0) remain = roundRemain;
-                    console.log(`已用次数: ${usedTimes}, 剩余次数: ${roundRemain}`);
-
-                    if (roundRemain <= 0) {
-                        console.log('今日次数已用完');
-                        remain = 0;
-                        stop = true;
-                    }
-
-                    if (!stop) {
-                        if ((await getPageText(page)).includes(`当前城市：${NAV_DEST}`)) {
-                            console.log(`3. 已在${NAV_DEST}`);
-                        } else {
-                            console.log(`3. 不在${NAV_DEST}，导航中...`);
-                            if (!(await navigateToDest(page, useTeleport))) useTeleport = true;
-                        }
-
-                        await page.keyboard.press('Escape');
-                        await sleep(500);
-                        if (!(await clickBtn(page, '世界boss'))) await clickText(page, '世界boss');
-                        await sleep(3000);
-                        console.log('4. 进入boss页面');
-
-                        pageText = await getPageText(page);
-                        timesMatch = pageText.match(/攻击次数[：:]\s*(\d+)\/10/);
-                        usedTimes = timesMatch ? parseInt(timesMatch[1]) : 0;
-                        roundRemain = 10 - usedTimes;
-                        if (remain < 0) remain = roundRemain;
-                        console.log(`已用次数: ${usedTimes}, 剩余次数: ${roundRemain}`);
-
-                        if (roundRemain <= 0) {
-                            console.log('今日次数已用完');
-                            remain = 0;
-                            stop = true;
-                        }
-                    }
-
-                    if (!stop) {
-                        for (let i = 0; i < roundRemain; i++) {
-                            const { hour: h, min: m } = await getBjTime();
-                            if (!FORCE && (h !== 12 || m >= 30)) {
-                                console.log('挑战时间结束');
-                                timeUp = true;
-                                break;
-                            }
-
-                            const challengeBtn = page.locator('text=发起挑战').first();
-                            let visible = await challengeBtn.isVisible({ timeout: 5000 }).catch(() => false);
-                            if (!visible) {
-                                await page.keyboard.press('Escape');
-                                await sleep(1000);
-                                visible = await challengeBtn.isVisible({ timeout: 5000 }).catch(() => false);
-                            }
-                            if (!visible) {
-                                console.log('按钮不可用');
-                                break;
-                            }
-
-                            await challengeBtn.click();
-                            await sleep(1000);
-
-                            pageText = await getPageText(page);
-                            if (pageText.includes('已达上限')) {
-                                console.log('今日次数已用完');
-                                remain = 0;
-                                break;
-                            }
-                            if (pageText.includes('开放时间')) {
-                                console.log('boss未开放');
-                                break;
-                            }
-
-                            await sleep(2000);
-                            pageText = await getPageText(page);
-
-                            const damageMatch = pageText.match(/本次造成伤害[：:]\s*(\d+)/);
-                            const rewardMatch = pageText.match(/挑战奖励[\s\S]*?(?=回合数|$)/);
-                            if (damageMatch) console.log(`   伤害: ${damageMatch[1]}`);
-                            if (rewardMatch) {
-                                const items = rewardMatch[0].replace('挑战奖励', '').trim();
-                                console.log(`   奖励: ${items}`);
-                            }
-
-                            const confirmBtn = page.locator('text=确定').first();
-                            if (await confirmBtn.isVisible({ timeout: 10000 }).catch(() => false)) {
-                                await confirmBtn.click();
-                                completed++;
-                                console.log(`5. 第 ${completed} 次挑战完成`);
-                            } else if (damageMatch) {
-                                completed++;
-                                console.log(`5. 第 ${completed} 次挑战完成(未见确定按钮)`);
-                            }
-
-                            console.log('6. 等待30秒冷却...');
-                            for (let s = 0; s < 35; s++) {
-                                await sleep(1000);
-                                pageText = await getPageText(page);
-                                if (pageText.includes('发起挑战') && !pageText.includes('后可再次挑战')) {
-                                    console.log('冷却结束');
-                                    break;
-                                }
-                                const { hour: h2, min: m2 } = await getBjTime();
-                                if (!FORCE && (h2 !== 12 || m2 >= 30)) break;
-                            }
-                        }
-
-                        if (remain === 0 || completed >= remain) stop = true;
-                        else if (timeUp) {
-                            console.log('12:30后不再重试');
-                            stop = true;
-                        } else if (attempt < MAX_ATTEMPTS) {
-                            console.log(`本轮未打满(${completed}/${remain})，15秒后重试...`);
-                        }
-                    }
-                }
-            } catch (e) {
-                console.log(`第 ${attempt} 轮异常:`, e.message);
-            }
-
-            if (!stop && !FORCE) {
-                const te = await getBjTime();
-                if (te.hour > 12 || (te.hour === 12 && te.min >= 30)) {
-                    console.log('已过12:30，boss时间结束，停止重试');
-                    stop = true;
-                }
-            }
-            if (stop) break;
-            if (attempt < MAX_ATTEMPTS) await sleep(15000);
-        }
-
-        if (remain === 0 || completed > 0) {
-            console.log(`世界boss完成，累计 ${completed} 次`);
+        let pageText = await getPageText(page);
+        if (pageText.includes(`当前城市：${NAV_DEST}`)) {
+            console.log(`3. 已在${NAV_DEST}`);
         } else {
-            console.error('::error::世界boss失败: 12:00-12:30 窗口内完成 0 次挑战（农场步骤仍会继续）');
-            await page.screenshot({ path: 'boss-fail.png' }).catch(() => {});
-            process.exitCode = 1;
+            console.log(`3. 不在${NAV_DEST}，导航中...`);
+
+            const arrived = await sailFlow(page);
+            if (!arrived) {
+                await page.screenshot({ path: 'nav-fail.png' }).catch(() => {});
+                console.log('出航约5分钟未完成，改用传送兜底...');
+                await teleportToDest(page);
+            }
+            await sleep(2000);
         }
+
+        if (!FORCE && (hour < 12 || (hour === 12 && min === 0))) {
+            console.log('等待boss开放...');
+            while (true) {
+                const { hour: h, min: m } = await getBjTime();
+                if (h === 12 && m >= 0) break;
+                await sleep(10000);
+            }
+        }
+
+        await clickText(page, '世界boss');
+        await sleep(3000);
+        console.log('4. 进入boss页面');
+
+        pageText = await getPageText(page);
+        const timesMatch = pageText.match(/攻击次数[：:]\s*(\d+)\/10/);
+        const usedTimes = timesMatch ? parseInt(timesMatch[1]) : 0;
+        const remainTimes = 10 - usedTimes;
+        console.log(`已用次数: ${usedTimes}, 剩余次数: ${remainTimes}`);
+
+        if (remainTimes <= 0) {
+            console.log('今日次数已用完');
+        }
+
+        for (let i = 0; i < remainTimes; i++) {
+            const { hour: h, min: m } = await getBjTime();
+            if (!FORCE && (h !== 12 || m >= 30)) {
+                console.log('挑战时间结束');
+                break;
+            }
+
+            const challengeBtn = page.locator('text=发起挑战').first();
+            if (await challengeBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
+                await challengeBtn.click();
+                await sleep(1000);
+
+                pageText = await getPageText(page);
+                if (pageText.includes('已达上限') || pageText.includes('开放时间')) {
+                    console.log('次数已用完或未开放');
+                    break;
+                }
+
+                await sleep(2000);
+                pageText = await getPageText(page);
+
+                const damageMatch = pageText.match(/本次造成伤害[：:]\s*(\d+)/);
+                const rewardMatch = pageText.match(/挑战奖励[\s\S]*?(?=回合数|$)/);
+                if (damageMatch) console.log(`   伤害: ${damageMatch[1]}`);
+                if (rewardMatch) {
+                    const items = rewardMatch[0].replace('挑战奖励', '').trim();
+                    console.log(`   奖励: ${items}`);
+                }
+
+                const confirmBtn = page.locator('text=确定').first();
+                if (await confirmBtn.isVisible({ timeout: 10000 }).catch(() => false)) {
+                    await confirmBtn.click();
+                    console.log(`5. 第 ${i + 1} 次挑战完成`);
+                }
+
+                console.log(`6. 等待30秒冷却...`);
+                for (let s = 0; s < 35; s++) {
+                    await sleep(1000);
+                    pageText = await getPageText(page);
+                    if (pageText.includes('发起挑战') && !pageText.includes('后可再次挑战')) {
+                        console.log('冷却结束');
+                        break;
+                    }
+                    const { hour: h2, min: m2 } = await getBjTime();
+                    if (!FORCE && (h2 !== 12 || m2 >= 30)) {
+                        console.log('挑战时间结束');
+                        break;
+                    }
+                }
+            } else {
+                console.log('按钮不可用');
+                break;
+            }
+        }
+
+        console.log('世界boss完成');
+
     } catch (e) {
         console.error('错误:', e.message);
-        if (!(remain === 0 || completed > 0)) {
-            console.error(`::error::世界boss异常终止: ${e.message}`);
-            await page.screenshot({ path: 'boss-fail.png' }).catch(() => {});
-            process.exitCode = 1;
-        }
     } finally {
         await browser.close();
     }
