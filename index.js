@@ -275,20 +275,54 @@ async function run() {
     try {
         await gotoGame(page);
         await page.waitForTimeout(3000);
-        const inputs = await page.$$('input');
-        await inputs[0].fill(ACCOUNT);
-        await inputs[1].fill(PASSWORD);
-        await page.getByText('登录').first().click();
-        await sleep(3000);
-        console.log('1. 登录完成');
+
+        let loggedIn = false;
+        for (let attempt = 1; attempt <= 10; attempt++) {
+            const inputs = await page.$$('input');
+            if (inputs.length >= 2) {
+                await inputs[0].fill(ACCOUNT);
+                await inputs[1].fill(PASSWORD);
+                await page.getByText('登录').first().click();
+            } else {
+                await clickText(page, '登录');
+            }
+            await sleep(3000);
+            const t = await getPageText(page);
+            if (t.includes('进入游戏') || t.includes('你看到') || t.includes('当前城市')) {
+                console.log(`1. 登录成功 (第${attempt}次)`);
+                loggedIn = true;
+                break;
+            }
+            console.log(`登录未成功，重试 (${attempt}/10)`);
+            await sleep(2000);
+        }
+        if (!loggedIn) {
+            console.log('ERROR: 登录失败，跳过本次boss');
+            console.log('::error::Run Boss 登录失败(10次重试)，本次boss已跳过');
+            await page.screenshot({ path: 'boss-login-fail.png' }).catch(() => {});
+            return;
+        }
 
         await closePopup(page);
         await sleep(1000);
         await clickText(page, '进入游戏');
         await sleep(3000);
-        console.log('2. 进入游戏');
 
         let pageText = await getPageText(page);
+        if (pageText.includes('选择角色') || pageText.includes('Lv.')) {
+            console.log('在选角界面，再次点击进入游戏...');
+            await clickText(page, '进入游戏');
+            await sleep(3000);
+            pageText = await getPageText(page);
+        }
+        if (!(pageText.includes('你看到') || pageText.includes('当前城市'))) {
+            console.log('ERROR: 未进入游戏主界面，跳过本次boss');
+            console.log('::error::Run Boss 未进入游戏主界面，本次boss已跳过');
+            await page.screenshot({ path: 'boss-login-fail.png' }).catch(() => {});
+            return;
+        }
+        console.log('2. 进入游戏成功');
+
         if (pageText.includes(`当前城市：${NAV_DEST}`)) {
             console.log(`3. 已在${NAV_DEST}`);
         } else {
@@ -384,7 +418,9 @@ async function run() {
         console.log('世界boss完成');
 
     } catch (e) {
-        console.error('错误:', e.message);
+        console.error('ERROR: boss流程异常:', e.message);
+        console.log(`::error::Run Boss 异常: ${e.message}`);
+        await page.screenshot({ path: 'boss-error.png' }).catch(() => {});
     } finally {
         await browser.close();
     }
