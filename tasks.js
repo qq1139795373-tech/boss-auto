@@ -1,8 +1,8 @@
 const { spawnSync } = require('child_process');
 
 // 任务闸门（和 index.js 打boss同一套逻辑，按北京时间判断）：
-//   00:00-00:30 → 每日签到（signin.js，已签自动跳过）→ 竞技场 → 炼器窟副本 → 钓鱼（签到仅此窗口跑；竞技场不限地点先打，再去伦敦，最后威尼斯钓鱼）
-//   18:00-18:30 → 山寨农场
+//   00:00-00:30 → 每日签到（signin.js，已签自动跳过）→ 竞技场 → 炼器窟副本 → 钓鱼 → 秘宝抽奖（mibao.js，免费银贝箱，同在威尼斯）（签到仅此窗口跑；竞技场不限地点先打，再去伦敦，最后威尼斯钓鱼）
+//   18:00-18:30 → 山寨农场 → 邮件领取（mail.js，领取所有+确定+返回）
 //   其他时间    → 跳过（中午11:50那趟由 index.js 自己的闸门打boss）
 // 任务跑完正常退出，交给 boss.yml 后面的 Run Boss / Run Farm（刷怪到6小时上限）
 // TASKS_MODE=dawn|dusk|skip 可强制指定，auto(默认)=按时间
@@ -43,8 +43,10 @@ function main() {
         runStep('竞技场', 'arena.js');
         runStep('炼器窟副本', 'dungeon.js');
         runStep('钓鱼', 'fish.js');
+        runStep('秘宝抽奖', 'mibao.js');
     } else if (mode === 'dusk') {
         runStep('山寨农场', 'shanzhai.js');
+        runStep('邮件领取', 'mail.js');
     } else if (MODE === 'skip') {
         console.log('[tasks] 强制跳过任务(TASKS_MODE=skip)');
     } else {
