@@ -588,11 +588,24 @@ async function returnToPort(page) {
     return false;
 }
 
-// 卖鱼：从第一个卖到最后一个，直到出售鱼列表没有卖出按钮
+// 卖鱼：从第一个卖到最后一个，直到出售鱼列表没有卖出按钮。
+// 找不到按钮≠卖完：可能是列表刷新慢/页面被弹层挤走——连续3次仍无且页面还在鱼老板页才算卖完；
+// 页面漂离鱼老板页则自动重开再卖，避免误判"全部卖完"留下剩鱼
 async function sellAll(page) {
     let rounds = 0;
-    for (let i = 0; i < 40; i++) {
+    let miss = 0;
+    for (let i = 0; i < 60; i++) {
         const t = await getPageText(page);
+        console.log(`[sell#${rounds}] 页面: ${t.substring(0, 90).replace(/\s+/g, ' ')}`);
+        if (!t.includes('鱼老板') || t.includes('请输入账号密码')) {
+            console.log(`[sell#${rounds}] 页面已不在鱼老板页，重开...`);
+            if (!(await openBoss(page))) {
+                await page.screenshot({ path: 'sell-stuck.png' }).catch(() => {});
+                return false;
+            }
+            miss = 0;
+            continue;
+        }
         if (t.includes('快速卖出')) {
             // 详情框开着：点框内最底部的卖出
             await page.getByText('卖出', { exact: true }).last().click({ force: true }).catch(() => {});
@@ -604,6 +617,7 @@ async function sellAll(page) {
                 await sleep(1000);
             }
             rounds++;
+            miss = 0;
             continue;
         }
         const has = await page.evaluate(() => {
@@ -620,15 +634,34 @@ async function sellAll(page) {
             }
             return true;
         });
-        if (!has) break;
-        await sleep(1500);
-        rounds++;
-        if (rounds % 5 === 0) console.log(`已卖 ${rounds} 轮`);
+        if (has) {
+            miss = 0;
+            await sleep(1500);
+            rounds++;
+            if (rounds % 5 === 0) console.log(`已卖 ${rounds} 轮`);
+            continue;
+        }
+        // 暂无卖出按钮：等列表刷新，连续3次都没有且页面在鱼老板页→真卖完
+        miss++;
+        if (miss < 3) {
+            console.log(`[sell#${rounds}] 暂无卖出按钮(${miss}/3)，等待列表刷新...`);
+            await sleep(1500);
+            continue;
+        }
+        if (t.includes('出售鱼')) {
+            console.log(`[sell#${rounds}] 3次无卖出按钮，页面仍在鱼老板页 → 判定卖完`);
+            break;
+        }
+        console.log(`[sell#${rounds}] 页面异常：无出售鱼区，停止`);
+        console.log('::error::钓鱼：卖鱼页面异常，可能仍有剩鱼');
+        await page.screenshot({ path: 'sell-stuck.png' }).catch(() => {});
+        break;
     }
     const t = await getPageText(page);
+    const atBoss = t.includes('鱼老板') && t.includes('出售鱼');
     const stillHas = t.includes('卖出') && !t.includes('快速卖出');
-    console.log(`卖鱼结束: ${rounds}轮, 列表还有卖出=${stillHas}`);
-    return !stillHas;
+    console.log(`卖鱼结束: ${rounds}轮, 在鱼老板页=${atBoss}, 列表还有卖出=${stillHas}`);
+    return atBoss && !stillHas;
 }
 
 async function run() {
@@ -804,6 +837,7 @@ async function run() {
         await page.screenshot({ path: 'fish-sold.png' }).catch(() => {});
         await backToDock(page);
 
+        if (!sold) console.log('::error::钓鱼：卖鱼未完成，包裹可能仍有剩鱼');
         console.log(`钓鱼流程完成: 甩竿${casts}次(${reason}) | 卖鱼${sold ? '全部卖完' : '仍有剩余'} | 结束于码头视图=${atDockView(await getPageText(page))}`);
 
     } catch (e) {
