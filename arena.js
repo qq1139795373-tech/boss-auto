@@ -253,6 +253,8 @@ async function run() {
         let pageText = await getPageText(page);
         if (pageText.includes('请输入账号密码') || pageText.includes('选择角色')) {
             console.log('ERROR: 未进入游戏主界面，退出');
+            console.log('::error::登录失败：未进入游戏主界面，竞技场已跳过');
+            await page.screenshot({ path: 'login-fail.png' }).catch(() => {});
             await browser.close();
             return;
         }
