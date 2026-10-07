@@ -2,7 +2,7 @@ const { chromium } = require('playwright');
 
 const ACCOUNT = process.env.GAME_ACCOUNT;
 const PASSWORD = process.env.GAME_PASSWORD;
-// 钓鱼：出航到地中海威尼斯，码头鱼老板买饵→出航马赛→钓鱼甩竿100次→返航→卖鱼
+// 钓鱼：出航到地中海威尼斯，码头鱼老板页读银贝(<5000先去山寨仓库卖榴莲200补钱)→买饵→出航马赛→钓鱼甩竿100次→返航→卖鱼
 const NAV_DEST = '威尼斯';
 const NAV_REGION = '地中海';
 
@@ -479,6 +479,154 @@ async function buyBait(page, qty = 100) {
     return true;
 }
 
+// 读鱼老板页账户银贝（顶部「账户：金贝… 银贝:4801 铜贝:493」；饵料行「50银贝」没冒号不会误匹配）
+function parseBossSilver(t) {
+    const m = (t || '').match(/银贝[:：]\s*([\d,.]+)/);
+    if (!m) return null;
+    const v = parseFloat(m[1].replace(/,/g, ''));
+    return Number.isFinite(v) ? v : null;
+}
+
+// 退出山寨页回主视图（关详情框 → 类名返回箭头(shanzhai.js同款) → 坐标(18,30) → goBack 逐级兜底）
+// 「练功房」是山寨页顶标签，切到仓库子标签也不消失，作为在/不在山寨页的信号
+async function exitShanzhai(page) {
+    for (let i = 0; i < 3; i++) {
+        let t = await getPageText(page);
+        if (t.includes('物品详情')) {
+            await page.keyboard.press('Escape');
+            await sleep(800);
+            t = await getPageText(page);
+        }
+        if (!t.includes('练功房')) return !t.includes('请输入账号密码');
+        await page.evaluate(() => {
+            const c = document.querySelector('.van-nav-bar__arrow, .van-icon-arrow-left, [class*="back"]');
+            if (c) c.click();
+        }).catch(() => {});
+        await sleep(1500);
+        t = await getPageText(page);
+        if (!t.includes('练功房')) return !t.includes('请输入账号密码');
+        await page.mouse.click(18, 30).catch(() => {});
+        await sleep(1500);
+        t = await getPageText(page);
+        if (!t.includes('练功房')) return !t.includes('请输入账号密码');
+        await page.goBack().catch(() => {});
+        await sleep(2000);
+    }
+    const t = await getPageText(page);
+    return !t.includes('练功房') && !t.includes('请输入账号密码');
+}
+
+// 银贝<5000的资金保障（买饵前）：点底部导航「山寨」→子标签「仓库」→上下滚到「榴莲」→
+// 点开物品详情→出售数量填200（持有不足200游戏自动修正为实际值）→确认出售→左上角箭头返回。
+// 进山寨后任何一步失败都先退出山寨页再返回false，绝不把人留在山寨页里
+async function sellDurian(page) {
+    let ok = await clickLeaf(page, '山寨');
+    if (!ok) ok = await clickText(page, '山寨', 3000);
+    if (!ok) {
+        await page.mouse.wheel(0, 600);
+        await sleep(800);
+        ok = await clickLeaf(page, '山寨');
+        if (!ok) ok = await clickText(page, '山寨', 2000);
+    }
+    await sleep(2500);
+    let t = await getPageText(page);
+    if (!t.includes('练功房') || !t.includes('仓库')) {
+        console.log('未进入山寨页:', t.substring(0, 120));
+        await page.screenshot({ path: 'fish-shanzhai-fail.png' }).catch(() => {});
+        return false;
+    }
+    // 切「仓库」子标签
+    if (!(await clickLeaf(page, '仓库'))) await jsClick(page, '仓库');
+    await sleep(1500);
+    // 仓库列表可上下滚动，向下滚到出现榴莲（最多25次）
+    let hasFruit = false;
+    for (let i = 0; i < 25; i++) {
+        if ((await getPageText(page)).includes('榴莲')) { hasFruit = true; break; }
+        await page.mouse.move(400, 650).catch(() => {});
+        await page.mouse.wheel(0, 700).catch(() => {});
+        await sleep(450);
+    }
+    if (!hasFruit) {
+        console.log('仓库滚动25次未见榴莲');
+        await page.screenshot({ path: 'fish-durian-missing.png' }).catch(() => {});
+        await exitShanzhai(page);
+        return false;
+    }
+    // 点榴莲打开物品详情
+    if (!(await clickLeaf(page, '榴莲', false))) await clickText(page, '榴莲', 3000);
+    await sleep(1500);
+    t = await getPageText(page);
+    if (!t.includes('物品详情') || !t.includes('确认出售')) {
+        console.log('未弹出物品详情框:', t.substring(0, 120));
+        await page.screenshot({ path: 'fish-durian-dialog-fail.png' }).catch(() => {});
+        await exitShanzhai(page);
+        return false;
+    }
+    const hm = t.match(/持有数量\D{0,6}(\d+)/);
+    const held = hm ? parseInt(hm[1], 10) : null;
+    console.log(`榴莲持有=${held === null ? '?' : held}，出售数量填200`);
+    // 出售数量填200（页面唯一可见输入框；fill被吞就点框全选重输再读一次）
+    const inputs = await page.$$('input');
+    const readQty = async () => {
+        for (const inp of inputs) {
+            if (await inp.isVisible().catch(() => false)) {
+                const v = await inp.inputValue().catch(() => '');
+                if (v) return v;
+            }
+        }
+        return '';
+    };
+    for (const inp of inputs) {
+        if (await inp.isVisible().catch(() => false)) await inp.fill('200').catch(() => {});
+    }
+    await sleep(500);
+    let qty = await readQty();
+    if (qty !== '200') {
+        for (const inp of inputs) {
+            if (await inp.isVisible().catch(() => false)) {
+                await inp.click({ force: true }).catch(() => {});
+                await page.keyboard.press('Control+a');
+                await page.keyboard.type('200');
+                break;
+            }
+        }
+        await sleep(500);
+        qty = await readQty();
+    }
+    const n = /^\d+$/.test(qty) ? parseInt(qty, 10) : 0;
+    // 填200成功，或持有<200被游戏实时修正成实际值(>1)都算OK；填不动(1/空)或持有≥200却不是200一律拒绝，绝不卖错数量
+    const qtyOk = n === 200 || ((held === null || held < 200) && n > 1);
+    if (!qtyOk) {
+        console.log(`出售数量未填成200(当前=${qty || '空'},持有=${held})`);
+        await page.screenshot({ path: 'fish-qty-fill-fail.png' }).catch(() => {});
+        await exitShanzhai(page);
+        return false;
+    }
+    // 确认出售 → 等详情框关闭
+    if (!(await clickExact(page, '确认出售'))) await clickText(page, '确认出售', 3000);
+    let closed = false;
+    for (let i = 0; i < 8; i++) {
+        await sleep(800);
+        t = await getPageText(page);
+        if (!t.includes('物品详情') || !t.includes('确认出售')) { closed = true; break; }
+    }
+    if (!closed) {
+        console.log('确认出售后详情框未关闭');
+        await page.screenshot({ path: 'fish-sell-stuck.png' }).catch(() => {});
+        await exitShanzhai(page);
+        return false;
+    }
+    console.log('榴莲出售完成(200或游戏按实际持有修正)');
+    await page.screenshot({ path: 'fish-sold-durian.png' }).catch(() => {});
+    if (!(await exitShanzhai(page))) {
+        console.log('退出山寨页失败');
+        await page.screenshot({ path: 'fish-exit-shanzhai-fail.png' }).catch(() => {});
+        return false;
+    }
+    console.log('已退出山寨页');
+    return true;
+}
+
 // 出航→地中海→马赛→立即出发（不点自动航行），到达“航行中”面板
 async function departForFishing(page) {
     if (!(await clickText(page, '出航', 3000))) {
@@ -793,6 +941,33 @@ async function run() {
                 await browser.close();
                 return;
             }
+            // 银贝保障：鱼老板页直接读银贝，<5000先去山寨仓库卖榴莲200补钱，回来再买饵
+            const silver = parseBossSilver(await getPageText(page));
+            if (silver !== null && silver < 5000) {
+                console.log(`银贝${silver} < 5000，先去山寨卖榴莲补钱`);
+                await page.screenshot({ path: 'fish-low-silver.png' }).catch(() => {});
+                if (!(await backToDock(page))) {
+                    console.log('离开鱼老板页失败，无法去山寨');
+                    console.log('::error::钓鱼：银贝不足且无法前往山寨，资金保障失败');
+                } else {
+                    const soldOk = await sellDurian(page);
+                    if (!soldOk) console.log('::error::钓鱼：银贝不足且卖榴莲未完成，买饵可能失败');
+                    if (!(await ensureDock(page)) || !(await openBoss(page))) {
+                        console.log('卖榴莲后返回鱼老板页失败，退出');
+                        console.log('::error::钓鱼：卖榴莲后无法返回鱼老板页');
+                        await page.screenshot({ path: 'fish-reopen-fail.png' }).catch(() => {});
+                        await browser.close();
+                        return;
+                    }
+                    const s2 = parseBossSilver(await getPageText(page));
+                    console.log(`补钱后银贝=${s2 === null ? '未知' : s2}，继续买饵`);
+                    if (s2 !== null && s2 < 5000) console.log('::error::钓鱼：补钱后银贝仍<5000，买饵可能失败');
+                }
+            } else if (silver === null) {
+                console.log('鱼老板页未读到银贝，跳过资金检查');
+            } else {
+                console.log(`银贝${silver} ≥ 5000，资金充足`);
+            }
             if (!(await buyBait(page, qty))) {
                 console.log('ERROR: 购买鱼饵失败，退出');
                 console.log('::error::钓鱼：购买鱼饵失败，本次钓鱼已跳过');
@@ -848,4 +1023,11 @@ async function run() {
     }
 }
 
-run();
+// tasks.js 以 node fish.js 独立进程启动(仍执行run)；probe 测试脚本 require 本模块时只取函数不跑流程
+if (require.main === module) run();
+
+module.exports = {
+    sleep, gotoGame, getPageText, clickText, clickLeaf, clickExact, jsClick,
+    sailFlow, atDockView, backToDock, ensureDock, getBaitStock, openBoss,
+    parseBossSilver, exitShanzhai, sellDurian,
+};
