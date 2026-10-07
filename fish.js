@@ -547,10 +547,10 @@ async function sellDurian(page) {
         await sleep(450);
     }
     if (!hasFruit) {
-        console.log('仓库滚动25次未见榴莲');
+        console.log('仓库无榴莲，跳过卖榴莲，直接返回买饵');
         await page.screenshot({ path: 'fish-durian-missing.png' }).catch(() => {});
         await exitShanzhai(page);
-        return false;
+        return true;
     }
     // 点榴莲打开物品详情
     if (!(await clickLeaf(page, '榴莲', false))) await clickText(page, '榴莲', 3000);
@@ -562,9 +562,7 @@ async function sellDurian(page) {
         await exitShanzhai(page);
         return false;
     }
-    const hm = t.match(/持有数量\D{0,6}(\d+)/);
-    const held = hm ? parseInt(hm[1], 10) : null;
-    console.log(`榴莲持有=${held === null ? '?' : held}，出售数量填200`);
+    console.log('出售数量填200（不校验持有，游戏按实际值卖）');
     // 出售数量填200（页面唯一可见输入框；fill被吞就点框全选重输再读一次）
     const inputs = await page.$$('input');
     const readQty = async () => {
@@ -593,15 +591,7 @@ async function sellDurian(page) {
         await sleep(500);
         qty = await readQty();
     }
-    const n = /^\d+$/.test(qty) ? parseInt(qty, 10) : 0;
-    // 填200成功，或持有<200被游戏实时修正成实际值(>1)都算OK；填不动(1/空)或持有≥200却不是200一律拒绝，绝不卖错数量
-    const qtyOk = n === 200 || ((held === null || held < 200) && n > 1);
-    if (!qtyOk) {
-        console.log(`出售数量未填成200(当前=${qty || '空'},持有=${held})`);
-        await page.screenshot({ path: 'fish-qty-fill-fail.png' }).catch(() => {});
-        await exitShanzhai(page);
-        return false;
-    }
+    // 不管持有剩多少，直接按填入的200确认出售（游戏自动按实际持有修正）
     // 确认出售 → 等详情框关闭
     if (!(await clickExact(page, '确认出售'))) await clickText(page, '确认出售', 3000);
     let closed = false;
