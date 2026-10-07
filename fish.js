@@ -393,19 +393,31 @@ async function getBaitStock(page) {
     }
 }
 
-// 打开鱼老板页
+// 打开鱼老板页（点不开多半是包裹/弹层挡着，ESC关掉回码头再试，最多3次）
 async function openBoss(page) {
-    if (!(await clickText(page, '鱼老板', 3000))) {
-        await jsClick(page, '鱼老板');
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        if (attempt > 1) {
+            await page.keyboard.press('Escape');
+            await sleep(1000);
+            await ensureDock(page);
+        }
+        // 查包裹的滚动可能把页面停在中间，鱼老板在视口外时force点击会点空：先归位再点
+        await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+        const el = page.getByText('鱼老板', { exact: false }).first();
+        await el.scrollIntoViewIfNeeded().catch(() => {});
+        await sleep(400);
+        if (!(await clickText(page, '鱼老板', 3000))) {
+            await jsClick(page, '鱼老板');
+        }
+        await sleep(2000);
+        const t = await getPageText(page);
+        if (t.includes('购买鱼饵')) return true;
+        console.log(`第${attempt}次未打开鱼老板页:`, t.substring(0, 100));
     }
-    await sleep(2000);
-    const t = await getPageText(page);
-    if (!t.includes('购买鱼饵')) {
-        console.log('未打开鱼老板页:', t.substring(0, 150));
-        await page.screenshot({ path: 'fish-boss-open-fail.png' }).catch(() => {});
-        return false;
-    }
-    return true;
+    console.log('ERROR: 鱼老板页3次未打开');
+    console.log('::error::钓鱼：鱼老板页3次未打开');
+    await page.screenshot({ path: 'fish-boss-open-fail.png' }).catch(() => {});
+    return false;
 }
 
 // 买鱼饵，qty=补齐数量
@@ -743,10 +755,14 @@ async function run() {
             const qty = stock === null ? 100 : 100 - stock;
             console.log(stock === null ? '库存未知，按100购买' : `库存${stock}，补齐${qty}个`);
             if (!(await openBoss(page))) {
+                console.log('ERROR: 打开鱼老板失败，退出');
+                console.log('::error::钓鱼：无法打开鱼老板买饵，本次钓鱼已跳过');
                 await browser.close();
                 return;
             }
             if (!(await buyBait(page, qty))) {
+                console.log('ERROR: 购买鱼饵失败，退出');
+                console.log('::error::钓鱼：购买鱼饵失败，本次钓鱼已跳过');
                 await browser.close();
                 return;
             }
