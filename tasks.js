@@ -1,6 +1,7 @@
 const { spawnSync } = require('child_process');
 
 // 任务闸门（和 index.js 打boss同一套逻辑，按北京时间判断）：
+//   每次运行(除skip) → 每日签到（signin.js，已签自动跳过）
 //   00:00-00:30 → 竞技场 → 炼器窟副本 → 钓鱼（竞技场不限地点先打，再去伦敦，最后威尼斯钓鱼）
 //   18:00-18:30 → 山寨农场
 //   其他时间    → 跳过（中午11:50那趟由 index.js 自己的闸门打boss）
@@ -33,6 +34,11 @@ function main() {
     const { hour, min } = bjNow();
     const mode = resolveMode(hour, min);
     console.log(`[tasks] 北京时间 ${hour}:${String(min).padStart(2, '0')} → mode=${mode} (TASKS_MODE=${MODE})`);
+
+    // 每日签到（幂等：页面已显示"今日已签到"则直接跳过）
+    if (MODE !== 'skip') {
+        runStep('每日签到', 'signin.js');
+    }
 
     if (mode === 'dawn') {
         runStep('竞技场', 'arena.js');
