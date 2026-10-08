@@ -10,6 +10,23 @@ async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+async function gotoGame(page, retries = 3) {
+    // runner到游戏服务器慢时，等load事件会30s超时；domcontentloaded不等全量资源，失败重试
+    for (let i = 1; i <= retries; i++) {
+        try {
+            await page.goto('http://yiyu.yiyutx.top/yysh/#/pages/login/login', {
+                waitUntil: 'domcontentloaded',
+                timeout: 60000,
+            });
+            return true;
+        } catch (e) {
+            console.log(`打开页面第${i}/${retries}次失败:`, (e.message || '').split('\n')[0]);
+            await sleep(3000);
+        }
+    }
+    return false;
+}
+
 async function clickText(page, text, timeout = 5000) {
     // 主路径：用isVisible检查元素是否真正可见
     const el = page.getByText(text, { exact: false }).first();
@@ -152,7 +169,10 @@ async function sailFlow(page) {
 async function teleportToDest(page) {
     console.log('传送兜底: 重新登录游戏...');
     try {
-        await page.goto('http://yiyu.yiyutx.top/yysh/#/pages/login/login');
+        if (!(await gotoGame(page))) {
+            console.log('传送兜底: 打开页面失败(3次重试均超时)');
+            return false;
+        }
         await page.waitForTimeout(3000);
         const inputs = await page.$$('input');
         if (inputs.length >= 2) {
@@ -229,7 +249,7 @@ async function run() {
 
     try {
         // 登录
-        await page.goto('http://yiyu.yiyutx.top/yysh/#/pages/login/login');
+        if (!(await gotoGame(page))) throw new Error('打开游戏页失败(3次重试均超时)');
         await page.waitForTimeout(3000);
 
         // 登录（带重试）
@@ -243,7 +263,10 @@ async function run() {
                     break;
                 }
                 console.log('找不到输入框，刷新页面...');
-                await page.goto('http://yiyu.yiyutx.top/yysh/#/pages/login/login');
+                if (!(await gotoGame(page))) {
+                    await sleep(2000);
+                    continue;
+                }
                 await page.waitForTimeout(3000);
                 const newInputs = await page.$$('input');
                 if (newInputs.length < 2) {
