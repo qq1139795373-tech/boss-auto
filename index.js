@@ -54,6 +54,30 @@ async function clickText(page, text, timeout = 5000) {
     return false;
 }
 
+// JS直接向元素派发鼠标事件，绕过全屏遮罩（城内地图弹窗的遮罩会吃掉坐标点击）
+async function jsClick(page, text) {
+    return await page.evaluate(t => {
+        const all = [...document.querySelectorAll('body *')].filter(el => {
+            const s = el.textContent || '';
+            const r = el.getBoundingClientRect();
+            return el.children.length === 0 && s.includes(t) && r.width > 0 && r.height > 0;
+        });
+        if (!all.length) return false;
+        all.sort((a, b) => a.textContent.trim().length - b.textContent.trim().length);
+        const el = all.find(e => e.textContent.trim() === t) || all[0];
+        const opts = { bubbles: true, cancelable: true, view: window };
+        for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click']) {
+            el.dispatchEvent(new MouseEvent(type, opts));
+        }
+        return true;
+    }, text);
+}
+
+async function clickBtn(page, text, timeout = 3000) {
+    if (await jsClick(page, text)) return true;
+    return await clickText(page, text, timeout);
+}
+
 // 精确匹配整段文本的按钮（避免“避战”匹配到“迎战或避战”说明文字、“自动航行”匹配到“停止自动航行”）
 async function clickExact(page, text, timeout = 3000) {
     try {
@@ -71,21 +95,28 @@ async function sailFlow(page) {
         return false;
     }
 
-    let step = await clickText(page, '出航', 2000);
+    await page.keyboard.press('Escape');
+    await sleep(500);
+
+    let step = await clickBtn(page, '出航', 2000);
     if (!step) {
-        await clickText(page, '城内地图');
+        await clickBtn(page, '城内地图');
         await sleep(2000);
-        await clickText(page, '码头');
+        await clickBtn(page, '码头');
         await sleep(3000);
-        step = await clickText(page, '出航');
+        step = await clickBtn(page, '出航');
+    }
+    if (!step) {
+        console.log('找不到出航入口，页面文本:', (await getPageText(page)).substring(0, 300));
+        return false;
     }
     await sleep(2000);
-    await clickExact(page, NAV_REGION);
+    await clickBtn(page, NAV_REGION);
     await sleep(1000);
 
     let picked = false;
     for (let s = 0; s < 5; s++) {
-        if (await clickText(page, NAV_DEST, 2000)) {
+        if (await clickBtn(page, NAV_DEST, 2000)) {
             await sleep(1500);
             if ((await getPageText(page)).includes('出航确认')) {
                 picked = true;
@@ -95,10 +126,13 @@ async function sailFlow(page) {
         await page.mouse.wheel(0, 300);
         await sleep(1000);
     }
-    if (!picked) console.log('未看到出航确认框，继续尝试...');
+    if (!picked) {
+        console.log('未看到出航确认框，中止出航。页面文本:', (await getPageText(page)).substring(0, 300));
+        return false;
+    }
 
     await sleep(1000);
-    await clickText(page, '立即出发');
+    await clickBtn(page, '立即出发');
     await sleep(2000);
     await clickExact(page, '自动航行', 5000);
     console.log('3. 航行中...');
@@ -153,13 +187,16 @@ async function teleportToDest(page) {
         await sleep(3000);
         console.log('传送兜底: 重新登录完成');
 
-        let ok = await clickText(page, '传送', 2000);
+        await page.keyboard.press('Escape');
+        await sleep(500);
+
+        let ok = await clickBtn(page, '传送', 2000);
         if (!ok) {
-            await clickText(page, '城内地图');
+            await clickBtn(page, '城内地图');
             await sleep(2000);
-            await clickText(page, '码头');
+            await clickBtn(page, '码头');
             await sleep(3000);
-            ok = await clickText(page, '传送');
+            ok = await clickBtn(page, '传送');
         }
         if (!ok) {
             console.log('传送兜底: 找不到传送入口');
@@ -168,12 +205,12 @@ async function teleportToDest(page) {
         }
         await sleep(2000);
 
-        await clickExact(page, NAV_REGION);
+        await clickBtn(page, NAV_REGION);
         await sleep(1000);
 
         let picked = false;
         for (let s = 0; s < 5; s++) {
-            if (await clickText(page, NAV_DEST, 2000)) {
+            if (await clickBtn(page, NAV_DEST, 2000)) {
                 picked = true;
                 break;
             }
@@ -185,9 +222,9 @@ async function teleportToDest(page) {
         await sleep(3000);
         let txt = await getPageText(page);
         if (!txt.includes(`当前城市：${NAV_DEST}`)) {
-            await clickText(page, '确定');
+            await clickBtn(page, '确定');
             await sleep(2000);
-            await clickText(page, '确认');
+            await clickBtn(page, '确认');
             await sleep(2000);
             txt = await getPageText(page);
         }
@@ -225,7 +262,7 @@ async function run() {
     const { hour, min } = await getBjTime();
     console.log(`北京时间: ${hour}:${String(min).padStart(2, '0')}`);
 
-    // 只有11:50-12:30才打boss，其他时间跳过
+    // 只有11:50-12:30才打boss，其他时间跳过（11:50出门，12:00开打，兼容3:50 UTC的cron触发）
     if (!FORCE && (hour > 12 || (hour === 12 && min >= 30) || hour < 11 || (hour === 11 && min < 50))) {
         console.log('非boss时间，跳过boss');
         return;
