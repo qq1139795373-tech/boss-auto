@@ -409,9 +409,12 @@ async function openBoss(page) {
         if (!(await clickText(page, '鱼老板', 3000))) {
             await jsClick(page, '鱼老板');
         }
-        await sleep(2000);
+        // 高峰期服务器响应慢，固定等2秒不够：轮询最多6秒等购买鱼饵出现
+        for (let w = 0; w < 6; w++) {
+            await sleep(1000);
+            if ((await getPageText(page)).includes('购买鱼饵')) return true;
+        }
         const t = await getPageText(page);
-        if (t.includes('购买鱼饵')) return true;
         console.log(`第${attempt}次未打开鱼老板页:`, t.substring(0, 100));
     }
     console.log('ERROR: 鱼老板页3次未打开');
