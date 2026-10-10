@@ -367,7 +367,7 @@ function extractOrderState(t) {
 async function scanOrders(page) {
     return await page.evaluate(() => {
         const badges = [...document.querySelectorAll('body *')].filter(e =>
-            e.children.length === 0 && /^(已)?满足$/.test((e.textContent || '').trim()));
+            e.children.length === 0 && /^(可提交|已满足|满足)$/.test((e.textContent || '').trim()));
         const cards = [];
         for (const b of badges) {
             let card = b;
@@ -447,7 +447,8 @@ async function doOrders(page) {
         let capEnd = false;
         let strikes = 0;
         for (let round = 0; round < 12; round++) {
-            const before = extractOrderState(await getPageText(page));
+            const beforeT = await getPageText(page);
+            const before = extractOrderState(beforeT);
             const scan = await scanOrders(page);
             if (scan === 'clicked') {
                 let changed = false;
@@ -455,7 +456,8 @@ async function doOrders(page) {
                 const start = Date.now();
                 while (Date.now() - start < 4500) {
                     const ct = await getPageText(page);
-                    if (extractOrderState(ct) !== before) { changed = true; break; }
+                    if ((ct.includes('提交成功') && !beforeT.includes('提交成功')) ||
+                        extractOrderState(ct) !== before) { changed = true; break; }
                     if (!triedConfirm && ct.includes('确定') && ct.includes('取消')) {
                         triedConfirm = true;
                         await jsClick(page, '确定');
