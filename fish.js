@@ -106,6 +106,34 @@ async function clickLeaf(page, text, exactOnly = true) {
 }
 
 // 开出航面板→选区域→点目的地→轮询出航确认；失败关面板整轮重试（最多3轮）
+// 卡副本自恢复：身处副本房间先点「退出副本」回城（重登也会落回副本，必须点退出）
+async function exitDungeonIfInside(page) {
+    const t0 = await getPageText(page);
+    if (!(t0.includes('副本条件') && t0.includes('回到起点'))) return false;
+    console.log('自恢复：检测到身处副本，先退出副本...');
+    for (let i = 1; i <= 3; i++) {
+        if (!(await clickText(page, '退出副本', 2000))) {
+            await jsClick(page, '退出副本');
+        }
+        await sleep(1500);
+        let t = await getPageText(page);
+        if (t.includes('副本条件') && t.includes('确定')) {
+            await clickExact(page, '确定', 2000);
+            await sleep(1500);
+            t = await getPageText(page);
+        }
+        if (!(t.includes('副本条件') && t.includes('回到起点'))) {
+            console.log('已退出副本');
+            return true;
+        }
+        console.log(`第${i}次退出副本未生效，重试...`);
+    }
+    const t = await getPageText(page);
+    console.log('退出副本失败，仍在:', t.replace(/\s+/g, ' ').substring(0, 200));
+    await page.screenshot({ path: 'dungeon-recover-fail.png' }).catch(() => {});
+    return false;
+}
+
 async function pickConfirm(page, region, dest) {
     for (let round = 1; round <= 3; round++) {
         // 先关掉可能遮挡点击的弹窗/残留面板（高峰期弹窗会吃掉坐标点击）
@@ -225,6 +253,9 @@ async function teleportToDest(page) {
         await sleep(1000);
         await clickText(page, '进入游戏');
         await sleep(3000);
+
+        // 重登可能落回副本房间，先退出再开传送面板
+        await exitDungeonIfInside(page);
 
         // 打开传送面板并验证：区域标签出现才算真打开（坐标点击被遮罩吃掉会假成功）
         let panelOpen = false;
@@ -488,63 +519,75 @@ async function openBoss(page) {
     return false;
 }
 
-// 买鱼饵，qty=补齐数量
+// 买鱼饵，qty=补齐数量。高峰期鱼饵列表渲染慢，按钮/确认框会晚到：
+// 多轮轮询找按钮+等确认框，都就绪才下手（实测单发一次点不到就整轮放弃导致钓鱼跳过）
 async function buyBait(page, qty = 100) {
-    const ok = await page.evaluate(() => {
-        const cands = [...document.querySelectorAll('body *')].filter(el => {
-            const r = el.getBoundingClientRect();
-            return el.children.length === 0 && el.textContent.trim() === '购买' &&
-                r.width > 0 && r.height > 0;
-        });
-        if (!cands.length) return false;
-        // 锁定“小鱼活饵”的购买按钮：找同时含物品名和银贝金额的最小行（小鱼活饵 50 银贝 购买），
-        // 避免点到蚯蚓等其他鱼饵；锁不到就失败，绝不乱点
-        let best = null;
-        let bestLen = Infinity;
-        for (const b of cands) {
-            let p = b.parentElement;
-            for (let d = 0; d < 6 && p; d++, p = p.parentElement) {
-                const txt = p.textContent || '';
-                if (txt.includes('小鱼活饵') && txt.includes('银贝') && txt.length < bestLen) {
-                    best = b;
-                    bestLen = txt.length;
-                    break;
+    for (let round = 1; round <= 5; round++) {
+        if (round > 1) await sleep(2000);
+        const ok = await page.evaluate(() => {
+            const cands = [...document.querySelectorAll('body *')].filter(el => {
+                const r = el.getBoundingClientRect();
+                return el.children.length === 0 && el.textContent.trim() === '购买' &&
+                    r.width > 0 && r.height > 0;
+            });
+            if (!cands.length) return false;
+            // 锁定“小鱼活饵”的购买按钮：找同时含物品名和银贝金额的最小行（小鱼活饵 50 银贝 购买），
+            // 避免点到蚯蚓等其他鱼饵；锁不到就失败，绝不乱点
+            let best = null;
+            let bestLen = Infinity;
+            for (const b of cands) {
+                let p = b.parentElement;
+                for (let d = 0; d < 6 && p; d++, p = p.parentElement) {
+                    const txt = p.textContent || '';
+                    if (txt.includes('小鱼活饵') && txt.includes('银贝') && txt.length < bestLen) {
+                        best = b;
+                        bestLen = txt.length;
+                        break;
+                    }
                 }
             }
+            if (!best) return false;
+            const opts = { bubbles: true, cancelable: true, view: window };
+            for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click']) {
+                best.dispatchEvent(new MouseEvent(type, opts));
+            }
+            return true;
+        });
+        if (!ok) {
+            console.log(`第${round}轮未找到小鱼活饵的购买按钮`);
+            continue;
         }
-        if (!best) return false;
-        const opts = { bubbles: true, cancelable: true, view: window };
-        for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click']) {
-            best.dispatchEvent(new MouseEvent(type, opts));
+        // 点了购买按钮后轮询最多6秒等确认框弹出
+        let t = '';
+        for (let w = 0; w < 6; w++) {
+            await sleep(1000);
+            t = await getPageText(page);
+            if (t.includes('确认购买')) break;
         }
+        if (!t.includes('确认购买')) {
+            console.log(`第${round}轮未弹出购买框:`, t.substring(0, 150));
+            await page.screenshot({ path: 'fish-buy-dialog-fail.png' }).catch(() => {});
+            continue;
+        }
+        // 填购买数量（页面上唯一的输入框）
+        const inputs = await page.$$('input');
+        let filled = false;
+        for (const inp of inputs) {
+            if (await inp.isVisible().catch(() => false)) {
+                await inp.fill(String(qty)).catch(() => {});
+                filled = true;
+            }
+        }
+        console.log(`购买数量填${qty}:`, filled);
+        await clickExact(page, '确认购买');
+        await sleep(2000);
+        t = await getPageText(page);
+        console.log('购买后:', t.includes('确认购买') ? '购买框仍在' : '购买框已关闭');
         return true;
-    });
-    if (!ok) {
-        console.log('找不到小鱼活饵的购买按钮');
-        return false;
     }
-    await sleep(1500);
-    let t = await getPageText(page);
-    if (!t.includes('确认购买')) {
-        console.log('未弹出购买框:', t.substring(0, 150));
-        await page.screenshot({ path: 'fish-buy-dialog-fail.png' }).catch(() => {});
-        return false;
-    }
-    // 填购买数量（页面上唯一的输入框）
-    const inputs = await page.$$('input');
-    let filled = false;
-    for (const inp of inputs) {
-        if (await inp.isVisible().catch(() => false)) {
-            await inp.fill(String(qty)).catch(() => {});
-            filled = true;
-        }
-    }
-    console.log(`购买数量填${qty}:`, filled);
-    await clickExact(page, '确认购买');
-    await sleep(2000);
-    t = await getPageText(page);
-    console.log('购买后:', t.includes('确认购买') ? '购买框仍在' : '购买框已关闭');
-    return true;
+    console.log('多轮重试后仍买不了鱼饵（按钮或确认框未就绪）');
+    await page.screenshot({ path: 'fish-buy-fail.png' }).catch(() => {});
+    return false;
 }
 
 // 读鱼老板页账户银贝（顶部「账户：金贝… 银贝:4801 铜贝:493」；饵料行「50银贝」没冒号不会误匹配）
@@ -950,6 +993,10 @@ async function run() {
             await browser.close();
             return;
         }
+
+        // 卡副本自恢复（dungeon误进/未退出会把号留在房间里，后续全部步骤都会撞死）
+        await exitDungeonIfInside(page);
+        pageText = await getPageText(page);
 
         // 1. 到威尼斯
         if (pageText.includes(`当前城市：${NAV_DEST}`)) {

@@ -552,15 +552,26 @@ async function run() {
             return;
         }
 
-        // 进入副本 → 确定
+        // 进入副本 → 确定。进本是异步的，固定等2.5秒就下结论会在高峰期误报：
+        // 实测点击已生效却被判「未进入」，把号留在副本里毁掉后续全部步骤。
+        // 改为轮询最多45秒等房间标志（副本条件/回到起点），仍没进再补点，最多3轮
         console.log('进入副本...');
-        await clickText(page, '进入副本');
-        await sleep(1500);
-        await clickExact(page, '确定');
-        await sleep(2500);
-
-        pageText = await getPageText(page);
-        if (!pageText.includes('副本条件') && !pageText.includes('回到起点')) {
+        let entered = false;
+        for (let round = 1; round <= 3 && !entered; round++) {
+            if (round > 1) console.log(`第${round}轮重新点击进入副本...`);
+            await clickText(page, '进入副本', 3000);
+            await sleep(1500);
+            await clickExact(page, '确定');
+            for (let w = 0; w < 15; w++) {
+                await sleep(1000);
+                pageText = await getPageText(page);
+                if (pageText.includes('副本条件') || pageText.includes('回到起点')) {
+                    entered = true;
+                    break;
+                }
+            }
+        }
+        if (!entered) {
             console.log('未进入副本，页面文本:', pageText.substring(0, 300));
             await page.screenshot({ path: 'dungeon-enter-fail.png' }).catch(() => {});
             await browser.close();

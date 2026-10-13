@@ -62,6 +62,34 @@ async function clickExact(page, text, timeout = 3000) {
 
 // 出航到威尼斯（小号会被农场开到杭州；活动NPC只在威尼斯福利院）
 // 开出航面板→选区域→点目的地→轮询出航确认；失败关面板整轮重试（最多3轮）
+// 卡副本自恢复：身处副本房间先点「退出副本」回城（重登也会落回副本，必须点退出）
+async function exitDungeonIfInside(page) {
+    const t0 = await getPageText(page);
+    if (!(t0.includes('副本条件') && t0.includes('回到起点'))) return false;
+    log('自恢复：检测到身处副本，先退出副本...');
+    for (let i = 1; i <= 3; i++) {
+        if (!(await clickText(page, '退出副本', 2000))) {
+            await jsClick(page, '退出副本');
+        }
+        await sleep(1500);
+        let t = await getPageText(page);
+        if (t.includes('副本条件') && t.includes('确定')) {
+            await clickExact(page, '确定', 2000);
+            await sleep(1500);
+            t = await getPageText(page);
+        }
+        if (!(t.includes('副本条件') && t.includes('回到起点'))) {
+            log('已退出副本');
+            return true;
+        }
+        log(`第${i}次退出副本未生效，重试...`);
+    }
+    const t = await getPageText(page);
+    log(`退出副本失败，仍在: ${t.replace(/\s+/g, ' ').substring(0, 200)}`);
+    await page.screenshot({ path: 'mibao-dungeon-recover-fail.png' }).catch(() => {});
+    return false;
+}
+
 async function pickConfirm(page, region, dest) {
     for (let round = 1; round <= 3; round++) {
         // 先关掉可能遮挡点击的弹窗/残留面板（高峰期弹窗会吃掉坐标点击）
@@ -184,6 +212,9 @@ async function teleportToDest(page) {
         await sleep(1000);
         await clickText(page, '进入游戏');
         await sleep(3000);
+
+        // 重登可能落回副本房间，先退出再开传送面板
+        await exitDungeonIfInside(page);
 
         // 打开传送面板并验证：区域标签出现才算真打开（坐标点击被遮罩吃掉会假成功）
         let panelOpen = false;
@@ -462,6 +493,10 @@ async function run() {
             return;
         }
         log('已进入游戏主界面');
+
+        // 卡副本自恢复（dungeon误进/未退出会把号留在房间里，后续全部步骤都会撞死）
+        await exitDungeonIfInside(page);
+        t = await getPageText(page);
 
         // 2.5 不在威尼斯先出航（农场会把号开走；活动NPC在威尼斯福利院）
         if (!t.includes(`当前城市：${NAV_DEST}`)) {

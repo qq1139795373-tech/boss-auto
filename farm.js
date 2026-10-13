@@ -182,6 +182,34 @@ async function sailFlow(page) {
     return false;
 }
 
+// 卡副本自恢复：身处副本房间先点「退出副本」回城（重登也会落回副本，必须点退出）
+async function exitDungeonIfInside(page) {
+    const t0 = await getPageText(page);
+    if (!(t0.includes('副本条件') && t0.includes('回到起点'))) return false;
+    console.log('自恢复：检测到身处副本，先退出副本...');
+    for (let i = 1; i <= 3; i++) {
+        if (!(await clickText(page, '退出副本', 2000))) {
+            await jsClick(page, '退出副本');
+        }
+        await sleep(1500);
+        let t = await getPageText(page);
+        if (t.includes('副本条件') && t.includes('确定')) {
+            await clickExact(page, '确定', 2000);
+            await sleep(1500);
+            t = await getPageText(page);
+        }
+        if (!(t.includes('副本条件') && t.includes('回到起点'))) {
+            console.log('已退出副本');
+            return true;
+        }
+        console.log(`第${i}次退出副本未生效，重试...`);
+    }
+    const t = await getPageText(page);
+    console.log('退出副本失败，仍在:', t.replace(/\s+/g, ' ').substring(0, 200));
+    await page.screenshot({ path: 'dungeon-recover-fail.png' }).catch(() => {});
+    return false;
+}
+
 // 传送兜底：出航流程失败后重新登录 → 码头点传送 → 点目标城市瞬间到达
 async function teleportToDest(page) {
     console.log('传送兜底: 重新登录游戏...');
@@ -206,6 +234,9 @@ async function teleportToDest(page) {
         await clickText(page, '进入游戏');
         await sleep(3000);
         console.log('传送兜底: 重新登录完成');
+
+        // 重登可能落回副本房间，先退出再开传送面板
+        await exitDungeonIfInside(page);
 
         await page.keyboard.press('Escape');
         await sleep(500);
@@ -367,6 +398,9 @@ async function run() {
         // 再次检查
         pageText = await getPageText(page);
         console.log('关闭弹窗后前200字:', pageText.substring(0, 200));
+
+        // 卡副本自恢复（dungeon误进/未退出会把号留在房间里，后续全部步骤都会撞死）
+        await exitDungeonIfInside(page);
 
         // 检查是否在杭州
         pageText = await getPageText(page);
