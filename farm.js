@@ -109,49 +109,79 @@ async function clickExact(page, text, timeout = 3000) {
     }
 }
 
+async function pickConfirm(page, region, dest) {
+    for (let round = 1; round <= 3; round++) {
+        // 先关掉可能遮挡点击的弹窗/残留面板（高峰期弹窗会吃掉坐标点击）
+        await page.mouse.click(10, 10);
+        await sleep(300);
+        await page.keyboard.press('Escape');
+        await sleep(500);
+        let opened = await clickText(page, '出航', 2000);
+        if (!opened) {
+            await clickText(page, '城内地图');
+            await sleep(2000);
+            await clickText(page, '码头');
+            await sleep(3000);
+            await clickText(page, '出航');
+        }
+        await sleep(2000);
+        await clickExact(page, region);
+        await sleep(1000);
+        for (let s = 0; s < 5; s++) {
+            // 第2轮起用JS叶子派发点击，绕过遮罩对坐标点击的拦截
+            const ok = round === 1
+                ? await clickText(page, dest, 2000)
+                : await jsClick(page, dest);
+            if (ok) {
+                // 高峰期确认框慢半拍，单次1.5秒查询会误判，改成最多9秒轮询
+                for (let c = 0; c < 6; c++) {
+                    await sleep(1500);
+                    if ((await getPageText(page)).includes('出航确认')) return true;
+                }
+            }
+            await page.mouse.wheel(0, 300);
+            await sleep(1000);
+        }
+        console.log(`未看到出航确认框，重开面板重试(${round}/3)...`);
+    }
+    return false;
+}
+
+// 出航失败时把现场拍下来（此前失败路径无任何页面文本，无从定位）
+async function failNav(page, why) {
+    const t = await getPageText(page);
+    console.log(`出航中止(${why})，页面文本: ${t.replace(/\s+/g, ' ').substring(0, 300)}`);
+    await page.screenshot({ path: 'nav-fail-detail.png' }).catch(() => {});
+    return false;
+}
+
 // 出航流程：出航菜单→区域→城市→出航确认→自动航行→航行循环（海盗避战/恢复），返回是否到达
 async function sailFlow(page) {
-    // Escape清掉残留弹窗/遮罩，再进出航（遮罩会吃掉坐标点击，改用jsClick穿遮罩）
-    await page.keyboard.press('Escape');
-    await sleep(500);
+    let picked = await pickConfirm(page, NAV_REGION, NAV_DEST);
+    if (!picked) return failNav(page, '出航确认框始终未出现');
 
-    let step = await clickBtn(page, '出航', 2000);
-    if (!step) {
-        await clickBtn(page, '城内地图');
-        await sleep(2000);
-        await clickBtn(page, '码头');
-        await sleep(3000);
-        step = await clickBtn(page, '出航');
-    }
-    if (!step) {
-        console.log('找不到出航入口，页面文本:', (await getPageText(page)).substring(0, 300));
-        return false;
-    }
+    await clickText(page, '立即出发');
     await sleep(2000);
-    await clickBtn(page, NAV_REGION);
-    await sleep(1000);
-
-    let picked = false;
-    for (let s = 0; s < 5; s++) {
-        if (await clickBtn(page, NAV_DEST, 2000)) {
-            await sleep(1500);
-            if ((await getPageText(page)).includes('出航确认')) {
-                picked = true;
+    // 验证真进入航行状态（出现「停止自动航行」），未启动则整轮重来，最多2次
+    let sailing = false;
+    for (let a = 1; a <= 2 && !sailing; a++) {
+        await clickExact(page, '自动航行', 5000);
+        for (let c = 0; c < 5; c++) {
+            await sleep(1000);
+            if ((await getPageText(page)).includes('停止自动航行')) {
+                sailing = true;
                 break;
             }
         }
-        await page.mouse.wheel(0, 300);
-        await sleep(1000);
+        if (!sailing && a === 1) {
+            console.log('自动航行未启动，重新开面板选目的地...');
+            picked = await pickConfirm(page, NAV_REGION, NAV_DEST);
+            if (!picked) break;
+            await clickText(page, '立即出发');
+            await sleep(2000);
+        }
     }
-    if (!picked) {
-        console.log('未看到出航确认框，中止出航。页面文本:', (await getPageText(page)).substring(0, 300));
-        return false;
-    }
-
-    await sleep(1000);
-    await clickBtn(page, '立即出发');
-    await sleep(2000);
-    await clickExact(page, '自动航行', 5000);
+    if (!sailing) return failNav(page, '自动航行未启动');
     console.log('航行中...');
 
     for (let w = 0; w < 80; w++) {
@@ -238,52 +268,62 @@ async function teleportToDest(page) {
         // 重登可能落回副本房间，先退出再开传送面板
         await exitDungeonIfInside(page);
 
-        await page.keyboard.press('Escape');
-        await sleep(500);
-
-        let ok = await clickBtn(page, '传送', 2000);
-        if (!ok) {
-            await clickBtn(page, '城内地图');
-            await sleep(2000);
-            await clickBtn(page, '码头');
-            await sleep(3000);
-            ok = await clickBtn(page, '传送');
+        // 打开传送面板并验证：区域标签出现才算真打开（坐标点击被遮罩吃掉会假成功）
+        let panelOpen = false;
+        for (let i = 0; i < 3 && !panelOpen; i++) {
+            let ok = await clickText(page, '传送', 2000);
+            if (!ok) {
+                await clickText(page, '城内地图');
+                await sleep(2000);
+                await clickText(page, '码头');
+                await sleep(3000);
+                ok = await clickText(page, '传送');
+            }
+            await sleep(1500);
+            const pt = await getPageText(page);
+            panelOpen = pt.includes('地中海') && pt.includes('印度洋');
+            if (!panelOpen) {
+                console.log(`传送面板未打开(${i + 1}/3)，关闭重试...`);
+                await page.mouse.click(10, 10);
+                await sleep(300);
+                await page.keyboard.press('Escape');
+                await sleep(500);
+            }
         }
-        if (!ok) {
-            console.log('传送兜底: 找不到传送入口');
+        if (!panelOpen) {
+            const pt = await getPageText(page);
+            console.log('传送兜底: 找不到传送入口，页面文本:', pt.replace(/\s+/g, ' ').substring(0, 300));
             await page.screenshot({ path: 'teleport-fail.png' }).catch(() => {});
             return false;
         }
-        await sleep(2000);
 
-        await clickBtn(page, NAV_REGION);
+        await clickExact(page, NAV_REGION);
         await sleep(1000);
 
-        let picked = false;
         for (let s = 0; s < 5; s++) {
-            if (await clickBtn(page, NAV_DEST, 2000)) {
-                picked = true;
-                break;
-            }
+            if (await clickText(page, NAV_DEST, 2000)) break;
             await page.mouse.wheel(0, 300);
             await sleep(1000);
         }
-        if (!picked) console.log('传送兜底: 列表中找不到目的地');
 
-        await sleep(3000);
-        let txt = await getPageText(page);
-        if (!txt.includes(`当前城市：${NAV_DEST}`)) {
-            await clickBtn(page, '确定');
-            await sleep(2000);
-            await clickBtn(page, '确认');
-            await sleep(2000);
+        // 传送即时生效：轮询到达，其间按需点确定/确认
+        let txt = '';
+        for (let i = 0; i < 8; i++) {
+            await sleep(1500);
             txt = await getPageText(page);
+            if (txt.includes(`当前城市：${NAV_DEST}`)) {
+                console.log(`传送兜底: 已到达${NAV_DEST}`);
+                return true;
+            }
+            if (txt.includes('确定')) {
+                await clickText(page, '确定');
+                await sleep(1000);
+            } else if (txt.includes('确认')) {
+                await clickText(page, '确认');
+                await sleep(1000);
+            }
         }
-        if (txt.includes(`当前城市：${NAV_DEST}`)) {
-            console.log(`传送兜底: 已到达${NAV_DEST}`);
-            return true;
-        }
-        console.log('传送兜底: 未检测到到达，页面文本:', txt.substring(0, 300));
+        console.log('传送兜底: 未检测到到达，页面文本:', txt.replace(/\s+/g, ' ').substring(0, 300));
         await page.screenshot({ path: 'teleport-fail.png' }).catch(() => {});
         return false;
     } catch (e) {
