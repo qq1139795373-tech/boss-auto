@@ -71,6 +71,9 @@ jobs:
           npm install
           npx playwright install chromium
 
+      - name: 随机错峰
+        run: sleep $((RANDOM % 300))
+
       - name: Run Tasks
         env:
           TASKS_MODE: ${{ inputs.tasks_mode }}
