@@ -24,6 +24,9 @@ jobs:
           npm install
           npx playwright install chromium
 
+      - name: 随机错峰
+        run: sleep $((RANDOM % 300))
+
       - name: Run Tasks
         env:
           GAME_ACCOUNT: ${{ secrets.GAME_ACCOUNT }}
