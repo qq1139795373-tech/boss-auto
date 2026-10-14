@@ -41,6 +41,73 @@ async function tapExact(page, text) {
     return false;
 }
 
+// 领取福利-签到页进度条里程碑宝箱（7天/14天/21天/满勤28天）。
+// 三重判断：①累计签到X/31文本算应达标天数；②节点class（ms-claimed=已领取跳过、ms-locked=未达标跳过）；
+// ③弹窗内有「领取奖励」按钮才真正点领取，点完验证按钮消失
+async function claimMilestones(page) {
+    const labels = ['7天', '14天', '21天', '满勤28天'];
+    const thresholds = [7, 14, 21, 28];
+    const t = await getPageText(page);
+    const m = t.match(/累计签到\s*(\d+)\s*\/\s*(\d+)/);
+    const cum = m ? parseInt(m[1], 10) : -1;
+    if (cum < 0) {
+        console.log('里程碑: 未解析到累计签到文本，放弃判断');
+        return;
+    }
+    const reached = thresholds.map(T => cum >= T);
+    console.log(`里程碑: 累计签到${cum}/${m[2]} → 应达标: ${labels.filter((_, i) => reached[i]).join(',') || '无'} | 未达标: ${labels.filter((_, i) => !reached[i]).join(',') || '无'}`);
+
+    const nodes = await page.$$('.ms-chest-node').catch(() => []);
+    console.log(`里程碑宝箱节点数=${nodes.length}`);
+    const modal = page.locator('.milestone-reward-modal');
+    if (await modal.isVisible({ timeout: 500 }).catch(() => false)) {
+        await page.locator('.milestone-reward-modal .modal-close-btn').first().click({ force: true }).catch(() => {});
+        await sleep(800);
+    }
+    for (let i = 0; i < Math.min(nodes.length, labels.length); i++) {
+        try {
+            const iconClass = await nodes[i].$eval('.ms-chest-icon', el => el.className).catch(() => '');
+            if (iconClass.includes('ms-claimed')) {
+                console.log(`[${labels[i]}] 节点✓已领取，跳过`);
+                continue;
+            }
+            if (iconClass.includes('ms-locked') && !reached[i]) {
+                console.log(`[${labels[i]}] 未达标(累计${cum}<${thresholds[i]})，跳过`);
+                continue;
+            }
+            await nodes[i].scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {});
+            await sleep(300);
+            await nodes[i].click({ force: true }).catch(() => {});
+            await sleep(1500);
+            if (!(await modal.isVisible({ timeout: 1500 }).catch(() => false))) {
+                console.log(`[${labels[i]}] 未弹窗，重试点击`);
+                await nodes[i].click({ force: true }).catch(() => {});
+                await sleep(1500);
+                if (!(await modal.isVisible({ timeout: 1500 }).catch(() => false))) {
+                    console.log(`[${labels[i]}] 仍无弹窗，跳过`);
+                    continue;
+                }
+            }
+            const status = ((await page.locator('.milestone-modal-status').textContent().catch(() => '')) || '').trim();
+            const claimBtn = modal.getByText('领取奖励', { exact: true }).first();
+            if (await claimBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
+                await claimBtn.click({ force: true }).catch(() => {});
+                await sleep(2000);
+                const gone = !(await claimBtn.isVisible({ timeout: 1000 }).catch(() => false));
+                const status2 = ((await page.locator('.milestone-modal-status').textContent().catch(() => '')) || '').trim();
+                console.log(`[${labels[i]}] 已点领取 按钮消失=${gone} 状态=${status2 || '(奖励列表视图)'}`);
+                if (!gone) await page.screenshot({ path: `milestone-claim-${i}-verify.png` }).catch(() => {});
+            } else {
+                console.log(`[${labels[i]}] 无领取按钮 状态=${status || '(无)'} 跳过`);
+            }
+            await page.locator('.milestone-reward-modal .modal-close-btn').first().click({ force: true }).catch(() => {});
+            await sleep(800);
+        } catch (e) {
+            console.log(`[${labels[i]}] 里程碑处理异常:`, e.message);
+        }
+    }
+}
+
 async function run() {
     const browser = await chromium.launch({ headless: true });
     const context = await browser.newContext();
@@ -151,6 +218,7 @@ async function run() {
         // 5. 已签直接完成
         if (t.includes('今日已签到')) {
             console.log('今日已签到，跳过');
+            await claimMilestones(page);
             return;
         }
 
@@ -179,6 +247,7 @@ async function run() {
             return;
         }
         console.log('签到完成: 按钮已变为今日已签到');
+        await claimMilestones(page);
     } catch (e) {
         console.error('ERROR: 签到流程异常:', e.message);
         console.log(`::error::签到异常: ${e.message}`);
