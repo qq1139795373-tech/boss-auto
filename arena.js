@@ -274,9 +274,29 @@ async function run() {
         while (count !== null && count < 10) {
             let clicked = await clickLeaf(page, '开始匹配');
             if (!clicked) clicked = await clickText(page, '开始匹配', 3000);
-            if (!clicked) {
+            if (!clicked && (await getPageText(page)).includes('开始匹配')) {
                 await jsClick(page, '开始匹配');
                 clicked = true;
+            }
+            if (!clicked) {
+                console.log('未找到开始匹配按钮，等2秒重试...');
+                await sleep(2000);
+                clicked = await clickLeaf(page, '开始匹配');
+                if (!clicked) clicked = await clickText(page, '开始匹配', 2000);
+                if (!clicked) {
+                    console.log('仍无开始匹配按钮，重新进入竞技场...');
+                    await page.goBack().catch(() => {});
+                    await sleep(2000);
+                    if (await openArena(page)) {
+                        clicked = await clickLeaf(page, '开始匹配');
+                        if (!clicked) clicked = await clickText(page, '开始匹配', 2000);
+                    }
+                }
+                if (!clicked) {
+                    console.log('竞技场页面异常(始终无开始匹配按钮)，停止');
+                    await page.screenshot({ path: 'arena-broken.png' }).catch(() => {});
+                    break;
+                }
             }
             await sleep(3000);
 
