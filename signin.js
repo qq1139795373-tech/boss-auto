@@ -223,7 +223,9 @@ async function run() {
         }
 
         // 6. 点「今日签到」→ 验证：按钮变「今日已签到」或累计签到数+1（防按钮渲染成空白态被误判失败）
-        const cumBefore = ((await getPageText(page)).match(/累计签到\s*(\d+)/) || [])[1];
+        // 累计数严格取「累计签到 X/31」格式，且基准值必须 >0（防页面未加载完的占位 0 造成误判成功）
+        const cumRe = /累计签到\s*(\d+)\s*[\/／]\s*31/;
+        const cumBefore = ((await getPageText(page)).match(cumRe) || [])[1];
         let signed = false;
         for (let attempt = 1; attempt <= 3; attempt++) {
             if (!(await tapExact(page, '今日签到'))) {
@@ -234,8 +236,9 @@ async function run() {
                 await sleep(2500);
             }
             t = await getPageText(page);
-            const cumNow = (t.match(/累计签到\s*(\d+)/) || [])[1];
-            if (t.includes('今日已签到') || (cumBefore && cumNow && Number(cumNow) > Number(cumBefore))) {
+            const cumNow = (t.match(cumRe) || [])[1];
+            const cumOk = cumBefore && Number(cumBefore) > 0 && cumNow && Number(cumNow) > Number(cumBefore);
+            if (t.includes('今日已签到') || cumOk) {
                 console.log(`签到成功 (第${attempt}次${t.includes('今日已签到') ? '' : `，累计${cumBefore}→${cumNow}(按钮空白态)`})`);
                 signed = true;
                 break;
