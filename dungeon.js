@@ -402,6 +402,41 @@ async function clearRoom(page, tag) {
     throw new Error(`[${tag}] 房间怪物清理失败（15次尝试）`);
 }
 
+// 扫荡：进入副本后页头「回到起点」左侧若有「扫荡」，一键扫完4线（免手动清怪）
+// 扫荡收获弹窗（含“扫荡成功”toast）→ 知道了；成功返回 true，无入口/失败返回 false 走原4线流程
+async function trySweep(page) {
+    const t0 = await getPageText(page);
+    if (!t0.includes('扫荡')) {
+        console.log('未见扫荡入口，走手动清怪流程');
+        return false;
+    }
+    console.log('发现扫荡入口，点击扫荡...');
+    let ok = await clickLeaf(page, '扫荡');
+    if (!ok) ok = await jsClick(page, '扫荡');
+    if (!ok) {
+        console.log('扫荡入口点击失败');
+        return false;
+    }
+    let txt = '';
+    for (let w = 0; w < 8; w++) {
+        await sleep(1000);
+        txt = await getPageText(page);
+        if (txt.includes('扫荡收获') || txt.includes('扫荡成功')) break;
+    }
+    if (!txt.includes('扫荡收获') && !txt.includes('扫荡成功')) {
+        console.log('未出现扫荡结果，页面:', txt.substring(0, 150).replace(/\s+/g, ' '));
+        return false;
+    }
+    for (let i = 0; i < 4; i++) {
+        if (await clickExact(page, '知道了', 2000)) break;
+        if (await clickExact(page, '确定', 1500)) break;
+        await sleep(800);
+    }
+    await sleep(1500);
+    console.log('扫荡成功（剩余', await remainMin(page), '分钟），跳过4线清怪');
+    return true;
+}
+
 async function run() {
     const browser = await chromium.launch({ headless: true });
     const context = await browser.newContext();
@@ -483,8 +518,16 @@ async function run() {
             return;
         }
 
-        // 上次中断后续打：登录后若已身处副本（副本条件+回到起点），跳过出航与进入流程
-        const inDungeon = pageText.includes('副本条件') && pageText.includes('回到起点');
+        // 上次中断后续打：登录后若已身处副本，跳过出航与进入流程
+        // 必须确认是炼器窟（副本条件行含4种炼器窟怪名），否则可能把人困在其他副本里乱打
+        const insideDungeon = pageText.includes('副本条件') && pageText.includes('回到起点');
+        const inLqk = insideDungeon && MONSTERS.some(m => pageText.includes(m));
+        if (insideDungeon && !inLqk) {
+            console.log('当前身处其他副本（非炼器窟），跳过不处理，页面:', pageText.substring(0, 120).replace(/\s+/g, ' '));
+            await browser.close();
+            return;
+        }
+        const inDungeon = inLqk;
         if (inDungeon) {
             console.log('已在副本内（续打），跳过出航/进入流程');
         } else if (pageText.includes(`当前城市：${NAV_DEST}`)) {
@@ -580,6 +623,14 @@ async function run() {
         console.log('已进入副本');
         }
 
+        let totalKills = 0;
+        const armResults = [];
+
+        // 扫荡优先：进本后页头（「回到起点」左侧）有「扫荡」就一键完成，免走4线
+        const swept = NO_CLAIM ? false : await trySweep(page);
+        if (swept) {
+            armResults.push('扫荡');
+        } else {
         // 回到枢纽广场：不在枢纽就先回到起点，再往北走（矿洞入口→前厅→枢纽广场）
         if (!(await atHub(page)) && !(await backToHub(page))) {
             console.log('未能到达枢纽广场，退出');
@@ -588,9 +639,6 @@ async function run() {
             return;
         }
         console.log('到达枢纽广场，剩余', await remainMin(page), '分钟');
-
-        let totalKills = 0;
-        const armResults = [];
 
         for (const arm of ARMS) {
             if (!(await atHub(page))) {
@@ -645,8 +693,9 @@ async function run() {
         }
 
         console.log('各线结果:', armResults.join(' | '), '| 总击杀:', totalKills, '| 剩余', await remainMin(page), '分钟');
+        }
 
-        const allArmsDone = armResults.length === 4 && !armResults.some(r => r.includes('无入口'));
+        const allArmsDone = swept || (armResults.length === 4 && !armResults.some(r => r.includes('无入口')));
 
         // 领取奖励（只在4线全部走完后）
         pageText = await getPageText(page);
