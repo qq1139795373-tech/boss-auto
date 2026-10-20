@@ -766,6 +766,28 @@ async function departForFishing(page) {
     return true;
 }
 
+// 页面卡死自救：重载页面（会话有效会自动回到游戏），必要时重新登录
+async function reloadGame(page) {
+    try {
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+    } catch (e) {
+        console.log('重载页面失败:', (e.message || '').split('\n')[0]);
+        return false;
+    }
+    await sleep(3000);
+    if ((await getPageText(page)).includes('请输入账号密码')) {
+        console.log('重载后回到登录页，重新登录...');
+        try {
+            await gotoGame(page, 3);
+        } catch (e) {
+            console.log('重登失败:', (e.message || '').split('\n')[0]);
+            return false;
+        }
+        await sleep(3000);
+    }
+    return true;
+}
+
 // 钓鱼面板里反复甩竿，直到“暂无鱼饵”或“每天钓鱼最多100次”
 async function castLoop(page) {
     if (!(await clickExact(page, '钓鱼', 3000))) {
@@ -775,6 +797,7 @@ async function castLoop(page) {
 
     let casts = 0;
     let reason = '';
+    let stuck = 0;
     for (let i = 0; i < 140; i++) {
         let t = await getPageText(page);
         if (t.includes('暂无鱼饵')) { reason = '暂无鱼饵'; break; }
@@ -784,6 +807,14 @@ async function castLoop(page) {
             if (t.includes('航行中') || t.includes('剩余距离')) {
                 await clickExact(page, '钓鱼', 2000);
                 await sleep(1000);
+                stuck++;
+                // 页面渲染异常时点不开面板，会静默空转到循环上限（0竿），强制重载页面自救
+                if (stuck >= 5) {
+                    console.log(`连续${stuck}次打不开钓鱼面板，重载页面自救...`);
+                    await page.screenshot({ path: 'fish-panel-stuck.png' }).catch(() => {});
+                    await reloadGame(page);
+                    stuck = 0;
+                }
                 continue;
             }
             console.log('钓鱼面板丢失:', t.substring(0, 120));
@@ -1095,6 +1126,7 @@ async function run() {
         }
         const { casts, reason } = await castLoop(page);
         await page.screenshot({ path: 'fish-after-cast.png' }).catch(() => {});
+        if (casts === 0) console.log('::error::钓鱼：0竿(钓鱼面板打不开/页面异常)');
 
         // 4. 返航
         if (!(await returnToPort(page))) {
