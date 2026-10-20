@@ -333,6 +333,90 @@ async function teleportToDest(page) {
     }
 }
 
+// 掉线自救：重新打开游戏并登录（会话失效时自动填账号），返回是否完成
+async function relogin(page) {
+    if (!(await gotoGame(page))) {
+        console.log('自救: 打开页面失败(3次重试均超时)');
+        return false;
+    }
+    await page.waitForTimeout(3000);
+    const inputs = await page.$$('input');
+    if (inputs.length >= 2) {
+        await inputs[0].fill(ACCOUNT).catch(() => {});
+        await inputs[1].fill(PASSWORD).catch(() => {});
+        await page.getByText('登录').first().click().catch(() => {});
+        await sleep(3000);
+    } else {
+        console.log('自救: 会话有效，页面已自动进入游戏');
+    }
+    await closePopup(page);
+    await sleep(1000);
+    await clickText(page, '进入游戏');
+    await sleep(3000);
+    await closePopup(page);
+    console.log('自救: 重新登录完成');
+    return true;
+}
+
+// 走到西湖（杭州城内：西城门 -> 龙井村 -> 西湖），失败返回 false
+async function gotoXihu(page) {
+    // 导航到西湖：西城门 -> 龙井村 -> 西湖（手机手动验证过的路径）
+    // 到达西城门的标志：状态行出现"西：龙井村"
+    console.log('导航到西湖...');
+    await page.keyboard.press('Escape');
+    await sleep(1000);
+
+    let pageText;
+
+    // 第1步：走到西城门
+    for (let i = 0; i < 4; i++) {
+        pageText = await getPageText(page);
+        if (pageText.includes('西：龙井村') || pageText.includes('西:龙井村')) {
+            console.log('[nav] 已在西城门（看到龙井村）');
+            break;
+        }
+        let ok = await jsClick(page, '西城门');
+        if (!ok || i >= 1) {
+            console.log(`[nav] 打开城内地图(${i + 1}):`, await jsClick(page, '城内地图'));
+            await sleep(2000);
+            ok = await jsClick(page, '西城门');
+        }
+        console.log(`[nav] 点西城门(${i + 1}):`, ok, i >= 1 ? '(经城内地图)' : '(主页面)');
+        await sleep(3000);
+        await page.screenshot({ path: `nav-2-gate-${i + 1}.png` }).catch(() => {});
+    }
+    pageText = await getPageText(page);
+    console.log('[nav] 第1步后地图:', mapBlock(pageText), '| 西向龙井村=' + (pageText.includes('西：龙井村') || pageText.includes('西:龙井村')));
+
+    // 第2步：点龙井村（只在还站在西城门方向上时点）
+    for (let i = 0; i < 3; i++) {
+        pageText = await getPageText(page);
+        if (!pageText.includes('西：龙井村') && !pageText.includes('西:龙井村')) break;
+        console.log(`[nav] 点龙井村(${i + 1}):`, await jsClick(page, '龙井村'));
+        await sleep(3000);
+        await page.screenshot({ path: `nav-3-ljc-${i + 1}.png` }).catch(() => {});
+    }
+    pageText = await getPageText(page);
+    console.log('[nav] 第2步后地图:', mapBlock(pageText), '| 北向西湖=' + (pageText.includes('北：西湖') || pageText.includes('北:西湖')));
+
+    // 第3步：进西湖
+    for (let i = 0; i < 3; i++) {
+        pageText = await getPageText(page);
+        if (pageText.includes('水怪')) break;
+        console.log(`[nav] 点西湖(${i + 1}):`, await jsClick(page, '西湖'));
+        await sleep(3000);
+        await page.screenshot({ path: `nav-4-xihu-${i + 1}.png` }).catch(() => {});
+    }
+
+    pageText = await getPageText(page);
+    console.log('[nav] 到达后地图:', mapBlock(pageText), '| 水怪=' + pageText.includes('水怪'));
+    if (pageText.includes('水怪') || pageText.includes('当前城市：杭州')) {
+        console.log('到达西湖');
+        return true;
+    }
+    return false;
+}
+
 async function run() {
     const browser = await chromium.launch({ headless: true });
     const context = await browser.newContext();
@@ -468,57 +552,7 @@ async function run() {
             console.log('到达杭州');
         }
 
-        // 导航到西湖：西城门 -> 龙井村 -> 西湖（手机手动验证过的路径）
-        // 到达西城门的标志：状态行出现"西：龙井村"
-        console.log('导航到西湖...');
-        await page.keyboard.press('Escape');
-        await sleep(1000);
-
-        // 第1步：走到西城门
-        for (let i = 0; i < 4; i++) {
-            pageText = await getPageText(page);
-            if (pageText.includes('西：龙井村') || pageText.includes('西:龙井村')) {
-                console.log('[nav] 已在西城门（看到龙井村）');
-                break;
-            }
-            let ok = await jsClick(page, '西城门');
-            if (!ok || i >= 1) {
-                console.log(`[nav] 打开城内地图(${i + 1}):`, await jsClick(page, '城内地图'));
-                await sleep(2000);
-                ok = await jsClick(page, '西城门');
-            }
-            console.log(`[nav] 点西城门(${i + 1}):`, ok, i >= 1 ? '(经城内地图)' : '(主页面)');
-            await sleep(3000);
-            await page.screenshot({ path: `nav-2-gate-${i + 1}.png` });
-        }
-        pageText = await getPageText(page);
-        console.log('[nav] 第1步后地图:', mapBlock(pageText), '| 西向龙井村=' + (pageText.includes('西：龙井村') || pageText.includes('西:龙井村')));
-
-        // 第2步：点龙井村（只在还站在西城门方向上时点）
-        for (let i = 0; i < 3; i++) {
-            pageText = await getPageText(page);
-            if (!pageText.includes('西：龙井村') && !pageText.includes('西:龙井村')) break;
-            console.log(`[nav] 点龙井村(${i + 1}):`, await jsClick(page, '龙井村'));
-            await sleep(3000);
-            await page.screenshot({ path: `nav-3-ljc-${i + 1}.png` });
-        }
-        pageText = await getPageText(page);
-        console.log('[nav] 第2步后地图:', mapBlock(pageText), '| 北向西湖=' + (pageText.includes('北：西湖') || pageText.includes('北:西湖')));
-
-        // 第3步：进西湖
-        for (let i = 0; i < 3; i++) {
-            pageText = await getPageText(page);
-            if (pageText.includes('水怪')) break;
-            console.log(`[nav] 点西湖(${i + 1}):`, await jsClick(page, '西湖'));
-            await sleep(3000);
-            await page.screenshot({ path: `nav-4-xihu-${i + 1}.png` });
-        }
-
-        pageText = await getPageText(page);
-        console.log('[nav] 到达后地图:', mapBlock(pageText), '| 水怪=' + pageText.includes('水怪'));
-        if (pageText.includes('水怪') || pageText.includes('当前城市：杭州')) {
-            console.log('到达西湖');
-        } else {
+        if (!(await gotoXihu(page))) {
             // 不在杭州时“西湖导航”会在错误城市空转，直接退出而不是假装到达
             console.log('不在杭州，西湖导航失败，退出农场');
             await page.screenshot({ path: 'farm-nav-fail.png' }).catch(() => {});
@@ -531,9 +565,24 @@ async function run() {
         let count = 0;
         const loopStart = Date.now();
         let lastLogAt = Date.now();
+        let lastCountAt = Date.now();
         console.log('进入打怪循环（进度每60秒汇报一次）');
         while (true) {
             pageText = await getPageText(page);
+
+            // 掉线自救：会话失效会退回登录页，原逻辑只点刷新，能空转几小时
+            if (pageText.includes('请输入账号密码') || (pageText.includes('已保存账号') && pageText.includes('请输入密码'))) {
+                console.log(`检测到掉回登录页(已打${count}次)，重新登录...`);
+                await page.screenshot({ path: 'farm-offline.png' }).catch(() => {});
+                if (await relogin(page)) {
+                    pageText = await getPageText(page);
+                    if (!pageText.includes('水怪')) await gotoXihu(page).catch(() => false);
+                    lastCountAt = Date.now();
+                } else {
+                    await sleep(10000);
+                }
+                continue;
+            }
 
             if (pageText.includes('水怪')) {
                 await clickText(page, '水怪');
@@ -548,6 +597,7 @@ async function run() {
                 await sleep(50);
 
                 count++;
+                lastCountAt = Date.now();
             } else {
                 if (count === 0 && !global.__shot) {
                     global.__shot = true;
@@ -555,6 +605,17 @@ async function run() {
                 }
                 await clickText(page, '刷新');
                 await sleep(50);
+            }
+
+            // 10分钟没击杀=卡死（页面空白/人物异常），重登并走回西湖自愈
+            if (Date.now() - lastCountAt >= 600000) {
+                console.log(`连续10分钟无击杀(已打${count}次)，尝试自愈：重登+走回西湖...`);
+                await page.screenshot({ path: 'farm-stuck.png' }).catch(() => {});
+                await relogin(page);
+                pageText = await getPageText(page);
+                if (!pageText.includes('水怪')) await gotoXihu(page).catch(() => false);
+                lastCountAt = Date.now();
+                continue;
             }
 
             const now = Date.now();
