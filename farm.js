@@ -417,12 +417,8 @@ async function gotoXihu(page) {
     return false;
 }
 
-// 波次交接期（北京 00:00/06:00/11:50/18:00 前后20分钟）：此时掉线几乎都是新一波任务登录顶号，不能抢号
-function inHandoverWindow() {
-    const bj = new Date(Date.now() + 8 * 3600 * 1000);
-    const mins = bj.getUTCHours() * 60 + bj.getUTCMinutes();
-    return [[0, 20], [360, 380], [710, 730], [1080, 1100]].some(([s, e]) => mins >= s && mins <= e);
-}
+// 掉线/被顶号的等待重登时间：期间可能是用户在手动操作，不能抢号
+const RELOGIN_WAIT_MS = 30 * 60 * 1000;
 
 async function run() {
     const browser = await chromium.launch({ headless: true });
@@ -573,37 +569,40 @@ async function run() {
         const loopStart = Date.now();
         let lastLogAt = Date.now();
         let lastCountAt = Date.now();
-        let lastReloginAt = 0;
+        let kickedAt = 0;
+        let kickLogAt = 0;
         console.log('进入打怪循环（进度每60秒汇报一次）');
         while (true) {
             pageText = await getPageText(page);
 
             // 掉线自救：会话失效会退回登录页，原逻辑只点刷新，能空转几小时
-            // 但波次交接期/刚重登又被踢时不能抢号（会把新一波的登录顶掉，导致boss被跳过）
+            // 但掉线也可能是用户手动登录/新一波顶号，先让位 30 分钟，期间不自作主张重登抢号
             if (pageText.includes('请输入账号密码') || (pageText.includes('已保存账号') && pageText.includes('请输入密码'))) {
-                console.log(`检测到掉回登录页(已打${count}次)`);
-                await page.screenshot({ path: 'farm-offline.png' }).catch(() => {});
-                if (inHandoverWindow()) {
-                    console.log('处于波次交接期，疑似新一波任务已接管，停止刷怪让位');
-                    await page.screenshot({ path: 'farm-handover-yield.png' }).catch(() => {});
-                    break;
+                const now = Date.now();
+                if (!kickedAt) {
+                    kickedAt = now;
+                    console.log(`检测到掉回登录页(已打${count}次)，可能被顶号或在水手操，先让位30分钟再尝试重登`);
+                    await page.screenshot({ path: 'farm-offline.png' }).catch(() => {});
                 }
-                if (Date.now() - lastReloginAt < 300000) {
-                    console.log('刚重登又被顶下线，疑似有别的会话在用，停止刷怪让位');
-                    await page.screenshot({ path: 'farm-kicked-out.png' }).catch(() => {});
-                    break;
+                if (now - kickedAt < RELOGIN_WAIT_MS) {
+                    if (now - kickLogAt >= 300000) {
+                        kickLogAt = now;
+                        console.log(`让位等待中：已等 ${Math.round((now - kickedAt) / 60000)} 分钟（满30分钟再重登）`);
+                    }
+                    await sleep(10000);
+                    continue;
                 }
-                console.log('重新登录...');
+                console.log(`已让位 ${Math.round((now - kickedAt) / 60000)} 分钟，尝试重新登录...`);
                 if (await relogin(page)) {
-                    lastReloginAt = Date.now();
                     pageText = await getPageText(page);
                     if (!pageText.includes('水怪')) await gotoXihu(page).catch(() => false);
                     lastCountAt = Date.now();
-                } else {
-                    await sleep(10000);
                 }
+                kickedAt = 0;
+                kickLogAt = 0;
                 continue;
             }
+            kickedAt = 0;
 
             if (pageText.includes('水怪')) {
                 await clickText(page, '水怪');
@@ -630,15 +629,9 @@ async function run() {
 
             // 10分钟没击杀=卡死（页面空白/人物异常），重登并走回西湖自愈
             if (Date.now() - lastCountAt >= 600000) {
-                if (inHandoverWindow()) {
-                    console.log('连续10分钟无击杀且处于波次交接期，停止刷怪让位');
-                    await page.screenshot({ path: 'farm-handover-yield.png' }).catch(() => {});
-                    break;
-                }
                 console.log(`连续10分钟无击杀(已打${count}次)，尝试自愈：重登+走回西湖...`);
                 await page.screenshot({ path: 'farm-stuck.png' }).catch(() => {});
                 await relogin(page);
-                lastReloginAt = Date.now();
                 pageText = await getPageText(page);
                 if (!pageText.includes('水怪')) await gotoXihu(page).catch(() => false);
                 lastCountAt = Date.now();
