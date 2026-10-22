@@ -235,6 +235,31 @@ async function sailFlow(page, dest = NAV_DEST, region = NAV_REGION) {
     return false;
 }
 
+// 打开传送面板（不在码头先走城内地图→码头），返回是否真打开
+async function openTeleportPanel(page) {
+    for (let i = 0; i < 3; i++) {
+        const t = await getPageText(page);
+        if (!t.includes('码头')) {
+            await clickText(page, '城内地图');
+            await sleep(2000);
+            await clickText(page, '码头');
+            await sleep(3000);
+        }
+        let ok = await clickText(page, '传送', 2500);
+        if (!ok) ok = await jsClick(page, '传送');
+        await sleep(2500);
+        const pt = await getPageText(page);
+        // 放宽判定：页面半渲染时只会出现部分洲名
+        if (pt.includes('地中海') || pt.includes('印度洋') || pt.includes('大西洋') || pt.includes('太平洋')) return true;
+        console.log(`传送面板未打开(${i + 1}/3)，关闭重试...`);
+        await page.mouse.click(10, 10);
+        await sleep(300);
+        await page.keyboard.press('Escape');
+        await sleep(500);
+    }
+    return false;
+}
+
 async function teleportToDest(page) {
     console.log('传送兜底: 重新登录游戏...');
     try {
@@ -257,27 +282,15 @@ async function teleportToDest(page) {
         // 重登可能落回副本房间，先退出再开传送面板
         await exitDungeonIfInside(page);
 
-        // 打开传送面板并验证：区域标签出现才算真打开（坐标点击被遮罩吃掉会假成功）
-        let panelOpen = false;
-        for (let i = 0; i < 3 && !panelOpen; i++) {
-            let ok = await clickText(page, '传送', 2000);
-            if (!ok) {
-                await clickText(page, '城内地图');
-                await sleep(2000);
-                await clickText(page, '码头');
-                await sleep(3000);
-                ok = await clickText(page, '传送');
-            }
-            await sleep(1500);
-            const pt = await getPageText(page);
-            panelOpen = pt.includes('地中海') && pt.includes('印度洋');
-            if (!panelOpen) {
-                console.log(`传送面板未打开(${i + 1}/3)，关闭重试...`);
-                await page.mouse.click(10, 10);
-                await sleep(300);
-                await page.keyboard.press('Escape');
-                await sleep(500);
-            }
+        // 面板打不开多半是页面半渲染（点击无响应），重载页面再来一轮基本能救回
+        let panelOpen = await openTeleportPanel(page);
+        if (!panelOpen) {
+            console.log('传送面板多次打不开，重载页面后再试一轮...');
+            await page.screenshot({ path: 'teleport-reload.png' }).catch(() => {});
+            await reloadGame(page);
+            await sleep(4000);
+            await exitDungeonIfInside(page);
+            panelOpen = await openTeleportPanel(page);
         }
         if (!panelOpen) {
             const pt = await getPageText(page);
@@ -1029,19 +1042,27 @@ async function run() {
         await exitDungeonIfInside(page);
         pageText = await getPageText(page);
 
-        // 1. 到威尼斯
+        // 1. 到威尼斯（失败不直接放弃：重载页面再试一轮，点击无响应多半能救回）
         if (pageText.includes(`当前城市：${NAV_DEST}`)) {
             console.log(`已在${NAV_DEST}`);
         } else {
-            console.log(`不在${NAV_DEST}，导航中...`);
-            const arrived = await sailFlow(page);
-            if (!arrived) {
-                console.log('出航约5分钟未完成，改用传送兜底...');
-                await page.screenshot({ path: 'nav-fail.png' }).catch(() => {});
-                await teleportToDest(page);
+            for (let round = 1; round <= 2; round++) {
+                console.log(`不在${NAV_DEST}，导航中...(第${round}/2轮)`);
+                if (round > 1) {
+                    await reloadGame(page);
+                    await sleep(4000);
+                    await exitDungeonIfInside(page);
+                }
+                const arrived = await sailFlow(page);
+                if (!arrived) {
+                    console.log('出航约5分钟未完成，改用传送兜底...');
+                    await page.screenshot({ path: 'nav-fail.png' }).catch(() => {});
+                    await teleportToDest(page);
+                }
+                await sleep(2000);
+                pageText = await getPageText(page);
+                if (pageText.includes(`当前城市：${NAV_DEST}`)) break;
             }
-            await sleep(2000);
-            pageText = await getPageText(page);
             if (!pageText.includes(`当前城市：${NAV_DEST}`)) {
                 console.log(`未到达${NAV_DEST}，退出`);
                 await page.screenshot({ path: 'fish-nav-fail.png' }).catch(() => {});
