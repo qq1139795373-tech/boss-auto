@@ -240,6 +240,53 @@ async function exitDungeonIfInside(page) {
     return false;
 }
 
+// 重载页面（会话仍有效会自动回到游戏），用于点击无响应时刷新前端
+async function reloadGame(page) {
+    try {
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+    } catch (e) {
+        console.log('重载页面失败:', (e.message || '').split('\n')[0]);
+        return false;
+    }
+    await sleep(3000);
+    if ((await getPageText(page)).includes('请输入账号密码')) {
+        console.log('重载后回到登录页，重新登录...');
+        try {
+            await gotoGame(page, 3);
+        } catch (e) {
+            console.log('重登失败:', (e.message || '').split('\n')[0]);
+            return false;
+        }
+        await sleep(3000);
+    }
+    return true;
+}
+
+// 打开传送面板（不在码头先走城内地图→码头），返回是否真打开
+async function openTeleportPanel(page) {
+    for (let i = 0; i < 3; i++) {
+        const t = await getPageText(page);
+        if (!t.includes('码头')) {
+            await clickText(page, '城内地图');
+            await sleep(2000);
+            await clickText(page, '码头');
+            await sleep(3000);
+        }
+        let ok = await clickText(page, '传送', 2500);
+        if (!ok) ok = await jsClick(page, '传送');
+        await sleep(2500);
+        const pt = await getPageText(page);
+        // 放宽判定：页面半渲染时只会出现部分洲名
+        if (pt.includes('地中海') || pt.includes('印度洋') || pt.includes('大西洋') || pt.includes('太平洋')) return true;
+        console.log(`传送面板未打开(${i + 1}/3)，关闭重试...`);
+        await page.mouse.click(10, 10);
+        await sleep(300);
+        await page.keyboard.press('Escape');
+        await sleep(500);
+    }
+    return false;
+}
+
 // 传送兜底：出航流程失败后重新登录 → 码头点传送 → 点目标城市瞬间到达
 async function teleportToDest(page) {
     console.log('传送兜底: 重新登录游戏...');
@@ -268,27 +315,15 @@ async function teleportToDest(page) {
         // 重登可能落回副本房间，先退出再开传送面板
         await exitDungeonIfInside(page);
 
-        // 打开传送面板并验证：区域标签出现才算真打开（坐标点击被遮罩吃掉会假成功）
-        let panelOpen = false;
-        for (let i = 0; i < 3 && !panelOpen; i++) {
-            let ok = await clickText(page, '传送', 2000);
-            if (!ok) {
-                await clickText(page, '城内地图');
-                await sleep(2000);
-                await clickText(page, '码头');
-                await sleep(3000);
-                ok = await clickText(page, '传送');
-            }
-            await sleep(1500);
-            const pt = await getPageText(page);
-            panelOpen = pt.includes('地中海') && pt.includes('印度洋');
-            if (!panelOpen) {
-                console.log(`传送面板未打开(${i + 1}/3)，关闭重试...`);
-                await page.mouse.click(10, 10);
-                await sleep(300);
-                await page.keyboard.press('Escape');
-                await sleep(500);
-            }
+        // 面板打不开多半是页面半渲染（点击无响应），重载页面再来一轮基本能救回
+        let panelOpen = await openTeleportPanel(page);
+        if (!panelOpen) {
+            console.log('传送面板多次打不开，重载页面后再试一轮...');
+            await page.screenshot({ path: 'teleport-reload.png' }).catch(() => {});
+            await reloadGame(page);
+            await sleep(4000);
+            await exitDungeonIfInside(page);
+            panelOpen = await openTeleportPanel(page);
         }
         if (!panelOpen) {
             const pt = await getPageText(page);
@@ -529,23 +564,33 @@ async function run() {
         // 卡副本自恢复（dungeon误进/未退出会把号留在房间里，后续全部步骤都会撞死）
         await exitDungeonIfInside(page);
 
-        // 检查是否在杭州
+        // 检查是否在杭州（失败不直接放弃：重载页面再试一轮，点击无响应多半能救回）
         pageText = await getPageText(page);
         if (pageText.includes('当前城市：杭州')) {
             console.log('已在杭州');
         } else {
-            console.log('不在杭州，导航中...');
+            for (let round = 1; round <= 2; round++) {
+                console.log(`不在杭州，导航中...(第${round}/2轮)`);
 
-            const arrived = await sailFlow(page);
-            if (!arrived) {
-                console.log('出航未完成（中止或约5分钟超时），改用传送兜底...');
-                await page.screenshot({ path: 'nav-fail.png' }).catch(() => {});
-                await teleportToDest(page);
+                if (round > 1) {
+                    await reloadGame(page);
+                    await sleep(4000);
+                    await exitDungeonIfInside(page);
+                }
+
+                const arrived = await sailFlow(page);
+                if (!arrived) {
+                    console.log('出航未完成（中止或约5分钟超时），改用传送兜底...');
+                    await page.screenshot({ path: 'nav-fail.png' }).catch(() => {});
+                    await teleportToDest(page);
+                }
+                await sleep(2000);
+
+                pageText = await getPageText(page);
+                if (pageText.includes('当前城市：杭州')) break;
             }
-            await sleep(2000);
 
             // 严格校验：没到杭州绝不往下走（否则会在错误城市空转数小时）
-            pageText = await getPageText(page);
             if (!pageText.includes('当前城市：杭州')) {
                 console.log('未到达杭州，跳过农场');
                 await page.screenshot({ path: 'farm-nav-fail.png' }).catch(() => {});
