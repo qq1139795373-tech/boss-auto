@@ -405,7 +405,15 @@ async function clearRoom(page, tag) {
 // 扫荡：进入副本后页头「回到起点」左侧若有「扫荡」，一键扫完4线（免手动清怪）
 // 扫荡收获弹窗（含“扫荡成功”toast）→ 知道了；成功返回 true，无入口/失败返回 false 走原4线流程
 async function trySweep(page) {
-    const t0 = await getPageText(page);
+    // 副本页是异步渲染的：刚进本时「扫荡」链接可能还没出来，先轮询等一会儿（最多约6秒）
+    let t0 = await getPageText(page);
+    let waited = 0;
+    for (let i = 0; i < 4 && !t0.includes('扫荡'); i++) {
+        await sleep(1500);
+        waited += 1.5;
+        t0 = await getPageText(page);
+    }
+    if (t0.includes('扫荡') && waited > 0) console.log(`等待${waited}秒后扫荡入口出现`);
     if (!t0.includes('扫荡')) {
         // 诊断：无扫荡入口时记录副本条件行+关键按钮，判断是次数/道具限制还是页面没渲染
         const i = t0.indexOf('副本条件');
