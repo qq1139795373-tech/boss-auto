@@ -407,7 +407,11 @@ async function clearRoom(page, tag) {
 async function trySweep(page) {
     const t0 = await getPageText(page);
     if (!t0.includes('扫荡')) {
-        console.log('未见扫荡入口，走手动清怪流程');
+        // 诊断：无扫荡入口时记录副本条件行+关键按钮，判断是次数/道具限制还是页面没渲染
+        const i = t0.indexOf('副本条件');
+        const seg = i >= 0 ? t0.slice(i, i + 100).replace(/\s+/g, ' ') : '(页面无副本条件行)';
+        console.log(`未见扫荡入口，走手动清怪流程 | ${seg} | 回到起点=${t0.includes('回到起点')} 退出副本=${t0.includes('退出副本')} 领取奖励=${t0.includes('领取奖励')} 文本长=${t0.length}`);
+        await page.screenshot({ path: 'dungeon-no-sweep.png' }).catch(() => {});
         return false;
     }
     console.log('发现扫荡入口，点击扫荡...');
