@@ -105,8 +105,24 @@ function atCity(txt, dest) {
 }
 
 // 出航到指定城市（照 farm.js pickConfirm：重开面板3轮，防弹窗吃掉面板点击）
+// 起航判定：航行中/剩余距离/停止自动航行 任一出现即算离港（只认「停止自动航行」会误判，见 fish.js）
+async function waitSailing(page, sec) {
+    for (let i = 0; i < sec; i++) {
+        const t = await getPageText(page);
+        if (t.includes('航行中') || t.includes('剩余距离') || t.includes('停止自动航行')) return true;
+        await sleep(1000);
+    }
+    return false;
+}
+
 async function sailTo(page, dest) {
     await backToMain(page); // 任务页/弹窗残留会让出航面板打不开
+    // 已在目标城市：出航列表不列当前城市，硬选必然失败
+    const preSail = await getPageText(page);
+    if (!preSail.includes('停止自动航行') && !preSail.includes('剩余距离') && preSail.includes(`当前城市：${dest}`)) {
+        console.log(`已在${dest}，无需出航`);
+        return true;
+    }
     // 若身处野区（无出航链接），先点城内地图回城
     if (!(await getPageText(page)).includes('出航')) {
         await clickLeaf(page, '城内地图');
@@ -156,12 +172,21 @@ async function sailTo(page, dest) {
         if (!picked) console.log(`未看到${dest}出航确认框，重开面板重试(${round}/3)...`);
     }
     if (!picked) {
-        console.log(`未看到${dest}出航确认框，页面快照:`, (await getPageText(page)).substring(0, 200).replace(/\s+/g, ' '));
+        console.log(`未看到${dest}出航确认框，放弃出航（不盲点立即出发干等5分钟）`);
         await page.screenshot({ path: `daily-sail-fail.png` }).catch(() => {});
+        return false;
     }
     await sleep(1000);
     await clickText(page, '立即出发');
-    await sleep(2000);
+    if (!(await waitSailing(page, 25))) {
+        console.log('点立即出发后未见起航，重点一次再等...');
+        await clickText(page, '立即出发');
+        if (!(await waitSailing(page, 20))) {
+            console.log('起航未确认(航行中/剩余距离都没出现)，放弃出航');
+            await page.screenshot({ path: 'daily-sail-fail.png' }).catch(() => {});
+            return false;
+        }
+    }
     await clickExact(page, '自动航行', 5000);
     console.log(`航行去${dest}中...`);
     for (let w = 0; w < 100; w++) {
