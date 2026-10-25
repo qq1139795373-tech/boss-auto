@@ -135,37 +135,52 @@ async function failNav(page, why) {
 }
 
 // 出航流程：出航菜单→区域→城市→出航确认→自动航行→航行循环（海盗避战/恢复），返回是否到达
+// 起航判定：航行中/剩余距离/停止自动航行 任一出现即算离港（同 fish.js，见注释）
+async function waitSailing(page, sec) {
+    for (let i = 0; i < sec; i++) {
+        const t = await getPageText(page);
+        if (t.includes('航行中') || t.includes('剩余距离') || t.includes('停止自动航行')) return true;
+        await sleep(1000);
+    }
+    return false;
+}
+
 async function sailFlow(page) {
     if (FORCE && process.env.TEST_FALLBACK === 'true') {
         console.log('测试模式: 跳过出航流程，直接走传送兜底');
         return false;
     }
 
-    let picked = await pickConfirm(page, NAV_REGION, NAV_DEST);
+    // 已在海上 → 直接等到达；重开出航面板在海上必然失败，会误判成出航失败去传送
+    const pre = await getPageText(page);
+    const already = pre.includes('停止自动航行') || pre.includes('剩余距离');
+    // 已在目标城市：出航列表不列当前城市，硬选必然失败 → 直接算到达
+    if (!already && pre.includes(`当前城市：${NAV_DEST}`)) {
+        console.log(`已在${NAV_DEST}，无需出航`);
+        return true;
+    }
+    if (already) console.log('已在航行中，跳过出航选择直接等待到达...');
+    const picked = already ? true : await pickConfirm(page, NAV_REGION, NAV_DEST);
     if (!picked) return failNav(page, '出航确认框始终未出现');
 
-    await clickText(page, '立即出发');
-    await sleep(2000);
-    // 验证真进入航行状态（出现「停止自动航行」），未启动则整轮重来，最多2次
-    let sailing = false;
-    for (let a = 1; a <= 2 && !sailing; a++) {
-        await clickExact(page, '自动航行', 5000);
-        for (let c = 0; c < 5; c++) {
-            await sleep(1000);
-            if ((await getPageText(page)).includes('停止自动航行')) {
-                sailing = true;
-                break;
+    if (!already) {
+        await clickText(page, '立即出发');
+        let sailing = await waitSailing(page, 25);
+        if (!sailing) {
+            console.log('未见起航，重点「立即出发」再等...');
+            await clickText(page, '立即出发');
+            sailing = await waitSailing(page, 20);
+        }
+        if (!sailing) {
+            console.log('仍未起航，重开出航面板选目的地...');
+            const again = await pickConfirm(page, NAV_REGION, NAV_DEST);
+            if (again) {
+                await clickText(page, '立即出发');
+                sailing = await waitSailing(page, 25);
             }
         }
-        if (!sailing && a === 1) {
-            console.log('自动航行未启动，重新开面板选目的地...');
-            picked = await pickConfirm(page, NAV_REGION, NAV_DEST);
-            if (!picked) break;
-            await clickText(page, '立即出发');
-            await sleep(2000);
-        }
+        if (!sailing) return failNav(page, '起航未确认(航行中/剩余距离都没出现)');
     }
-    if (!sailing) return failNav(page, '自动航行未启动');
     console.log('3. 航行中...');
 
     for (let w = 0; w < 80; w++) {
@@ -198,6 +213,12 @@ async function sailFlow(page) {
 
 // 传送兜底：出航流程失败后重新登录 → 码头点传送 → 点目标城市瞬间到达
 async function teleportToDest(page) {
+    // 防白花银币：已在目标城市就别传送（误判/重试命中时常见）
+    const chk = await getPageText(page);
+    if (chk.includes(`当前城市：${NAV_DEST}`)) {
+        console.log(`传送兜底: 其实已在${NAV_DEST}，跳过传送(省银币)`);
+        return true;
+    }
     console.log('传送兜底: 重新登录游戏...');
     try {
         await gotoGame(page);

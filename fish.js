@@ -134,6 +134,106 @@ async function exitDungeonIfInside(page) {
     return false;
 }
 
+// ===== 出航面板：按网页源码的 class 定位（文本仅作兜底）=====
+// 实测结构：.popup-card > .popup-title「出航选择 / 出航确认」
+//   城市行 .city-row > .city-name(精确城市名) + .city-cost(海里)
+//   区域栏 .region-bar 内 .region-chip（当前项带 .active-region，横向滚动）
+//   出发按钮 .btn-confirm「立即出发」
+async function popupTitleVisible(page, keyword) {
+    return await page.evaluate((k) => {
+        for (const c of document.querySelectorAll('.popup-card')) {
+            const t = c.querySelector('.popup-title');
+            const b = c.getBoundingClientRect();
+            if (t && b.width > 0 && (t.textContent || '').includes(k)) return true;
+        }
+        return false;
+    }, keyword).catch(() => false);
+}
+
+// 选中海域标签；区域栏是横向滚动，找不到就横滚再找
+async function selectRegion(page, region) {
+    const read = () => page.evaluate((r) => {
+        const bar = document.querySelector('.region-bar');
+        if (!bar) return null;
+        for (const chip of bar.querySelectorAll('.region-chip')) {
+            if ((chip.textContent || '').trim() !== r) continue;
+            const b = chip.getBoundingClientRect();
+            if (!b.width || !b.height) return null;
+            return {
+                x: Math.round(b.x + b.width / 2), y: Math.round(b.y + b.height / 2),
+                active: chip.classList.contains('active-region'),
+            };
+        }
+        return null;
+    }, region).catch(() => null);
+
+    for (let i = 0; i < 3; i++) {
+        const p = await read();
+        if (!p) {
+            const bar = await page.evaluate(() => {
+                const b = document.querySelector('.region-bar');
+                if (!b) return null;
+                const r = b.getBoundingClientRect();
+                return { x: Math.round(r.x + r.width * 0.75), y: Math.round(r.y + r.height / 2) };
+            }).catch(() => null);
+            if (bar) { await page.mouse.move(bar.x, bar.y); await page.mouse.wheel(300, 0); }
+            await sleep(700);
+            continue;
+        }
+        if (p.active) return true;
+        await page.mouse.click(p.x, p.y);
+        await sleep(1100);
+        const after = await read();
+        if (after && after.active) return true;
+    }
+    return false;
+}
+
+// 点城市行（.city-row 里 .city-name 精确等于目标）；被列表裁掉就滚动
+async function selectCity(page, dest) {
+    for (let s = 0; s < 7; s++) {
+        const pos = await page.evaluate((d) => {
+            for (const row of document.querySelectorAll('.city-row')) {
+                const n = row.querySelector('.city-name');
+                if (!n || (n.textContent || '').trim() !== d) continue;
+                const b = row.getBoundingClientRect();
+                if (!b.width || !b.height) return null;
+                return { x: Math.round(b.x + b.width / 2), y: Math.round(b.y + b.height / 2) };
+            }
+            return null;
+        }, dest).catch(() => null);
+        if (pos) { await page.mouse.click(pos.x, pos.y); return true; }
+        const wrap = await page.evaluate(() => {
+            const w = document.querySelector('.city-scroll-wrap');
+            if (!w) return null;
+            const b = w.getBoundingClientRect();
+            return { x: Math.round(b.x + b.width / 2), y: Math.round(b.y + b.height / 2) };
+        }).catch(() => null);
+        if (wrap) { await page.mouse.move(wrap.x, wrap.y); await page.mouse.wheel(0, 240); }
+        await sleep(700);
+    }
+    return false;
+}
+
+// 点出航确认框的「立即出发」（.btn-confirm）
+async function clickDepartNow(page) {
+    const pos = await page.evaluate(() => {
+        for (const b of document.querySelectorAll('.btn-confirm')) {
+            if (!(b.textContent || '').includes('立即出发')) continue;
+            const r = b.getBoundingClientRect();
+            if (!r.width || !r.height) continue;
+            return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+        }
+        return null;
+    }).catch(() => null);
+    if (pos) { await page.mouse.click(pos.x, pos.y); return true; }
+    return false;
+}
+
+async function depart(page) {
+    if (!(await clickDepartNow(page))) await clickText(page, '立即出发');
+}
+
 async function pickConfirm(page, region, dest) {
     for (let round = 1; round <= 3; round++) {
         // 先关掉可能遮挡点击的弹窗/残留面板（高峰期弹窗会吃掉坐标点击）
@@ -141,31 +241,26 @@ async function pickConfirm(page, region, dest) {
         await sleep(300);
         await page.keyboard.press('Escape');
         await sleep(500);
-        let opened = await clickText(page, '出航', 2000);
-        if (!opened) {
+        if (!(await clickText(page, '出航', 2000))) {
             await clickText(page, '城内地图');
             await sleep(2000);
             await clickText(page, '码头');
             await sleep(3000);
             await clickText(page, '出航');
         }
-        await sleep(2000);
-        await clickExact(page, region);
-        await sleep(1000);
-        for (let s = 0; s < 5; s++) {
-            // 第2轮起用JS叶子派发点击，绕过遮罩对坐标点击的拦截
-            const ok = round === 1
-                ? await clickText(page, dest, 2000)
-                : await jsClick(page, dest);
-            if (ok) {
-                // 高峰期确认框慢半拍，单次1.5秒查询会误判，改成最多9秒轮询
-                for (let c = 0; c < 6; c++) {
-                    await sleep(1500);
-                    if ((await getPageText(page)).includes('出航确认')) return true;
-                }
+        // 等面板真打开（class 判定），避免面板没开就空点一串
+        let opened = false;
+        for (let i = 0; i < 8; i++) {
+            await sleep(500);
+            if (await popupTitleVisible(page, '出航选择')) { opened = true; break; }
+        }
+        if (!opened) { console.log(`出航面板未打开(${round}/3)，重试...`); continue; }
+        if (region) await selectRegion(page, region);
+        if (await selectCity(page, dest)) {
+            for (let c = 0; c < 6; c++) {
+                await sleep(1500);   // 高峰期确认框慢半拍，最多9秒
+                if (await popupTitleVisible(page, '出航确认')) return true;
             }
-            await page.mouse.wheel(0, 300);
-            await sleep(1000);
         }
         console.log(`未看到出航确认框，重开面板重试(${round}/3)...`);
     }
@@ -180,32 +275,49 @@ async function failNav(page, why) {
     return false;
 }
 
+// 起航判定：航行中/剩余距离/停止自动航行 任一出现即算离港。
+// 只认「停止自动航行」会误判——自动航行按钮要 7 秒以上才渲染，CI 慢时判成出航失败，白花银币走传送。
+async function waitSailing(page, sec) {
+    for (let i = 0; i < sec; i++) {
+        const t = await getPageText(page);
+        if (t.includes('航行中') || t.includes('剩余距离') || t.includes('停止自动航行')) return true;
+        await sleep(1000);
+    }
+    return false;
+}
+
 async function sailFlow(page, dest = NAV_DEST, region = NAV_REGION) {
-    let picked = await pickConfirm(page, region, dest);
+    // 已在海上（上次起了航但没等到「停止自动航行」）→ 直接等到达；海上没有「出航」按钮，重开面板必然失败
+    const pre = await getPageText(page);
+    const already = pre.includes('停止自动航行') || pre.includes('剩余距离');
+    // 已在目标城市：出航列表不列当前城市，硬选必然失败 → 直接算到达（"威尼斯出航老失败→传送"的元凶之一）
+    if (!already && pre.includes(`当前城市：${dest}`)) {
+        console.log(`已在${dest}，无需出航`);
+        return true;
+    }
+    if (already) console.log('已在航行中，跳过出航选择直接等待到达...');
+    const picked = already ? true : await pickConfirm(page, region, dest);
     if (!picked) return failNav(page, '出航确认框始终未出现');
 
-    await clickText(page, '立即出发');
-    await sleep(2000);
-    // 验证真进入航行状态（出现「停止自动航行」），未启动则整轮重来，最多2次
-    let sailing = false;
-    for (let a = 1; a <= 2 && !sailing; a++) {
-        await clickExact(page, '自动航行', 5000);
-        for (let c = 0; c < 5; c++) {
-            await sleep(1000);
-            if ((await getPageText(page)).includes('停止自动航行')) {
-                sailing = true;
-                break;
+    if (!already) {
+        await depart(page);
+        let sailing = await waitSailing(page, 25);
+        if (!sailing) {
+            // 确认框可能还在（点到遮罩/面板重渲染），重点一次再等
+            console.log('未见起航，重点「立即出发」再等...');
+            await depart(page);
+            sailing = await waitSailing(page, 20);
+        }
+        if (!sailing) {
+            console.log('仍未起航，重开出航面板选目的地...');
+            const again = await pickConfirm(page, region, dest);
+            if (again) {
+                await depart(page);
+                sailing = await waitSailing(page, 25);
             }
         }
-        if (!sailing && a === 1) {
-            console.log('自动航行未启动，重新开面板选目的地...');
-            picked = await pickConfirm(page, region, dest);
-            if (!picked) break;
-            await clickText(page, '立即出发');
-            await sleep(2000);
-        }
+        if (!sailing) return failNav(page, '起航未确认(航行中/剩余距离都没出现)');
     }
-    if (!sailing) return failNav(page, '自动航行未启动');
     console.log('航行中...');
 
     for (let w = 0; w < 80; w++) {
@@ -261,6 +373,22 @@ async function openTeleportPanel(page) {
 }
 
 async function teleportToDest(page) {
+    // 防白花银币：已到达 / 仍在航行（误判）时绝不传送
+    const chk = await getPageText(page);
+    if (chk.includes(`当前城市：${NAV_DEST}`)) {
+        console.log(`传送兜底: 其实已在${NAV_DEST}，跳过传送(省银币)`);
+        return true;
+    }
+    if (chk.includes('停止自动航行') || chk.includes('剩余距离')) {
+        console.log('传送兜底: 检测到仍在航行，等它走完，不花银币');
+        for (let i = 0; i < 60; i++) {
+            await sleep(3000);
+            const t = await getPageText(page);
+            if (t.includes(`当前城市：${NAV_DEST}`)) { console.log(`传送兜底: 已到达${NAV_DEST}`); return true; }
+            if (t.includes('遭遇海盗')) { await clickExact(page, '避战', 3000); await sleep(2000); }
+        }
+        return false;
+    }
     console.log('传送兜底: 重新登录游戏...');
     try {
         await gotoGame(page);
