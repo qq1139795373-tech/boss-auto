@@ -151,23 +151,31 @@ async function popupTitleVisible(page, keyword) {
 }
 
 // 选中海域标签；区域栏是横向滚动，找不到就横滚再找
+// 返回 true=已切到 / 'nomap'=该号没这个海域的海图（点标签即弹「暂无地图，查看失败」）/ false=点不到
 async function selectRegion(page, region) {
+    const noMap = async () => (await getPageText(page)).includes('暂无地图');
     const read = () => page.evaluate((r) => {
         const bar = document.querySelector('.region-bar');
         if (!bar) return null;
+        const wrapEl = bar.querySelector('.scroll-view_H') || bar;
+        const wb = wrapEl.getBoundingClientRect();
         for (const chip of bar.querySelectorAll('.region-chip')) {
             if ((chip.textContent || '').trim() !== r) continue;
             const b = chip.getBoundingClientRect();
             if (!b.width || !b.height) return null;
+            const cx = b.x + b.width / 2;
             return {
-                x: Math.round(b.x + b.width / 2), y: Math.round(b.y + b.height / 2),
+                x: Math.round(cx), y: Math.round(b.y + b.height / 2),
                 active: chip.classList.contains('active-region'),
+                inView: cx > wb.left + 8 && cx < wb.right - 8,
+                scrollLeft: cx < wb.left + 8 ? 'right' : (cx > wb.right - 8 ? 'left' : null),
+                barX: Math.round(wb.x + wb.width * 0.6), barY: Math.round(wb.y + wb.height / 2),
             };
         }
         return null;
     }, region).catch(() => null);
 
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 5; i++) {
         const p = await read();
         if (!p) {
             const bar = await page.evaluate(() => {
@@ -181,8 +189,17 @@ async function selectRegion(page, region) {
             continue;
         }
         if (p.active) return true;
+        if (!p.inView) {
+            // 中心点在可视区外：点会打偏，先滚进来
+            await page.mouse.move(p.barX, p.barY);
+            await page.mouse.wheel(p.scrollLeft === 'right' ? -200 : 200, 0);
+            await sleep(800);
+            continue;
+        }
         await page.mouse.click(p.x, p.y);
-        await sleep(1100);
+        await sleep(1200);
+        // 点标签就弹「暂无地图，查看失败」= 该号没这个海域的海图（实测 607ms 出现，区域不切换）
+        if (await noMap()) return 'nomap';
         const after = await read();
         if (after && after.active) return true;
     }
@@ -234,6 +251,41 @@ async function depart(page) {
     if (!(await clickDepartNow(page))) await clickText(page, '立即出发');
 }
 
+// 从出航面板读「出发 XX★码头」= 当前所在城市（面板内部信息，比页面文本可靠）
+async function readDepartFrom(page) {
+    return await page.evaluate(() => {
+        for (const c of document.querySelectorAll('.popup-card')) {
+            const t = c.querySelector('.popup-title');
+            if (!t || !(t.textContent || '').includes('出航选择')) continue;
+            const v = c.querySelector('.info-value');
+            if (!v) continue;
+            return (v.textContent || '').trim().replace(/[★☆]/g, '').replace(/码头|港口/g, '').trim();
+        }
+        return null;
+    }).catch(() => null);
+}
+
+// 关掉出航面板（.close-btn）
+async function closeSailPanel(page) {
+    const pos = await page.evaluate(() => {
+        for (const b of document.querySelectorAll('.close-btn')) {
+            const r = b.getBoundingClientRect();
+            if (r.width && r.height) return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+        }
+        return null;
+    }).catch(() => null);
+    if (pos) await page.mouse.click(pos.x, pos.y);
+    else await page.keyboard.press('Escape');
+    await sleep(500);
+}
+
+// 无地图提示：没这张图的号点城市只会弹「暂无地图，查看失败」，不会出现出航确认框
+let SAIL_FAIL = '';
+function sailFailReason() { return SAIL_FAIL; }
+async function noMapToast(page) {
+    return (await getPageText(page)).includes('暂无地图');
+}
+
 async function pickConfirm(page, region, dest) {
     for (let round = 1; round <= 3; round++) {
         // 先关掉可能遮挡点击的弹窗/残留面板（高峰期弹窗会吃掉坐标点击）
@@ -255,11 +307,45 @@ async function pickConfirm(page, region, dest) {
             if (await popupTitleVisible(page, '出航选择')) { opened = true; break; }
         }
         if (!opened) { console.log(`出航面板未打开(${round}/3)，重试...`); continue; }
-        if (region) await selectRegion(page, region);
+        // 面板里的「出发 XX★码头」= 当前所在城市；等于目的地就直接收工（列表不列当前城市，硬选必失败）
+        const from = await readDepartFrom(page);
+        if (from) {
+            console.log(`出航面板出发地: ${from}`);
+            if (from === dest) {
+                console.log(`出发地就是${dest}，已在目标城市，关面板收工`);
+                await closeSailPanel(page);
+                return true;
+            }
+        }
+        if (region) {
+            const rp = await selectRegion(page, region);
+            if (rp === 'nomap') {
+                console.log(`「暂无地图，查看失败」→ 该号没有${region}海域的海图，${dest}到不了，不传送`);
+                SAIL_FAIL = 'nomap';
+                await closeSailPanel(page);
+                return false;
+            }
+        }
         if (await selectCity(page, dest)) {
-            for (let c = 0; c < 6; c++) {
-                await sleep(1500);   // 高峰期确认框慢半拍，最多9秒
-                if (await popupTitleVisible(page, '出航确认')) return true;
+            for (let c = 0; c < 8; c++) {
+                await sleep(1000);   // 高峰期确认框慢半拍，最多8秒
+                // 「暂无地图」和出航确认框会同时出现（实测），必须先判 nomap
+                if (await noMapToast(page)) {
+                    console.log(`「暂无地图，查看失败」→ 该号没有${dest}的地图/海图，不再重试也不传送`);
+                    SAIL_FAIL = 'nomap';
+                    await closeSailPanel(page);
+                    return false;
+                }
+                if (await popupTitleVisible(page, '出航确认')) {
+                    await sleep(800); // 确认框先渲染、toast 后弹：复检一次
+                    if (await noMapToast(page)) {
+                        console.log(`「暂无地图，查看失败」→ 该号没有${dest}的地图/海图，不再重试也不传送`);
+                        SAIL_FAIL = 'nomap';
+                        await closeSailPanel(page);
+                        return false;
+                    }
+                    return true;
+                }
             }
         }
         console.log(`未看到出航确认框，重开面板重试(${round}/3)...`);
@@ -287,6 +373,7 @@ async function waitSailing(page, sec) {
 }
 
 async function sailFlow(page, dest = NAV_DEST, region = NAV_REGION) {
+    SAIL_FAIL = '';
     // 已在海上（上次起了航但没等到「停止自动航行」）→ 直接等到达；海上没有「出航」按钮，重开面板必然失败
     const pre = await getPageText(page);
     const already = pre.includes('停止自动航行') || pre.includes('剩余距离');
@@ -297,7 +384,10 @@ async function sailFlow(page, dest = NAV_DEST, region = NAV_REGION) {
     }
     if (already) console.log('已在航行中，跳过出航选择直接等待到达...');
     const picked = already ? true : await pickConfirm(page, region, dest);
-    if (!picked) return failNav(page, '出航确认框始终未出现');
+    if (!picked) {
+        if (SAIL_FAIL === 'nomap') return failNav(page, `目的地${dest}无地图(暂无地图，查看失败)`);
+        return failNav(page, '出航确认框始终未出现');
+    }
 
     if (!already) {
         await depart(page);
@@ -882,7 +972,14 @@ async function departForFishing(page) {
     for (let s = 0; s < 5; s++) {
         if (await clickText(page, '马赛', 2000)) {
             await sleep(1500);
-            if ((await getPageText(page)).includes('出航确认')) {
+            const pt = await getPageText(page);
+            if (pt.includes('暂无地图')) {
+                console.log('「暂无地图，查看失败」→ 该号没有马赛的地图/海图，本次不钓鱼');
+                SAIL_FAIL = 'nomap';
+                await page.screenshot({ path: 'fish-nomap.png' }).catch(() => {});
+                return false;
+            }
+            if (pt.includes('出航确认')) {
                 picked = true;
                 break;
             }
@@ -1183,6 +1280,12 @@ async function run() {
                 }
                 const arrived = await sailFlow(page);
                 if (!arrived) {
+                    if (sailFailReason() === 'nomap') {
+                        console.log(`⚠ ${NAV_DEST} 暂无地图（该号没有这张图），跳过钓鱼；不传送（传送点城市同样提示暂无地图）`);
+                        await page.screenshot({ path: 'fish-nomap.png' }).catch(() => {});
+                        await browser.close();
+                        return;
+                    }
                     console.log('出航约5分钟未完成，改用传送兜底...');
                     await page.screenshot({ path: 'nav-fail.png' }).catch(() => {});
                     await teleportToDest(page);
@@ -1314,6 +1417,6 @@ if (require.main === module) run();
 
 module.exports = {
     sleep, gotoGame, getPageText, clickText, clickLeaf, clickExact, jsClick,
-    pickConfirm, sailFlow, atDockView, backToDock, ensureDock, getBaitStock, openBoss,
+    pickConfirm, sailFlow, sailFailReason, atDockView, backToDock, ensureDock, getBaitStock, openBoss,
     parseBossSilver, exitShanzhai, sellDurian,
 };

@@ -90,6 +90,64 @@ async function exitDungeonIfInside(page) {
     return false;
 }
 
+// 无地图提示：没这张图的号点城市只会弹「暂无地图，查看失败」，不会出现出航确认框
+let SAIL_FAIL = '';
+function sailFailReason() { return SAIL_FAIL; }
+
+// 选海域标签：.region-bar 横向滚动，目标不在可视区就先滚进来再点（否则点空/点到隔壁）
+// 返回 true=已切到 / 'nomap'=该号没这个海域的海图（点标签即弹「暂无地图，查看失败」）/ false=点不到
+async function selectRegion(page, region) {
+    const noMap = async () => (await getPageText(page)).includes('暂无地图');
+    const read = () => page.evaluate((r) => {
+        const bar = document.querySelector('.region-bar');
+        if (!bar) return null;
+        const wrapEl = bar.querySelector('.scroll-view_H') || bar;
+        const wb = wrapEl.getBoundingClientRect();
+        for (const chip of bar.querySelectorAll('.region-chip')) {
+            if ((chip.textContent || '').trim() !== r) continue;
+            const b = chip.getBoundingClientRect();
+            if (!b.width || !b.height) return null;
+            const cx = b.x + b.width / 2;
+            return {
+                x: Math.round(cx), y: Math.round(b.y + b.height / 2),
+                active: chip.classList.contains('active-region'),
+                inView: cx > wb.left + 8 && cx < wb.right - 8,
+                scrollLeft: cx < wb.left + 8 ? 'right' : (cx > wb.right - 8 ? 'left' : null),
+                barX: Math.round(wb.x + wb.width * 0.6), barY: Math.round(wb.y + wb.height / 2),
+            };
+        }
+        return null;
+    }, region).catch(() => null);
+
+    for (let i = 0; i < 5; i++) {
+        const p = await read();
+        if (!p) {
+            const bar = await page.evaluate(() => {
+                const b = document.querySelector('.region-bar');
+                if (!b) return null;
+                const r = b.getBoundingClientRect();
+                return { x: Math.round(r.x + r.width * 0.75), y: Math.round(r.y + r.height / 2) };
+            }).catch(() => null);
+            if (bar) { await page.mouse.move(bar.x, bar.y); await page.mouse.wheel(300, 0); }
+            await sleep(700);
+            continue;
+        }
+        if (p.active) return true;
+        if (!p.inView) {
+            await page.mouse.move(p.barX, p.barY);
+            await page.mouse.wheel(p.scrollLeft === 'right' ? -200 : 200, 0);
+            await sleep(800);
+            continue;
+        }
+        await page.mouse.click(p.x, p.y);
+        await sleep(1200);
+        if (await noMap()) return 'nomap';
+        const after = await read();
+        if (after && after.active) return true;
+    }
+    return false;
+}
+
 async function pickConfirm(page, region, dest) {
     for (let round = 1; round <= 3; round++) {
         // 先关掉可能遮挡点击的弹窗/残留面板（高峰期弹窗会吃掉坐标点击）
@@ -106,7 +164,12 @@ async function pickConfirm(page, region, dest) {
             await clickText(page, '出航');
         }
         await sleep(2000);
-        await clickExact(page, region);
+        const rp = await selectRegion(page, region);
+        if (rp === 'nomap') {
+            log(`「暂无地图，查看失败」→ 该号没有${region}海域的海图，${dest}到不了，不传送`);
+            SAIL_FAIL = 'nomap';
+            return false;
+        }
         await sleep(1000);
         for (let s = 0; s < 5; s++) {
             // 第2轮起用JS叶子派发点击，绕过遮罩对坐标点击的拦截
@@ -114,10 +177,26 @@ async function pickConfirm(page, region, dest) {
                 ? await clickText(page, dest, 2000)
                 : await jsClick(page, dest);
             if (ok) {
-                // 高峰期确认框慢半拍，单次1.5秒查询会误判，改成最多9秒轮询
-                for (let c = 0; c < 6; c++) {
-                    await sleep(1500);
-                    if ((await getPageText(page)).includes('出航确认')) return true;
+                // 高峰期确认框慢半拍，单次1.5秒查询会误判，改成最多8秒轮询
+                for (let c = 0; c < 8; c++) {
+                    await sleep(1000);
+                    let t = await getPageText(page);
+                    // 「暂无地图」与出航确认框会同时出现（实测），必须先判 nomap
+                    if (t.includes('暂无地图')) {
+                        log(`「暂无地图，查看失败」→ 该号没有${dest}的地图/海图，不再重试也不传送`);
+                        SAIL_FAIL = 'nomap';
+                        return false;
+                    }
+                    if (t.includes('出航确认')) {
+                        await sleep(800); // 确认框先渲染、toast 后弹：复检一次
+                        t = await getPageText(page);
+                        if (t.includes('暂无地图')) {
+                            log(`「暂无地图，查看失败」→ 该号没有${dest}的地图/海图，不再重试也不传送`);
+                            SAIL_FAIL = 'nomap';
+                            return false;
+                        }
+                        return true;
+                    }
                 }
             }
             await page.mouse.wheel(0, 300);
@@ -147,6 +226,7 @@ async function waitSailing(page, sec) {
 }
 
 async function sailFlow(page, dest = NAV_DEST, region = NAV_REGION) {
+    SAIL_FAIL = '';
     // 已在海上 → 直接等到达；重开出航面板在海上必然失败，会误判成出航失败去传送
     const pre = await getPageText(page);
     const already = pre.includes('停止自动航行') || pre.includes('剩余距离');
@@ -157,7 +237,10 @@ async function sailFlow(page, dest = NAV_DEST, region = NAV_REGION) {
     }
     if (already) log('已在航行中，跳过出航选择直接等待到达...');
     const picked = already ? true : await pickConfirm(page, region, dest);
-    if (!picked) return failNav(page, '出航确认框始终未出现');
+    if (!picked) {
+        if (SAIL_FAIL === 'nomap') return failNav(page, `目的地${dest}无地图(暂无地图，查看失败)`);
+        return failNav(page, '出航确认框始终未出现');
+    }
 
     if (!already) {
         await clickText(page, '立即出发');
@@ -534,6 +617,11 @@ async function run() {
             log('不在威尼斯，出航中...');
             const arrived = await sailFlow(page);
             if (!arrived) {
+                if (sailFailReason() === 'nomap') {
+                    log(`⚠ ${NAV_DEST} 暂无地图（该号没有这张图），跳过抽奖；不传送（传送点城市同样提示暂无地图）`);
+                    await fail(page, '暂无地图', 'mibao-nomap.png');
+                    return;
+                }
                 log('出航未完成，走传送兜底...');
                 await teleportToDest(page);
             }
