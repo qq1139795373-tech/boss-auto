@@ -1,7 +1,7 @@
 const { spawnSync } = require('child_process');
 
 // 任务闸门（和 index.js 打boss同一套逻辑，按北京时间判断）：
-//   00:00-00:30 → 每日签到（signin.js，已签自动跳过）→ 竞技场 → 钓鱼 → 秘宝抽奖（mibao.js，免费银贝箱，同在威尼斯）（签到仅此窗口跑；竞技场不限地点先打，最后威尼斯钓鱼；master不跑炼器窟）
+//   00:00-00:59 → 每日签到（signin.js，已签自动跳过）→ 竞技场 → 钓鱼 → 秘宝抽奖（mibao.js，免费银贝箱，同在威尼斯）→ 每日任务（daily.js）（签到仅此窗口跑；竞技场不限地点先打，最后威尼斯钓鱼；master不跑炼器窟）
 //   18:00-18:30 → 山寨农场 → 邮件领取（mail.js，领取所有+确定+返回）
 //   其他时间    → 跳过（中午11:50那趟由 index.js 自己的闸门打boss）
 // 任务跑完正常退出，交给 boss.yml 后面的 Run Boss / Run Farm（刷怪到6小时上限）
@@ -16,7 +16,7 @@ function bjNow() {
 
 function resolveMode(hour, min) {
     if (MODE !== 'auto') return MODE;
-    if (hour === 0 && min <= 30) return 'dawn';
+    if (hour === 0) return 'dawn';   // 00:00-00:59 一整个小时
     if (hour === 18 && min <= 30) return 'dusk';
     return 'skip';
 }
@@ -43,6 +43,7 @@ function main() {
         runStep('竞技场', 'arena.js');
         runStep('钓鱼', 'fish.js');
         runStep('秘宝抽奖', 'mibao.js');
+        runStep('每日任务', 'daily.js');
     } else if (mode === 'dusk') {
         runStep('山寨农场', 'shanzhai.js');
         runStep('邮件领取', 'mail.js');

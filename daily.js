@@ -1,0 +1,1013 @@
+const { chromium } = require('playwright');
+
+const ACCOUNT = process.env.GAME_ACCOUNT;
+const PASSWORD = process.env.GAME_PASSWORD;
+// DAILY_DRY=1 只读模式：登录→解析每日任务→打印按城市聚合的执行计划，不杀怪不出航
+const DRY = process.env.DAILY_DRY === '1';
+
+// 城市所属海域（用户提供的出航选择全图 zhsh/地区城市分布/；地区栏可左右滚动，最右第6区未截图）
+const CITY_REGION = {
+    // 地中海
+    '里斯本': '地中海', '威尼斯': '地中海', '亚历山大': '地中海', '突尼斯': '地中海',
+    '马赛': '地中海', '雅典': '地中海', '伊斯坦堡': '地中海', '阿尔及尔': '地中海',
+    '拉古扎': '地中海', '伊斯坦布尔': '地中海',
+    // 北海
+    '爱丁堡': '北海', '伦敦': '北海', '南特': '北海', '阿姆斯特丹': '北海',
+    '汉堡': '北海', '奥斯陆': '北海', '哥本哈根': '北海',
+    // 非洲
+    '亚特兰蒂斯': '非洲', '莫桑比克': '非洲', '马达加斯加': '非洲', '蒙巴萨': '非洲',
+    '达喀尔': '非洲', '圣乔治': '非洲', '卢旺达': '非洲', '开普敦': '非洲',
+    // 东亚
+    '长安': '东亚', '扬州': '东亚', '杭州': '东亚', '泉州': '东亚',
+    '广州': '东亚', '马六甲': '东亚', '大阪': '东亚', '京都': '东亚',
+    // 印度洋
+    '亚丁': '印度洋', '荷姆兹': '印度洋', '锡兰': '印度洋', '孟买': '印度洋',
+};
+const ALL_REGIONS = ['地中海', '北海', '非洲', '东亚', '印度洋'];
+
+async function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function gotoGame(page, retries = 3) {
+    for (let i = 1; i <= retries; i++) {
+        try {
+            await page.goto('http://yiyu.yiyutx.top/yysh/#/pages/login/login', {
+                waitUntil: 'domcontentloaded',
+                timeout: 60000,
+            });
+            return;
+        } catch (e) {
+            console.log(`打开页面第${i}/${retries}次失败:`, (e.message || '').split('\n')[0]);
+            await sleep(3000);
+        }
+    }
+    throw new Error('打开游戏页失败(3次重试均超时)');
+}
+
+async function clickText(page, text, timeout = 5000) {
+    const el = page.getByText(text, { exact: false }).first();
+    if (await el.isVisible({ timeout }).catch(() => false)) {
+        await el.click({ force: true }).catch(() => {});
+        return true;
+    }
+    return false;
+}
+
+async function getPageText(page) {
+    return await page.textContent('body').catch(() => '');
+}
+
+async function clickExact(page, text, timeout = 3000) {
+    try {
+        await page.getByText(text, { exact: true }).first().click({ timeout, force: true });
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+// evaluate精确点击叶子文本（按文本长度升序，短者优先=最内层），绕过遮罩
+async function clickLeaf(page, text) {
+    return await page.evaluate((t) => {
+        const all = [...document.querySelectorAll('body *')].filter(el => {
+            const s = (el.textContent || '').trim();
+            const r = el.getBoundingClientRect();
+            return el.children.length === 0 && r.width > 0 && r.height > 0 &&
+                (s === t || s.includes(t));
+        });
+        if (!all.length) return false;
+        all.sort((a, b) => a.textContent.trim().length - b.textContent.trim().length);
+        const el = all[0];
+        const opts = { bubbles: true, cancelable: true, view: window };
+        for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click']) {
+            el.dispatchEvent(new MouseEvent(type, opts));
+        }
+        return true;
+    }, text);
+}
+
+async function closePopup(page) {
+    await page.mouse.click(10, 10);
+    await sleep(500);
+    await page.keyboard.press('Escape');
+    await sleep(1000);
+}
+
+async function currentCity(page) {
+    const m = (await getPageText(page)).match(/当前城市[：:]\s*([\u4e00-\u9fa5]{2,6})/);
+    return m ? m[1] : null;
+}
+
+// 页面是否显示「当前城市：X」（冒号全半角都兼容）
+function atCity(txt, dest) {
+    return new RegExp(`当前城市[：:]\\s*${dest}`).test(txt);
+}
+
+// 出航到指定城市（照 farm.js pickConfirm：重开面板3轮，防弹窗吃掉面板点击）
+async function sailTo(page, dest) {
+    await backToMain(page); // 任务页/弹窗残留会让出航面板打不开
+    // 若身处野区（无出航链接），先点城内地图回城
+    if (!(await getPageText(page)).includes('出航')) {
+        await clickLeaf(page, '城内地图');
+        await sleep(2500);
+    }
+    // 选海域：已知海域直接点；未知则逐海域轮询搜索城市（含出航确认检测）
+    const region = CITY_REGION[dest];
+    const regions = region ? [region] : ALL_REGIONS;
+    let picked = false;
+    for (let round = 1; round <= 3 && !picked; round++) {
+        // 重开出航面板
+        await page.mouse.click(10, 10);
+        await page.keyboard.press('Escape');
+        await sleep(500);
+        let step = await clickText(page, '出航', 2000);
+        if (!step) {
+            await clickText(page, '城内地图');
+            await sleep(2000);
+            await clickText(page, '码头');
+            await sleep(3000);
+            await clickText(page, '出航');
+        }
+        await sleep(2000);
+        for (const r of regions) {
+            await clickExact(page, r, 2000);
+            await sleep(1000);
+            for (let s = 0; s < 5; s++) {
+                // 第2轮起用合成事件点击，绕过遮罩对坐标点击的拦截（farm.js 同款）
+                const ok = round === 1 ? await clickText(page, dest, 2000) : await clickLeaf(page, dest);
+                if (ok) {
+                    // 高峰期确认框慢半拍，最多9秒轮询（farm.js 实证：单次1.5秒查询会误判）
+                    for (let c = 0; c < 6; c++) {
+                        await sleep(1500);
+                        if ((await getPageText(page)).includes('出航确认')) {
+                            picked = true;
+                            break;
+                        }
+                    }
+                    if (picked) break;
+                }
+                await page.mouse.wheel(0, 300);
+                await sleep(1000);
+            }
+            if (picked) break;
+            if (regions.length > 1) console.log(`${r}没找到${dest}，换下一个海域...`);
+        }
+        if (!picked) console.log(`未看到${dest}出航确认框，重开面板重试(${round}/3)...`);
+    }
+    if (!picked) {
+        console.log(`未看到${dest}出航确认框，页面快照:`, (await getPageText(page)).substring(0, 200).replace(/\s+/g, ' '));
+        await page.screenshot({ path: `daily-sail-fail.png` }).catch(() => {});
+    }
+    await sleep(1000);
+    await clickText(page, '立即出发');
+    await sleep(2000);
+    await clickExact(page, '自动航行', 5000);
+    console.log(`航行去${dest}中...`);
+    for (let w = 0; w < 100; w++) {
+        await sleep(3000);
+        const txt = await getPageText(page);
+        if (atCity(txt, dest)) {
+            console.log(`到达${dest}`);
+            return true;
+        }
+        if (txt.includes('遭遇海盗')) {
+            console.log('遭遇海盗，选择避战...');
+            await clickExact(page, '避战', 3000);
+            await sleep(2000);
+            const t2 = await getPageText(page);
+            if (!t2.includes('停止自动航行')) {
+                if (await clickExact(page, '自动航行', 3000)) console.log('恢复自动航行');
+            }
+            continue;
+        }
+        if (!txt.includes('停止自动航行') && await clickExact(page, '自动航行', 1500)) {
+            console.log('自动航行(重新)启动');
+        }
+    }
+    console.log(`航行未完成（约5分钟）`);
+    return false;
+}
+
+// 传送兜底（照 dungeon.js，城市参数化）
+async function teleportToDest(page, dest) {
+    console.log('传送兜底: 重新登录游戏...');
+    try {
+        await gotoGame(page);
+        await page.waitForTimeout(3000);
+        const inputs = await page.$$('input');
+        if (inputs.length >= 2) {
+            await inputs[0].fill(ACCOUNT);
+            await inputs[1].fill(PASSWORD);
+            await page.getByText('登录').first().click();
+            await sleep(3000);
+        }
+        await closePopup(page);
+        await sleep(1000);
+        await clickText(page, '进入游戏');
+        await sleep(3000);
+        let ok = await clickText(page, '传送', 2000);
+        if (!ok) {
+            await clickText(page, '城内地图');
+            await sleep(2000);
+            await clickText(page, '码头');
+            await sleep(3000);
+            ok = await clickText(page, '传送');
+        }
+        if (!ok) {
+            console.log('传送兜底: 找不到传送入口');
+            return false;
+        }
+        await sleep(2000);
+        // 海域选择：已知直接点；未知逐海域轮询（城市可点中即跳出）
+        const region = CITY_REGION[dest];
+        const regions = region ? [region] : ALL_REGIONS;
+        let picked = false;
+        for (const r of regions) {
+            await clickExact(page, r, 2000);
+            await sleep(1000);
+            for (let s = 0; s < 5; s++) {
+                if (await clickText(page, dest, 2000)) {
+                    picked = true;
+                    break;
+                }
+                await page.mouse.wheel(0, 300);
+                await sleep(1000);
+            }
+            if (picked) break;
+        }
+        if (!picked) console.log('传送兜底: 城市列表里没找到目标');
+        await sleep(3000);
+        let txt = await getPageText(page);
+        if (!atCity(txt, dest)) {
+            await clickText(page, '确定');
+            await sleep(2000);
+            await clickText(page, '确认');
+            await sleep(2000);
+            txt = await getPageText(page);
+        }
+        if (atCity(txt, dest)) {
+            console.log(`传送兜底: 已到达${dest}`);
+            return true;
+        }
+        console.log('传送兜底: 未检测到到达');
+        return false;
+    } catch (e) {
+        console.log('传送兜底错误:', e.message);
+        return false;
+    }
+}
+
+// ---------- 每日任务专用 ----------
+
+// 打开任务页并确保每日任务已展开（提交后该区会自动折叠，每次都重新检测）
+// 任务页标志：有「活动任务/跑商任务」分节；展开验证：出现任务行（每日·X）
+// 展开方式：真实坐标点击「每日任务 (0/10)▼」标题行（点标题或▼箭头均可，合成事件无效）
+async function openDailyList(page) {
+    for (let i = 0; i < 6; i++) {
+        const txt = await getPageText(page);
+        if (/每日[·・][\u4e00-\u9fa5]/.test(txt)) return txt; // 已展开
+        const onTaskPage = txt.includes('活动任务') || txt.includes('跑商任务');
+        if (!onTaskPage) {
+            if (!(await clickExact(page, '任务', 2000))) await clickLeaf(page, '任务');
+            await sleep(2000);
+            continue;
+        }
+        // 在任务页：定位「每日任务 (x/y)」标题行，真实鼠标点其中心展开
+        const box = await page.evaluate(() => {
+            const els = [...document.querySelectorAll('body *')].filter(el => {
+                const r = el.getBoundingClientRect();
+                return r.width > 0 && r.height > 0 &&
+                    /每日任务\s*[（(]\d+\/\d+[）)]/.test(el.textContent || '');
+            });
+            if (!els.length) return null;
+            els.sort((a, b) => (a.textContent || '').length - (b.textContent || '').length);
+            const r = els[0].getBoundingClientRect();
+            return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+        });
+        if (box) {
+            await page.mouse.click(box.x, box.y).catch(() => {});
+        } else {
+            await page.getByText('每日任务', { exact: false }).first().click({ force: true, timeout: 2000 }).catch(() => {});
+        }
+        await sleep(1800);
+    }
+    console.log('每日任务折叠区展开失败，页面:', (await getPageText(page)).substring(0, 120).replace(/\s+/g, ' '));
+    return await getPageText(page);
+}
+
+// 点开某条每日任务的详情（按行号），解析进度段；返回 {rowNo,name,city,area,x,n,full} 或 null
+async function readTaskDetail(page, rowNo, taskName) {
+    for (let i = 0; i < 3; i++) {
+        await clickRow(page, rowNo, taskName);
+        await sleep(1500);
+        if ((await getPageText(page)).includes('任务进度')) break;
+        // 兜底：行号定位失败（如行10）时用真实点击名字文本
+        await page.getByText(taskName, { exact: false }).first().click({ force: true, timeout: 2000 }).catch(() => {});
+        await sleep(1500);
+        if ((await getPageText(page)).includes('任务进度')) break;
+        await clickLeaf(page, taskName);
+        await sleep(1500);
+    }
+    await sleep(1200);
+    const txt = await getPageText(page);
+    const i = txt.indexOf('任务进度');
+    const j = txt.indexOf('任务奖励', i);
+    if (i < 0) {
+        console.log(`[${taskName}] 详情里没有任务进度段`);
+        await clickExact(page, '取消', 1500);
+        return null;
+    }
+    const seg = txt.substring(i, j > i ? j : i + 200);
+    const loc = seg.match(/([\u4e00-\u9fa5]{2,5})·([★☆]?[\u4e00-\u9fa5]{2,8})/); // 区域可能带★前缀（如★码头=特殊场景）
+    const cnt = seg.match(/(\d+)\s*\/\s*(\d+)/);
+    // 任务类型与目标：从「任务介绍」段解析（独立短句、不带地点，如“击杀山匪8只”“收集5份盐矿”）。
+    // 不能用进度段解析——进度文本无空格（击杀山匪长安·望马坡0/8），数字锚定会把地名当怪名。
+    let type = null, target = null;
+    const ii = txt.indexOf('任务介绍');
+    const intro = ii >= 0 ? txt.substring(ii, txt.indexOf('任务要求', ii) > 0 ? txt.indexOf('任务要求', ii) : ii + 120) : '';
+    const ik = intro.match(/击杀(?:\d+\s*[只个头匹]?\s*)?([\u4e00-\u9fa5]{2,6})/);
+    const im = intro.match(/收集(?:\d+\s*[个份只张枚]?\s*)?([\u4e00-\u9fa5]{2,6})/);
+    if (ik) { type = 'kill'; target = ik[1]; }
+    else if (im) { type = 'mat'; target = im[1]; }
+    else {
+        // 兜底：介绍段解析失败 → 用任务行短名当目标（行名本身就是怪名/物品名）
+        type = txt.includes('击杀') ? 'kill' : 'mat';
+        target = taskName;
+        console.log(`[${taskName}] 介绍段解析失败，兜底目标=${target} 类型=${type}`);
+    }
+    // 条件满足时详情按钮变为「提交」，以此判断完成（列表行进度不可信！
+    // 实测寻路蜂列表显示「/」或「0/5」，详情却是 218/2 条件满足可直接提交）
+    const satisfiable = txt.includes('条件满足');
+    // 已提交的任务详情仍显示 5/5（条件满足）但提交按钮已消失（探针截图实证：
+    // 列表右列变「已完成」）；用按钮元素存在性区分 已提交/可提交
+    const hasSubmitBtn = await page.evaluate(() =>
+        [...document.querySelectorAll('body *')].some(el => {
+            const s = (el.textContent || '').trim();
+            const r = el.getBoundingClientRect();
+            return el.children.length === 0 && s === '提交' && r.width > 0 && r.height > 0;
+        })
+    );
+    await clickExact(page, '取消', 1500);
+    await sleep(500);
+    if (!loc && !cnt && !satisfiable) {
+        console.log(`[${taskName}] 进度段解析失败:`, seg.substring(0, 80).replace(/\s+/g, ' '));
+        return null;
+    }
+    // loc 可能缺失（收集类进度段无「城市·野区」）：满条件也能提交，未满则无法导路只能跳过
+    const x = cnt ? parseInt(cnt[1], 10) : 0;
+    const n = cnt ? parseInt(cnt[2], 10) : Infinity;
+    // 进度文本无空格（如“击杀山匪长安·望马坡0/8”），城市名会带上任务目标前缀，剥掉：
+    // 1) 城市段完整包含目标名 → 取目标名之后；2) 前缀被截断（如“魔士兵雅典”）→ 剥掉与目标后缀重合的开头
+    let city = loc ? loc[1] : null;
+    if (city && target) {
+        if (city.includes(target)) {
+            city = city.substring(city.indexOf(target) + target.length);
+        } else {
+            for (let l = Math.min(target.length - 1, city.length - 1); l >= 1; l--) {
+                if (city.startsWith(target.substring(target.length - l))) {
+                    city = city.substring(l);
+                    break;
+                }
+            }
+        }
+    }
+    if (city) city = city.replace(/^(击杀|收集|讨伐|消灭|杀)/, '');
+    if (city && city.length < 2) city = null;
+    const full = x >= n || satisfiable;
+    return {
+        rowNo, name: taskName,
+        type, target,
+        city,
+        area: city ? loc[2].replace(/[★☆]/g, '') : null,
+        x, n,
+        full,
+        submitted: full && !hasSubmitBtn,
+    };
+}
+
+// 按行号点任务行（同名任务可有多个实例！行号是唯一标识；真实坐标点击）
+async function clickRow(page, rowNo, name) {
+    const pos = await page.evaluate(({ no, nm }) => {
+        const leaves = [...document.querySelectorAll('body *')].filter(el => {
+            const r = el.getBoundingClientRect();
+            return el.children.length === 0 && r.width > 0 && r.height > 0;
+        });
+        const numLeaf = leaves.find(el => (el.textContent || '').trim() === `${no}.`);
+        if (!numLeaf) return null;
+        // 在行容器内找名字叶子（点它最稳）
+        let p = numLeaf.parentElement, el = null;
+        for (let i = 0; i < 5 && p && !el; i++) {
+            el = [...p.querySelectorAll('*')].find(c => {
+                const r = c.getBoundingClientRect();
+                return c.children.length === 0 && r.width > 0 && r.height > 0 &&
+                    (c.textContent || '').includes(`每日·${nm}`);
+            }) || null;
+            if (!el) p = p.parentElement;
+        }
+        const target = el || numLeaf;
+        target.scrollIntoViewIfNeeded ? target.scrollIntoViewIfNeeded() : null;
+        const r = target.getBoundingClientRect();
+        return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+    }, { no: rowNo, nm: name });
+    if (!pos) return false;
+    await page.mouse.click(pos.x, pos.y).catch(() => {});
+    return true;
+}
+
+// 从列表文本按行解析全部每日任务（行号唯一标识；同名可多实例）
+// 行标签采信：已完成→跳过；可提交→直接进提交队列；进行中→开详情解析
+// （列表行进度数字不可信——材料类显示bug，但状态标签可靠）
+async function parseDailyTasks(page) {
+    const txt = await openDailyList(page);
+    const segs = txt.split(/(?<![0-9])(?=\d+\.\s*\(每日\))/).filter(s => /\(每日\)/.test(s));
+    if (!segs.length) {
+        console.log('未解析到每日任务列表，页面:', txt.substring(0, 150).replace(/\s+/g, ' '));
+        return [];
+    }
+    const tasks = [];
+    for (const seg of segs) {
+        const m = seg.match(/^(\d+)\.\s*\(每日\)每日[·・]([\u4e00-\u9fa5]{2,8})/);
+        if (!m) continue;
+        const rowNo = m[1], name = m[2];
+        const tag = (seg.match(/已完成|进行中|可提交/) || [])[0];
+        if (tag === '已完成') {
+            tasks.push({ rowNo, name, type: null, target: null, city: null, area: null, x: 0, n: Infinity, full: true, submitted: true });
+            continue;
+        }
+        if (tag === '可提交') {
+            tasks.push({ rowNo, name, type: null, target: null, city: null, area: null, x: 0, n: Infinity, full: true, submitted: false });
+            continue;
+        }
+        const t = await readTaskDetail(page, rowNo, name);
+        if (t) tasks.push(t);
+    }
+    return tasks;
+}
+
+// 野区“你看到”区块（到 当前城市 或 【聊天】 为止）
+function wildSeg(txt) {
+    const i = txt.indexOf('你看到：');
+    if (i < 0) return '';
+    let j = txt.indexOf('当前城市', i);
+    const k = txt.indexOf('【聊天】', i);
+    if (k > i && (j < 0 || k < j)) j = k;
+    return txt.substring(i, j > i ? j : txt.length);
+}
+
+// 点击“你看到”之后的怪物链接（叶子全等匹配）
+async function clickMonster(page, name) {
+    return await page.evaluate((t) => {
+        const leaves = [...document.querySelectorAll('body *')].filter(el => {
+            const r = el.getBoundingClientRect();
+            return el.children.length === 0 && r.width > 0 && r.height > 0;
+        });
+        const seenIdx = leaves.findIndex(el => (el.textContent || '').includes('你看到'));
+        const from = seenIdx >= 0 ? seenIdx + 1 : 0;
+        const all = leaves.slice(from).filter(el => (el.textContent || '').trim() === t);
+        if (!all.length) return false;
+        const el = all.find(e => e.tagName === 'A') || all[0];
+        const opts = { bubbles: true, cancelable: true, view: window };
+        for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click']) {
+            el.dispatchEvent(new MouseEvent(type, opts));
+        }
+        return true;
+    }, name);
+}
+
+// 列出野区“你看到”区块的怪名（导路后可能不止一种怪；页面文本无空格，
+// 必须截断在 当前城市/城内地图/聊天 之前，否则会把 UI 链接当怪点——点城内地图会直接跳页！）
+async function listMonsters(page) {
+    return await page.evaluate(() => {
+        const leaves = [...document.querySelectorAll('body *')].filter(el => {
+            const r = el.getBoundingClientRect();
+            return el.children.length === 0 && r.width > 0 && r.height > 0;
+        });
+        const seen = leaves.findIndex(el => (el.textContent || '').includes('你看到'));
+        if (seen < 0) return [];
+        const UI_WORDS = ['当前城市', '城内地图', '聊天', '地面掉落', '附近玩家'];
+        const out = [];
+        for (let i = seen + 1; i < leaves.length; i++) {
+            const s = (leaves[i].textContent || '').trim();
+            if (UI_WORDS.some(w => s.includes(w))) break;
+            if (/^[\u4e00-\u9fa5]{2,6}$/.test(s) && !out.includes(s)) out.push(s);
+        }
+        return out;
+    });
+}
+
+// 查看怪物掉落预览：点怪 → 查看 → 读“掉落预览”段 → 关闭
+async function monsterDrops(page, name) {
+    if (!(await clickMonster(page, name))) return null;
+    await sleep(800);
+    if (!(await clickExact(page, '查看', 2000))) {
+        await closePopup(page);
+        return null;
+    }
+    await sleep(800);
+    const txt = await getPageText(page);
+    const i = txt.indexOf('掉落预览');
+    const drops = i >= 0 ? txt.substring(i + 4, i + 100) : '';
+    // 查看信息页没有按钮，点空白区域关闭 → 回到怪物操作弹窗
+    await page.mouse.click(15, 400).catch(() => {});
+    await sleep(800);
+    // 怪物操作弹窗（攻击/自动攻击/查看/撤退）→ 点撤退收尾
+    if (!(await clickExact(page, '撤退', 2000))) {
+        await closePopup(page);
+    }
+    await sleep(600);
+    if ((await getPageText(page)).includes('掉落预览')) await closePopup(page);
+    return drops;
+}
+
+// 与指定怪打一场：点怪 → 攻击到结算 → 关闭；返回结算文本（含掉落信息）或 null
+async function fightMonster(page, name) {
+    if (!(await clickMonster(page, name))) return null;
+    await sleep(500);
+    let resultTxt = '';
+    for (let a = 0; a < 12; a++) {
+        const txt = await getPageText(page);
+        if (txt.includes('关闭')) {
+            // 结算弹窗：截取弹窗文本
+            const i = txt.indexOf('你战胜了');
+            const j = txt.lastIndexOf('关闭');
+            resultTxt = i >= 0 ? txt.substring(Math.max(0, i - 20), j > i ? j + 10 : i + 200) : '';
+            await page.locator('text=关闭').first().click({ force: true, timeout: 1000 }).catch(() => {});
+            await sleep(500);
+            return resultTxt || `战斗:${name}`;
+        }
+        if (txt.includes('攻击')) {
+            await page.locator('text=攻击').first().click({ force: true, timeout: 500 }).catch(() => {});
+            await sleep(300);
+            continue;
+        }
+        await sleep(300);
+    }
+    await page.locator('text=关闭').first().click({ force: true, timeout: 500 }).catch(() => {});
+    return null;
+}
+
+// 按任务类型选怪打一场：
+// 杀怪任务 → 打与任务目标同名的怪（如 每日·地藏士兵 打 地藏士兵）
+// 材料任务 → 逐怪点「查看」读掉落预览，只打掉目标材料的怪（如 铁矿石 打偷矿者、不打白虎王）
+// 都不合适返回 null（外层负责刷新/走相邻房间）
+async function pickAndFight(page, task) {
+    const monsters = await listMonsters(page);
+    if (!monsters.length) return null;
+    if (task.type === 'kill' && task.target) {
+        const hit = monsters.find(m => m === task.target || m.includes(task.target) || task.target.includes(m));
+        if (!hit) return null;
+        return await fightMonster(page, hit);
+    }
+    for (const m of monsters) {
+        const drops = await monsterDrops(page, m);
+        if (drops && drops.includes(task.target)) {
+            console.log(`  [选怪] ${m} 掉落含「${task.target}」，开打`);
+            return await fightMonster(page, m);
+        }
+        console.log(`  [选怪] ${m} 不掉「${task.target}」，跳过`);
+    }
+    return null;
+}
+
+// 执行一条任务：导路 → 杀怪直到进度满（每杀1只查一次详情），带3倍保险上限
+// 返回: 'done' | 'cap' | 'fail'
+async function runTask(page, task) {
+    console.log(`[${task.name}] ${task.city}·${task.area} ${task.x}/${task.n}，点寻路...`);
+    // 点任务行开详情（按行号，重试3次），确认出现「任务进度」再点寻路
+    let opened = false;
+    for (let r = 0; r < 3 && !opened; r++) {
+        await clickRow(page, task.rowNo, task.name);
+        await sleep(1500);
+        opened = (await getPageText(page)).includes('任务进度');
+    }
+    if (!opened) {
+        console.log(`[${task.name}] 点不开任务详情`);
+        return 'fail';
+    }
+    if (!(await clickExact(page, '寻路', 3000))) {
+        console.log(`[${task.name}] 找不到寻路按钮（可能不在${task.city}）`);
+        await clickExact(page, '取消', 1500);
+        return 'fail';
+    }
+    // 等自动走到野区：详情弹窗消失且页面有“你看到”
+    // 城市不对会弹「只能寻路当前城市,请去再寻路吧」→ 点确定放弃该条（按城市聚合正常不会触发）
+    let arrived = false;
+    for (let w = 0; w < 15; w++) {
+        await sleep(1000);
+        const t = await getPageText(page);
+        if (t.includes('只能寻路当前城市')) {
+            console.log(`[${task.name}] 导路被拒（不在${task.city}），点确定跳过`);
+            await clickExact(page, '确定', 2000);
+            await sleep(800);
+            await clickExact(page, '取消', 1500);
+            return 'fail';
+        }
+        if (t.includes('你看到') && !t.includes('任务进度')) {
+            arrived = true;
+            break;
+        }
+    }
+    if (!arrived) {
+        console.log(`[${task.name}] 导路后未到达野区`);
+        return 'fail';
+    }
+    console.log(`[${task.name}] 已到${task.area}`);
+
+    // 保险上限：杀怪类 3倍+3；材料类掉率约10%（盐矿实测18杀掉2），给8倍+8
+    const cap = task.type === 'mat' ? task.n * 8 + 8 : task.n * 3 + 3;
+    let kills = 0;
+    while (kills < cap) {
+        // 页面短暂弹“任务已完成”toast（击杀类）——直接收工
+        const t0 = await getPageText(page);
+        if (t0.includes('任务已完成')) {
+            console.log(`[${task.name}] 页面弹任务已完成，击杀${kills}只`);
+            return 'done';
+        }
+        const result = await pickAndFight(page, task);
+        if (!result) {
+            // 无目标怪：怪是间隔刷新的，耐心点刷新（8轮×5秒≈40秒窗口），几轮无果走相邻房间
+            let refreshed = false;
+            for (let r = 0; r < 8; r++) {
+                await clickLeaf(page, '刷新');
+                await sleep(5000);
+                if ((wildSeg(await getPageText(page))).match(/你看到：\s*[\u4e00-\u9fa5]/)) {
+                    refreshed = true;
+                    break;
+                }
+            }
+            if (!refreshed) {
+                const t = await getPageText(page);
+                const exits = [...t.matchAll(/([东西南北])：([\u4e00-\u9fa5]{2,8})/g)]
+                    .map(m => m[2]).filter(a => a === task.area);
+                if (exits.length && exits[0] === task.area) {
+                    await clickLeaf(page, `${exits[0]}`); // 点出口文本走相邻房
+                    await sleep(2000);
+                    continue;
+                }
+                console.log(`[${task.name}] 野区无怪且刷新无效，页面快照:`, (await getPageText(page)).substring(0, 260).replace(/\s+/g, ' '));
+                await page.screenshot({ path: `daily-nowild-${task.name}.png` }).catch(() => {});
+                break;
+            }
+            continue;
+        }
+        kills++;
+        const dropped = result.includes('已自动拾取');
+        console.log(`[${task.name}] 第${kills}杀${dropped ? '（有掉落）' : ''}`);
+        // 每杀1只查进度（收集类必须查；击杀类通常此时 toast 已出）
+        // 查进度会进任务页，查完必须回野区，否则后续杀怪全空转（第10轮实测教训）
+        const t = await openDailyList(page);
+        const prog = await readTaskDetail(page, task.rowNo, task.name);
+        await backToMain(page);
+        await sleep(800);
+        if (prog) {
+            if (prog.full) {
+                console.log(`[${task.name}] 进度 ${prog.x}/${prog.n} 满，击杀${kills}只`);
+                await tryClaim(page, task);
+                return 'done';
+            }
+            task.x = prog.x;
+        } else {
+            // 查不到进度时依赖掉落/击杀数兜底
+            if (kills >= task.n && (dropped || t.includes('任务已完成'))) {
+                console.log(`[${task.name}] 详情不可读但击杀${kills}只且有完成信号`);
+                return 'done';
+            }
+        }
+    }
+    console.log(`[${task.name}] 达到保险上限${cap}杀仍未完成（掉率过低或解析异常）`);
+    return 'cap';
+}
+
+// 进度满后提交任务：详情里点「提交」→ toast「提交成功获得：...」
+// 提交后每日任务区会自动折叠（下次操作前 openDailyList 会重新展开）
+async function tryClaim(page, task) {
+    // 可能在野区/主页面（杀完怪回野区了），先开任务页再按行号点任务行
+    await openDailyList(page);
+    if (!(await clickRow(page, task.rowNo, task.name)) && !(await clickLeaf(page, task.name))) {
+        console.log(`[${task.name}] 提交时点不开任务行`);
+        return false;
+    }
+    await sleep(1200);
+    // 提交按钮元素级检测（页面文本里的「可提交」标签会假阳性）
+    const hasSubmitBtn = await page.evaluate(() =>
+        [...document.querySelectorAll('body *')].some(el => {
+            const s = (el.textContent || '').trim();
+            const r = el.getBoundingClientRect();
+            return el.children.length === 0 && s === '提交' && r.width > 0 && r.height > 0;
+        })
+    );
+    if (!hasSubmitBtn) {
+        console.log(`[${task.name}] 详情里没有提交按钮（可能已提交过）`);
+        await clickLeaf(page, '取消');
+        return false;
+    }
+    await clickLeaf(page, '提交'); // 实测提交按钮真机点击无响应，只吃合成事件（探针实证）
+    await sleep(1500);
+    await clickLeaf(page, '确定'); // 若有确认框
+    await sleep(1200);
+    txt = await getPageText(page);
+    const m = txt.match(/提交成功获得：([^\n]{0,60})/);
+    console.log(m ? `[${task.name}] 提交成功，获得: ${m[1].trim()}` : `[${task.name}] 已点提交（未见成功toast，待列表核对）`);
+    // 关详情弹窗（取消只吃合成事件的概率高，两法都试）
+    await clickLeaf(page, '取消');
+    await clickExact(page, '取消', 1500);
+    await clickExact(page, '关闭', 1500);
+    await sleep(500);
+    return true;
+}
+
+// ---------- 寻路蜂补给 ----------
+// 导路每次消耗寻路蜂×1（[绑]寻路蜂 与 寻路蜂 两种都可用）；不足会直接导路失败。
+// 开跑前查包裹-道具，总量<20 就进商城热卖买 50 个（快速购买档）。
+
+// 读包裹-道具页里寻路蜂总数量（两种求和）
+async function beeCount(page) {
+    if (!(await clickText(page, '包裹', 3000))) {
+        console.log('找不到包裹入口');
+        return -1;
+    }
+    await sleep(1500);
+    await clickExact(page, '道具', 2000); // 包裹内页签：装备/药水/道具/宝盒/材料...
+    await sleep(1500);
+    const txt = await getPageText(page);
+    let total = 0, m;
+    const re = /寻路蜂\s*\(1级\)\s*数量：(\d+)/g;
+    while ((m = re.exec(txt)) !== null) total += parseInt(m[1], 10);
+    // 退出包裹页
+    if (!(await clickExact(page, '返回', 1500))) await closePopup(page);
+    await sleep(800);
+    return total;
+}
+
+// 商城热卖页买 50 个寻路蜂
+async function buyBees(page) {
+    console.log('寻路蜂不足20，商城购买50个...');
+    if (!(await clickText(page, '商城', 3000))) {
+        console.log('找不到商城入口');
+        return false;
+    }
+    await sleep(2000);
+    // 热卖网格里点寻路蜂卡片（叶子按文本短者优先，会命中最内层「寻路蜂」）
+    if (!(await clickLeaf(page, '寻路蜂'))) {
+        console.log('商城热卖里没找到寻路蜂卡片');
+        return false;
+    }
+    await sleep(1000);
+    if (!(await clickExact(page, '立即购买', 3000))) {
+        console.log('没找到立即购买按钮');
+        return false;
+    }
+    await sleep(1000);
+    // 商品详情弹窗：快速购买档「50个」→「确认购买」
+    if (!(await clickExact(page, '50个', 3000))) {
+        console.log('快速购买没找到「50个」档位');
+        await clickExact(page, '取消', 1500);
+        return false;
+    }
+    await sleep(500);
+    if (!(await clickExact(page, '确认购买', 3000))) {
+        console.log('没找到确认购买按钮');
+        return false;
+    }
+    await sleep(500);
+    if (!(await clickExact(page, '确认购买', 3000))) {
+        console.log('没找到确认购买按钮');
+        return false;
+    }
+    await sleep(1200);
+    // 成功信号：页面中间短暂弹「购买成功」toast（无确认框）
+    const ok = (await getPageText(page)).includes('购买成功');
+    console.log(ok ? '购买成功（toast确认）' : '已点确认购买但未见「购买成功」toast，以包裹复核为准');
+    // 退出商城回主页
+    if (!(await clickExact(page, '返回', 2000))) await closePopup(page);
+    await sleep(1000);
+    return ok;
+}
+
+// 主流程准备步：确保寻路蜂 ≥20；买完复核一遍
+async function ensureBee(page) {
+    let n = await beeCount(page);
+    console.log(`包裹寻路蜂数量: ${n < 0 ? '读取失败' : n}`);
+    if (n >= 20) return true;
+    if (n >= 0) await buyBees(page);
+    const n2 = await beeCount(page);
+    console.log(`复核寻路蜂数量: ${n2 < 0 ? '读取失败' : n2}${n2 >= 20 ? '（充足）' : '（仍不足，导路可能失败，人工检查）'}`);
+    return n2 >= 20;
+}
+
+// 页面是否已在主界面（城内/野外）
+async function onMainPage(page) {
+    const t = await getPageText(page);
+    return t.includes('当前城市') || /你看到：/.test(t);
+}
+
+// 关掉任务页等二级页面回主界面（二级页左上角是 uni-page-head 返回箭头图标，无文本；
+// 探针实证：DIV.uni-page-head-hd > I.uni-btn-icon @ (5,7,27x27)。Escape/遮罩无效）
+async function backToMain(page) {
+    for (let i = 0; i < 5; i++) {
+        if (await onMainPage(page)) return true;
+        const box = await page.evaluate(() => {
+            const el = document.querySelector('.uni-page-head .uni-btn-icon') ||
+                       document.querySelector('.uni-page-head-hd');
+            if (el) {
+                const r = el.getBoundingClientRect();
+                if (r.width > 0 && r.height > 0) return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+            }
+            return null;
+        });
+        if (box) await page.mouse.click(box.x, box.y).catch(() => {});
+        else await page.keyboard.press('Escape');
+        await sleep(1200);
+    }
+    return await onMainPage(page);
+}
+
+// 自检：重开任务列表逐行核对状态标签与进度（完成后必须自检，防漏做/漏提交）
+async function selfCheck(page) {
+    const txt = await openDailyList(page);
+    const segs = txt.split(/(?<![0-9])(?=\d+\.\s*\(每日\))/).filter(s => /\(每日\)/.test(s));
+    let done = 0, total = 0;
+    const unfinished = [];
+    console.log('==== 每日任务自检 ====');
+    for (const seg of segs) {
+        const m = seg.match(/^(\d+)\.\s*\(每日\)每日[·・]([\u4e00-\u9fa5]{2,8})/);
+        if (!m) continue;
+        total++;
+        const tag = (seg.match(/已完成|进行中|可提交/) || ['?'])[0];
+        const cnt = seg.match(/(\d+\s*\/\s*\d+)/);
+        if (tag === '已完成') done++;
+        else unfinished.push(`${m[1]}.${m[2]}(${cnt ? cnt[1].replace(/\s/g, '') : '/'} ${tag})`);
+        console.log(`  ${m[1]}. ${m[2]} | ${cnt ? cnt[1].replace(/\s/g, '') : '/'} | ${tag}`);
+    }
+    console.log(`自检结果: ${done}/${total} 已完成${unfinished.length ? '，未完成: ' + unfinished.join('、') : '，全部完成 ✅'}`);
+    return { done, total };
+}
+
+async function run() {
+    const browser = await chromium.launch({ headless: true });
+    const context = await browser.newContext();
+    const page = await context.newPage();
+
+    try {
+        await gotoGame(page);
+        await page.waitForTimeout(3000);
+
+        for (let attempt = 0; attempt < 10; attempt++) {
+            const inputs = await page.$$('input');
+            if (inputs.length < 2) {
+                let t = await getPageText(page);
+                if (t.includes('进入游戏') || t.includes('你看到') || t.includes('当前城市')) {
+                    console.log('无表单但已在游戏流程中（会话有效），跳过登录');
+                    break;
+                }
+                console.log('找不到输入框，刷新页面...');
+                await gotoGame(page);
+                await page.waitForTimeout(3000);
+                continue;
+            }
+            await inputs[0].fill(ACCOUNT);
+            await inputs[1].fill(PASSWORD);
+            await page.getByText('登录').first().click();
+            await sleep(3000);
+            console.log(`登录尝试${attempt + 1}`);
+            const pageText = await getPageText(page);
+            if (pageText.includes('进入游戏') || pageText.includes('你看到') || pageText.includes('当前城市')) {
+                console.log('登录成功');
+                break;
+            }
+            await sleep(2000);
+        }
+
+        for (let i = 0; i < 10; i++) {
+            await clickText(page, '进入游戏');
+            await sleep(5000);
+            const pageText = await getPageText(page);
+            if (pageText.includes('你看到') || pageText.includes('当前城市')) {
+                console.log('进入游戏成功');
+                break;
+            }
+            await sleep(2000);
+        }
+
+        await sleep(5000);
+        await page.keyboard.press('Escape');
+        await sleep(2000);
+
+        // 0. 寻路蜂补给（导路消耗品，<20 买50个；DRY 模式只查不买）
+        const beeN = await beeCount(page);
+        if (DRY) {
+            console.log(`[DRY] 包裹寻路蜂数量: ${beeN < 0 ? '读取失败' : beeN}`);
+        } else if (beeN < 20) {
+            await ensureBee(page);
+        } else {
+            console.log(`寻路蜂充足: ${beeN}`);
+        }
+
+        // 1. 解析每日任务
+        const tasks = await parseDailyTasks(page);
+        if (!tasks.length) {
+            console.log('没有可解析的每日任务，退出');
+            await browser.close();
+            return;
+        }
+        // 关闭任务页回主界面再读当前城市（任务页上没有「当前城市」文本）
+        await closePopup(page);
+        await sleep(1000);
+        const here = await currentCity(page);
+        console.log('每日任务解析结果:');
+        for (const t of tasks) {
+            const prog = t.n === Infinity ? `${t.x}/?` : `${t.x}/${t.n}`;
+            const tag = t.submitted ? '✓已提交' : t.full ? '✓可提交' : '□';
+            console.log(`  ${tag} ${t.name} | ${t.city ? `${t.city}·${t.area}` : '（无地点）'} | ${prog}`);
+        }
+
+        // DRY 只读模式在此收尾：解析、计划、可提交清单都打印，绝不提交/杀怪/出航/购买
+        if (DRY) {
+            const willSubmit = tasks.filter(t => t.full && !t.submitted).map(t => t.name);
+            console.log(`[DRY] 可提交清单: ${willSubmit.join('、') || '（无）'}`);
+            console.log('DRY 模式：只解析不执行');
+            await browser.close();
+            return;
+        }
+
+        // 2-4. 提交与执行循环：提交后列表会滚出新任务实例，循环处理直到无新任务（最多3轮）
+        // attempted 按 行号+名字 记录已尝试的进行中任务：cap 后不在本轮内反复死磕
+        const attempted = new Set();
+        const results = [];
+        for (let round = 1; round <= 3; round++) {
+            const curTasks = round === 1 ? tasks : await parseDailyTasks(page);
+            if (!curTasks.length) break;
+            if (round > 1) {
+                console.log(`---- 第${round}轮（滚动池新实例）----`);
+                for (const t of curTasks) {
+                    const prog = t.n === Infinity ? `${t.x}/?` : `${t.x}/${t.n}`;
+                    const tag = t.submitted ? '✓已提交' : t.full ? '✓可提交' : '□';
+                    console.log(`  ${tag} ${t.rowNo}.${t.name} | ${t.city ? `${t.city}·${t.area}` : '（无地点）'} | ${prog}`);
+                }
+            }
+            // 集中提交「可提交」态
+            for (const t of curTasks.filter(t => t.full && !t.submitted)) {
+                await openDailyList(page);
+                await tryClaim(page, t);
+            }
+            // 执行「进行中」且未尝试过的
+            const pending = curTasks.filter(t => !t.full && !attempted.has(t.rowNo + t.name));
+            if (!pending.length) break;
+            // 无地点信息且未完成的任务无法寻路，记录后跳过
+            for (const t of pending.filter(t => !t.city)) {
+                console.log(`  [跳过] ${t.rowNo}.${t.name}：详情进度无「城市·野区」且未满足，无法寻路（人工处理）`);
+                results.push(`${t.rowNo}.${t.name}: 无地点信息跳过`);
+                attempted.add(t.rowNo + t.name);
+            }
+            const routable = pending.filter(t => t.city);
+            const hereNow = round === 1 ? here : await currentCity(page);
+            const cityOrder = [];
+            for (const t of routable) {
+                if (!cityOrder.includes(t.city)) cityOrder.push(t.city);
+            }
+            cityOrder.sort((a, b) => (a === hereNow ? -1 : 0) - (b === hereNow ? -1 : 0));
+            if (cityOrder.length) {
+                console.log(`第${round}轮执行计划（城市顺序）:`, cityOrder.join(' → '), `| 当前所在: ${hereNow}`);
+            }
+            // 逐城逐任务执行
+            for (const city of cityOrder) {
+                // 当前城市判断带重试：任务页/弹窗残留会吃掉「当前城市」文本，先关页再读
+                let cur = await currentCity(page);
+                if (cur !== city) {
+                    await backToMain(page);
+                    cur = await currentCity(page);
+                }
+                if (cur !== city) {
+                    const ok = await sailTo(page, city) || await teleportToDest(page, city);
+                    if (!ok || (await currentCity(page)) !== city) {
+                        console.log(`到不了${city}，该城任务跳过`);
+                        for (const t of routable.filter(t => t.city === city)) {
+                            results.push(`${t.rowNo}.${t.name}: 到不了城市`);
+                            attempted.add(t.rowNo + t.name);
+                        }
+                        continue;
+                    }
+                }
+                for (const t of routable.filter(t => t.city === city)) {
+                    await openDailyList(page);
+                    const r = await runTask(page, t);
+                    results.push(`${t.rowNo}.${t.name}: ${r}`);
+                    attempted.add(t.rowNo + t.name);
+                }
+            }
+        }
+
+        console.log('==== 每日任务执行汇总 ====');
+        for (const r of results) console.log(' ', r);
+        // 自检：逐行核对任务列表状态（防漏做/漏提交）
+        await selfCheck(page);
+    } catch (e) {
+        console.error('错误:', e.message);
+        await page.screenshot({ path: 'daily-error.png' }).catch(() => {});
+    } finally {
+        await browser.close();
+    }
+}
+
+run();
