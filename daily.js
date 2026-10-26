@@ -708,7 +708,8 @@ async function pickAndFight(page, task) {
 // 执行一条任务：导路 → 杀怪直到进度满（每杀1只查一次详情），带3倍保险上限
 // 返回: 'done' | 'cap' | 'fail'
 async function runTask(page, task) {
-    console.log(`[${task.name}] ${task.city}·${task.area} ${task.x}/${task.n}，点寻路...`);
+    const where = task.city ? `${task.city}·${task.area}` : '（无地点）';
+    console.log(`[${task.name}] ${where} ${task.x}/${task.n}，点寻路...`);
     // 点任务行开详情（按行号，重试3次），确认出现「任务进度」再点寻路
     let opened = false;
     for (let r = 0; r < 3 && !opened; r++) {
@@ -757,6 +758,15 @@ async function runTask(page, task) {
             await sleep(800);
             await clickExact(page, '取消', 1500);
             return 'fail';
+        }
+        // 10-26 实证（probe-ore2 截图）：铁矿石这类任务点寻路会弹
+        // 「当前任务条件没有目标地图，无法自动寻路」→ 游戏自己都没给它目标地图，只能靠别的任务顺带掉落
+        if (t.includes('没有目标地图')) {
+            console.log(`[${task.name}] 游戏提示「没有目标地图，无法自动寻路」→ 该任务只能靠顺带掉落，跳过`);
+            await clickExact(page, '确定', 2000);
+            await sleep(800);
+            await clickExact(page, '取消', 1500);
+            return 'nomap';
         }
         if (t.includes('你看到') && !t.includes('任务进度')) {
             arrived = true;
@@ -1033,6 +1043,7 @@ async function backToMain(page) {
 
 // 自检：重开任务列表逐行核对状态标签与进度（完成后必须自检，防漏做/漏提交）
 async function selfCheck(page) {
+    await sleep(3000);   // 提交后列表状态有延迟刷新，先等一会儿再核对
     const txt = await openDailyList(page);
     const segs = txt.split(/(?<![0-9])(?=\d+\.\s*\(每日\))/).filter(s => /\(每日\)/.test(s));
     let done = 0, total = 0;
@@ -1042,8 +1053,21 @@ async function selfCheck(page) {
         const m = seg.match(/^(\d+)\.\s*\(每日\)每日[·・]([\u4e00-\u9fa5]{2,8})/);
         if (!m) continue;
         total++;
-        const tag = (seg.match(/已完成|进行中|可提交/) || ['?'])[0];
         const cnt = seg.match(/(\d+\s*\/\s*\d+)/);
+        let tag = (seg.match(/已完成|进行中|可提交/) || ['?'])[0];
+        // 补救提交：仍显示「可提交」= 汇总阶段漏提交 / 列表滞后（10-26 CI master 鸦片贩子即此情况：
+        // 16:28:15 已提交成功拿到奖励，16:28:20 自检仍显示「可提交」被误报未完成）
+        if (tag === '可提交') {
+            console.log(`  [自检补救] ${m[1]}.${m[2]} 仍显示可提交，补提交一次...`);
+            const claimed = await tryClaim(page, { rowNo: Number(m[1]), name: m[2] }).catch(() => false);
+            if (claimed) {
+                await sleep(2500);
+                const t2 = await openDailyList(page);
+                const seg2 = t2.split(/(?<![0-9])(?=\d+\.\s*\(每日\))/)
+                    .find(s => s.startsWith(`${m[1]}.`) && s.includes(m[2]));
+                if (seg2) tag = (seg2.match(/已完成|进行中|可提交/) || ['?'])[0];
+            }
+        }
         if (tag === '已完成') done++;
         else unfinished.push(`${m[1]}.${m[2]}(${cnt ? cnt[1].replace(/\s/g, '') : '/'} ${tag})`);
         console.log(`  ${m[1]}. ${m[2]} | ${cnt ? cnt[1].replace(/\s/g, '') : '/'} | ${tag}`);
@@ -1157,16 +1181,28 @@ async function run() {
             // 集中提交「可提交」态
             for (const t of curTasks.filter(t => t.full && !t.submitted)) {
                 await openDailyList(page);
-                await tryClaim(page, t);
+                const claimed = await tryClaim(page, t);
+                // 前面 runTask 可能把这行判成 fail（如「找不到寻路按钮」），但这里提交成功就应改记为成功，
+                // 否则汇总里留个 fail 误导排查（10-26 CI master 鸦片贩子即如此：实际提交成功仍记 fail）
+                const key = `${t.rowNo}.${t.name}`;
+                const idx = results.findIndex(r => r.startsWith(key + ':'));
+                if (claimed) {
+                    if (idx >= 0) results[idx] = `${key}: 提交成功（收尾补交）`;
+                    else results.push(`${key}: 提交成功（收尾补交）`);
+                }
             }
             // 执行「进行中」且未尝试过的
             const pending = curTasks.filter(t => !t.full && !attempted.has(t.rowNo + t.name));
             if (!pending.length) break;
-            // 无地点信息且未完成的任务无法寻路，记录后跳过
-            for (const t of pending.filter(t => !t.city)) {
-                console.log(`  [跳过] ${t.rowNo}.${t.name}：详情进度无「城市·野区」且未满足，无法寻路（人工处理）`);
-                results.push(`${t.rowNo}.${t.name}: 无地点信息跳过`);
-                attempted.add(t.rowNo + t.name);
+            // 无地点信息且未完成的任务无法寻路。注意：这类多是掉落/收集类（如铁矿石），
+            // 会随其他任务杀怪顺带凑满 → 本轮跳过即可，但每轮开头仍会单独检查「可提交」并提交。
+            // 无「城市·野区」信息的任务（铁矿石这类收集类）先不跳过！
+            // 10-26 探针实证（probe-ore.js）：铁矿石详情里照样有「寻路」按钮，游戏自己知道该去哪个野区，
+            // 只是详情文本不是「城市·野区」格式所以解析不出城市。放到本轮最后直接点寻路试。
+            const noCity = pending.filter(t => !t.city);
+            for (const t of noCity) {
+                const prog = t.n === Infinity ? `${t.x}/?` : `${t.x}/${t.n}`;
+                console.log(`  [无地点] ${t.rowNo}.${t.name} ${prog}：无「城市·野区」，本轮末尾直接点寻路试`);
             }
             const routable = pending.filter(t => t.city);
             const hereNow = round === 1 ? here : await currentCity(page);
@@ -1213,6 +1249,16 @@ async function run() {
                     attempted.add(t.rowNo + t.name);
                 }
             }
+            // 最后处理无地点任务：不切城市，就地回城后直接点「寻路」（游戏自己决定去哪）
+            for (const t of noCity) {
+                if (attempted.has(t.rowNo + t.name)) continue;
+                await backToMain(page);
+                if (!(await backToCity(page))) { console.log(`${t.name}: 回城失败，跳过`); continue; }
+                await openDailyList(page);
+                const r = await runTask(page, t);
+                results.push(`${t.rowNo}.${t.name}: ${r}(无地点直寻路)`);
+                attempted.add(t.rowNo + t.name);
+            }
         }
 
         console.log('==== 每日任务执行汇总 ====');
@@ -1234,4 +1280,5 @@ module.exports = {
     sleep, gotoGame, getPageText, clickText, clickLeaf, clickExact,
     selectRegion, sailTo, sailFailReason, currentCity,
     openDailyList, parseDailyTasks, clickRow, atCity, onMainPage, backToMain, backToCity,
+    selfCheck, tryClaim, runTask,
 };
