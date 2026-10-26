@@ -390,8 +390,8 @@ async function backToHub(page) {
 }
 
 // 从秘藏入口一路往北到枢纽广场，沿途清掉走廊每一间房的怪。
-// 地图（用户提供）：秘藏入口/验货棚/栈桥/接驳厅 各 3 只基德仆从(10500) —— 共 12 只，
-// 之前只走路不清怪，等于白漏 12 只。首次进本与续打都走这里。
+// 地图（用户确认）：秘藏入口**无怪**、枢纽广场**无怪**；验货棚/栈桥/接驳厅各 3 只基德仆从(10500) = 9 只。
+// 之前只走路不清怪，等于白漏这 9 只。首次进本与续打都走这里（无怪的房间自动跳过）。
 async function northToHubClearing(page) {
     for (let i = 0; i < 8 && !(await atHub(page)); i++) {
         const seg = viewSeg(await getPageText(page));
