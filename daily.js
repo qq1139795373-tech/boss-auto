@@ -454,13 +454,22 @@ async function readTaskDetail(page, rowNo, taskName) {
         return null;
     }
     const seg = txt.substring(i, j > i ? j : i + 200);
-    const loc = seg.match(/([\u4e00-\u9fa5]{2,5})·([★☆]?[\u4e00-\u9fa5]{2,8})/); // 区域可能带★前缀（如★码头=特殊场景）
+    const LOC_RE = /([\u4e00-\u9fa5]{2,5})·([★☆]?[\u4e00-\u9fa5]{2,8})/; // 区域可能带★前缀（如★码头=特殊场景）
+    let loc = seg.match(LOC_RE);
     const cnt = seg.match(/(\d+)\s*\/\s*(\d+)/);
     // 任务类型与目标：从「任务介绍」段解析（独立短句、不带地点，如“击杀山匪8只”“收集5份盐矿”）。
     // 不能用进度段解析——进度文本无空格（击杀山匪长安·望马坡0/8），数字锚定会把地名当怪名。
     let type = null, target = null;
     const ii = txt.indexOf('任务介绍');
     const intro = ii >= 0 ? txt.substring(ii, txt.indexOf('任务要求', ii) > 0 ? txt.indexOf('任务要求', ii) : ii + 120) : '';
+    // 兜底：部分任务的地点只写在「任务介绍」（如「前往威尼斯·湿地附近探索，收集3个龟壳」）
+    if (!loc) {
+        const il = intro.match(LOC_RE);
+        if (il) {
+            loc = il;
+            console.log(`[${taskName}] 进度段无地点，从任务介绍取: ${il[0]}`);
+        }
+    }
     const ik = intro.match(/击杀(?:\d+\s*[只个头匹]?\s*)?([\u4e00-\u9fa5]{2,6})/);
     const im = intro.match(/收集(?:\d+\s*[个份只张枚]?\s*)?([\u4e00-\u9fa5]{2,6})/);
     if (ik) { type = 'kill'; target = ik[1]; }
@@ -507,14 +516,22 @@ async function readTaskDetail(page, rowNo, taskName) {
             }
         }
     }
-    if (city) city = city.replace(/^(击杀|收集|讨伐|消灭|杀)/, '');
+    if (city) city = city.replace(/^(击杀|收集|讨伐|消灭|杀|前往|去|到)/, '');
     if (city && city.length < 2) city = null;
+    // 城市名归一：解析串不在 CITY_REGION（如「前往威尼斯」）→ 找出其中包含的已知城市名
+    if (city && !CITY_REGION[city]) {
+        const hit = Object.keys(CITY_REGION).find(c => city.includes(c));
+        if (hit) {
+            console.log(`[${taskName}] 城市名「${city}」→ 归一为「${hit}」`);
+            city = hit;
+        }
+    }
     const full = x >= n || satisfiable;
     return {
         rowNo, name: taskName,
         type, target,
         city,
-        area: city ? loc[2].replace(/[★☆]/g, '') : null,
+        area: city ? loc[2].replace(/[★☆]/g, '').replace(/(附近探索|附近|一带|周边|探索|区域).*$/, '') : null,
         x, n,
         full,
         submitted: full && !hasSubmitBtn,
@@ -721,30 +738,44 @@ async function runTask(page, task) {
         console.log(`[${task.name}] 点不开任务详情`);
         return 'fail';
     }
+    // 寻路按钮在野区也能点（10-26 用户指出 + 真机复验：野区点寻路能正常弹提示/导航），
+    // 所以「找不到寻路按钮」不是位置问题，而是详情页状态/坐标点击打偏 → 先合成事件再点，最后才回城兜底
     if (!(await clickExact(page, '寻路', 3000))) {
-        // 双保险：多半是人还在上一个任务的野区（寻路按钮只在城内可用）→ 回城重开详情再试
-        console.log(`[${task.name}] 找不到寻路按钮，回城后重试...`);
-        await clickExact(page, '取消', 1500);
-        await backToMain(page);
-        const back = await backToCity(page);
-        if (back) {
+        console.log(`[${task.name}] 坐标点击没点到寻路，改用合成事件重试...`);
+        let clicked = await clickLeaf(page, '寻路');
+        if (!clicked) {
+            await page.screenshot({ path: `daily-xunlu-${task.name}.png` }).catch(() => {});
+            await clickExact(page, '取消', 1500);
+            await backToMain(page);
             await openDailyList(page);
             for (let r = 0; r < 3; r++) {
                 await clickRow(page, task.rowNo, task.name);
                 await sleep(1500);
                 if ((await getPageText(page)).includes('任务进度')) break;
             }
-            if (await clickExact(page, '寻路', 3000)) {
-                console.log(`[${task.name}] 回城后寻路成功`);
-            } else {
-                console.log(`[${task.name}] 回城后仍找不到寻路按钮（可能不在${task.city}）`);
+            clicked = (await clickExact(page, '寻路', 3000)) || (await clickLeaf(page, '寻路'));
+            // 最后兜底：回城（出航/传送只在城内，回到城内页面最干净）
+            if (!clicked) {
+                console.log(`[${task.name}] 重开详情仍点不到寻路，回城再试一次`);
                 await clickExact(page, '取消', 1500);
-                return 'fail';
+                await backToMain(page);
+                await backToCity(page);
+                await openDailyList(page);
+                for (let r = 0; r < 3; r++) {
+                    await clickRow(page, task.rowNo, task.name);
+                    await sleep(1500);
+                    if ((await getPageText(page)).includes('任务进度')) break;
+                }
+                clicked = (await clickExact(page, '寻路', 3000)) || (await clickLeaf(page, '寻路'));
             }
-        } else {
-            console.log(`[${task.name}] 回城失败，放弃该条`);
+        }
+        if (!clicked) {
+            console.log(`[${task.name}] 找不到寻路按钮（已试坐标点击/合成事件/重开详情/回城）`);
+            await page.screenshot({ path: `daily-xunlu-fail-${task.name}.png` }).catch(() => {});
+            await clickExact(page, '取消', 1500);
             return 'fail';
         }
+        console.log(`[${task.name}] 寻路已触发`);
     }
     // 等自动走到野区：详情弹窗消失且页面有“你看到”
     // 城市不对会弹「只能寻路当前城市,请去再寻路吧」→ 点确定放弃该条（按城市聚合正常不会触发）
@@ -759,10 +790,10 @@ async function runTask(page, task) {
             await clickExact(page, '取消', 1500);
             return 'fail';
         }
-        // 10-26 实证（probe-ore2 截图）：铁矿石这类任务点寻路会弹
-        // 「当前任务条件没有目标地图，无法自动寻路」→ 游戏自己都没给它目标地图，只能靠别的任务顺带掉落
+        // 「当前任务条件没有目标地图，无法自动寻路」= 人不在任务所属的那座城（用户确认 + 任务.txt：
+        // 「每日任务每个城市都可以点开，但任务条件可能分散在不同城市」），不是"任务做不了"
         if (t.includes('没有目标地图')) {
-            console.log(`[${task.name}] 游戏提示「没有目标地图，无法自动寻路」→ 该任务只能靠顺带掉落，跳过`);
+            console.log(`[${task.name}] 「没有目标地图」→ 当前城市不是它的任务城市，换城市再寻路`);
             await clickExact(page, '确定', 2000);
             await sleep(800);
             await clickExact(page, '取消', 1500);
@@ -1167,6 +1198,9 @@ async function run() {
         // attempted 按 行号+名字 记录已尝试的进行中任务：cap 后不在本轮内反复死磕
         const attempted = new Set();
         const results = [];
+        // 无地点任务 逐城试探记录：key = 行号+名字@城市，避免同一座城反复试
+        const noCityTried = new Set();
+        const unmatchedCities = new Map(); // 任务key -> [试过的城市]
         for (let round = 1; round <= 3; round++) {
             const curTasks = round === 1 ? tasks : await parseDailyTasks(page);
             if (!curTasks.length) break;
@@ -1194,15 +1228,13 @@ async function run() {
             // 执行「进行中」且未尝试过的
             const pending = curTasks.filter(t => !t.full && !attempted.has(t.rowNo + t.name));
             if (!pending.length) break;
-            // 无地点信息且未完成的任务无法寻路。注意：这类多是掉落/收集类（如铁矿石），
-            // 会随其他任务杀怪顺带凑满 → 本轮跳过即可，但每轮开头仍会单独检查「可提交」并提交。
-            // 无「城市·野区」信息的任务（铁矿石这类收集类）先不跳过！
-            // 10-26 探针实证（probe-ore.js）：铁矿石详情里照样有「寻路」按钮，游戏自己知道该去哪个野区，
-            // 只是详情文本不是「城市·野区」格式所以解析不出城市。放到本轮最后直接点寻路试。
+            // 无「城市·野区」信息的任务（铁矿石这类收集类）：详情文本里没有城市，但游戏是靠
+            // 「你当前所在城市」决定能不能寻路的（任务.txt：任务条件可能分散在不同城市）。
+            // 所以每到一座城就试一次寻路：成功就做完；弹「没有目标地图」说明不是这座城，换下一城。
             const noCity = pending.filter(t => !t.city);
             for (const t of noCity) {
                 const prog = t.n === Infinity ? `${t.x}/?` : `${t.x}/${t.n}`;
-                console.log(`  [无地点] ${t.rowNo}.${t.name} ${prog}：无「城市·野区」，本轮末尾直接点寻路试`);
+                console.log(`  [无地点] ${t.rowNo}.${t.name} ${prog}：无「城市·野区」，逐城试探寻路`);
             }
             const routable = pending.filter(t => t.city);
             const hereNow = round === 1 ? here : await currentCity(page);
@@ -1211,6 +1243,8 @@ async function run() {
                 if (!cityOrder.includes(t.city)) cityOrder.push(t.city);
             }
             cityOrder.sort((a, b) => (a === hereNow ? -1 : 0) - (b === hereNow ? -1 : 0));
+            // 只有无地点任务时 cityOrder 为空 → 把当前城市排进去，好在本地试一次寻路
+            if (noCity.length && hereNow && !cityOrder.includes(hereNow)) cityOrder.push(hereNow);
             if (cityOrder.length) {
                 console.log(`第${round}轮执行计划（城市顺序）:`, cityOrder.join(' → '), `| 当前所在: ${hereNow}`);
             }
@@ -1239,26 +1273,45 @@ async function run() {
                     }
                 }
                 for (const t of routable.filter(t => t.city === city)) {
-                    // 上一个任务会把人留在野区，而「寻路」只在城内主界面可用 —— 每个任务前强制回城
-                    // （10-26 CI 实证：boss3 盐矿、boss4 地魔弓箭手都因在野区报「找不到寻路按钮」→ 0 进度）
+                    // 只关掉二级页，不用回城 —— 寻路在野区照样能点（用户确认 + 真机复验）
                     await backToMain(page);
-                    if (!(await backToCity(page))) console.log(`${t.name}: 回城失败，仍尝试开任务列表`);
                     await openDailyList(page);
                     const r = await runTask(page, t);
+                    if (r === 'nomap') {
+                        // 已按城市聚合还弹这个 = 城市状态没对齐（航行中/页面残留），本轮不判死，留到下一轮
+                        console.log(`${t.name}: ${city} 下仍提示没有目标地图，本轮跳过，下轮再看`);
+                        results.push(`${t.rowNo}.${t.name}: 城市未对齐(${city})`);
+                        continue;
+                    }
                     results.push(`${t.rowNo}.${t.name}: ${r}`);
                     attempted.add(t.rowNo + t.name);
                 }
+                // 无地点任务：每座城试一次寻路，命中就做完，弹没有目标地图就换下一城
+                for (const t of noCity) {
+                    if (attempted.has(t.rowNo + t.name)) continue;
+                    if ((await currentCity(page)) !== city) break;
+                    const tk = `${t.rowNo}.${t.name}`;
+                    if (noCityTried.has(`${tk}@${city}`)) continue;
+                    noCityTried.add(`${tk}@${city}`);
+                    if (!unmatchedCities.has(tk)) unmatchedCities.set(tk, []);
+                    unmatchedCities.get(tk).push(city);
+                    await backToMain(page);
+                    await openDailyList(page);
+                    const r = await runTask(page, t);
+                    if (r === 'nomap') {
+                        console.log(`  ${t.name}: ${city} 不是它的任务城市（试过 ${unmatchedCities.get(tk).join('/')}），换下一城`);
+                        continue;
+                    }
+                    results.push(`${t.rowNo}.${t.name}: ${r}(在${city}寻路)`);
+                    attempted.add(t.rowNo + t.name);
+                }
             }
-            // 最后处理无地点任务：不切城市，就地回城后直接点「寻路」（游戏自己决定去哪）
-            for (const t of noCity) {
-                if (attempted.has(t.rowNo + t.name)) continue;
-                await backToMain(page);
-                if (!(await backToCity(page))) { console.log(`${t.name}: 回城失败，跳过`); continue; }
-                await openDailyList(page);
-                const r = await runTask(page, t);
-                results.push(`${t.rowNo}.${t.name}: ${r}(无地点直寻路)`);
-                attempted.add(t.rowNo + t.name);
-            }
+        }
+        // 无地点任务收尾：所有试过的城市都弹「没有目标地图」→ 如实记录，不当作已完成
+        for (const [tk, cities] of unmatchedCities) {
+            if (attempted.has(tk)) continue;
+            console.log(`  ${tk}: 试过 ${cities.length} 座城均无目标地图（${cities.join('/')}），需到它所属城市才能寻路`);
+            results.push(`${tk}: 未定位任务城市（试过 ${cities.join('/')}）`);
         }
 
         console.log('==== 每日任务执行汇总 ====');
