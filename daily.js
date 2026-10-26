@@ -26,6 +26,30 @@ const CITY_REGION = {
 // 地区栏可左右滚动：前5区能看到，最右「新大陆」需横滚才露出来（用户实证）
 const ALL_REGIONS = ['地中海', '北海', '非洲', '东亚', '印度洋', '新大陆'];
 
+// 「用户手动告知」的特殊任务：地图寻路拿不到目标的那几条（详情无「城市·野区」、点寻路弹「没有目标地图」）。
+// 用户口头告知后在这里记一行（城市 + 掉落它的怪），脚本只做一件事：去这座城再点一次寻路。
+//
+// ★ 严禁靠野怪分布表（monster-map.json）自动反查推断 —— 用户 10-26 明确：
+//   「你检索我给你的文本你自己看不出来的，比如铁矿石，如果我不告知你是偷矿者掉落，你能判断吗？」
+//   怪表只作为人工查询资料留在仓库里，不参与自动决策。
+//
+// ★ 也不许为了这类任务跨海域白跑：10-26 21:35 实测 coldwind0 专程航行到威尼斯，铁矿石寻路**仍然**弹
+//   「没有目标地图」（游戏没给这条任务配目标地图，不是城市问题）→ 空烧一路铜贝。所以默认留空：
+//   寻路不通就直接记账放着（`未完成·寻路无目标地图…等你告知城市`），等用户在场时手动带着走。
+const MANUAL_HINTS = {
+    // 例：'铁矿石': { city: '威尼斯', monster: '偷矿者', area: '矿山' },  ← 已实测无效，勿开
+};
+
+// 任务 → 用户告知过的城市（只查 MANUAL_HINTS，不做任何自动检索）
+function locateTask(task) {
+    for (const [key, hint] of Object.entries(MANUAL_HINTS)) {
+        if (task.target === key || task.name === key || (task.name || '').includes(key) || (task.target || '').includes(key)) {
+            return { key, ...hint };
+        }
+    }
+    return null;
+}
+
 async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -454,7 +478,10 @@ async function readTaskDetail(page, rowNo, taskName) {
         return null;
     }
     const seg = txt.substring(i, j > i ? j : i + 200);
-    const LOC_RE = /([\u4e00-\u9fa5]{2,5})·([★☆]?[\u4e00-\u9fa5]{2,8})/; // 区域可能带★前缀（如★码头=特殊场景）
+    // 「威尼斯·矿山」在详情里可能被渲染成「威尼斯 · 矿山」（点号两侧带空格/换行，textContent 原样带出）
+    // —— 10-26 实测：盐矿详情写的就是「威尼斯 · 矿山」，原正则不容忍空格 → 整条被判「无地点」跳过。
+    // 点号还可能是 ·(B7) ・(30FB) •(2022) ∙(2219)，统一吃进来。
+    const LOC_RE = /([\u4e00-\u9fa5]{2,5})\s*[·・•∙]\s*([★☆]?[\u4e00-\u9fa5]{2,8})/; // 区域可能带★前缀（如★码头=特殊场景）
     let loc = seg.match(LOC_RE);
     const cnt = seg.match(/(\d+)\s*\/\s*(\d+)/);
     // 任务类型与目标：从「任务介绍」段解析（独立短句、不带地点，如“击杀山匪8只”“收集5份盐矿”）。
@@ -797,6 +824,8 @@ async function runTask(page, task) {
             await clickExact(page, '确定', 2000);
             await sleep(800);
             await clickExact(page, '取消', 1500);
+            // 不做任何自动走图/自动推断：查不到城市就如实返回 nomap 交给上层换城，全试完就记下来放着，
+            // 等用户告知该去哪座城打哪只怪（用户 10-26 定）。
             return 'nomap';
         }
         if (t.includes('你看到') && !t.includes('任务进度')) {
@@ -813,6 +842,7 @@ async function runTask(page, task) {
     // 保险上限：杀怪类 3倍+3；材料类掉率约10%（盐矿实测18杀掉2），给8倍+8
     const cap = task.type === 'mat' ? task.n * 8 + 8 : task.n * 3 + 3;
     let kills = 0;
+    let hopNo = 0; // 本层找不到目标怪时换相邻房间的次数（怪常驻，不靠刷新）
     while (kills < cap) {
         // 页面短暂弹“任务已完成”toast（击杀类）——直接收工
         const t0 = await getPageText(page);
@@ -822,30 +852,27 @@ async function runTask(page, task) {
         }
         const result = await pickAndFight(page, task);
         if (!result) {
-            // 无目标怪：怪是间隔刷新的，耐心点刷新（8轮×5秒≈40秒窗口），几轮无果走相邻房间
-            let refreshed = false;
-            for (let r = 0; r < 8; r++) {
-                await clickLeaf(page, '刷新');
-                await sleep(5000);
-                if ((wildSeg(await getPageText(page))).match(/你看到：\s*[\u4e00-\u9fa5]/)) {
-                    refreshed = true;
-                    break;
+            // 野区的怪是**固定常驻、可无限打**的（用户 10-26 纠正：不是随机刷新、不会消失；
+            // 只有副本才是杀一只少一只）→ 站在原地反复点「刷新」没有意义（反而会让页面短暂空白，
+            // 被误判成"无怪"）→ 直接换相邻房间找目标怪，同片野区的房间来回轮换，走 8 次还没有就放弃。
+            const t = await getPageText(page);
+            const all = [...t.matchAll(/([东西南北])：([\u4e00-\u9fa5]{2,8})/g)]
+                .map(m => ({ dir: m[1], place: m[2] }));
+            const same = all.filter(e => e.place === task.area);
+            const cands = same.length ? same : all;
+            if (cands.length && hopNo < 8) {
+                const e = cands[hopNo % cands.length];
+                hopNo++;
+                console.log(`[${task.name}] 本层没有目标怪（第${hopNo}次换房），往${e.dir}：${e.place}`);
+                if (!(await clickLeaf(page, `${e.dir}：${e.place}`))) {
+                    await clickLeaf(page, e.place);
                 }
+                await sleep(2200);
+                continue;
             }
-            if (!refreshed) {
-                const t = await getPageText(page);
-                const exits = [...t.matchAll(/([东西南北])：([\u4e00-\u9fa5]{2,8})/g)]
-                    .map(m => m[2]).filter(a => a === task.area);
-                if (exits.length && exits[0] === task.area) {
-                    await clickLeaf(page, `${exits[0]}`); // 点出口文本走相邻房
-                    await sleep(2000);
-                    continue;
-                }
-                console.log(`[${task.name}] 野区无怪且刷新无效，页面快照:`, (await getPageText(page)).substring(0, 260).replace(/\s+/g, ' '));
-                await page.screenshot({ path: `daily-nowild-${task.name}.png` }).catch(() => {});
-                break;
-            }
-            continue;
+            console.log(`[${task.name}] 换房${hopNo}次仍无目标怪，页面快照:`, t.substring(0, 260).replace(/\s+/g, ' '));
+            await page.screenshot({ path: `daily-nowild-${task.name}.png` }).catch(() => {});
+            break;
         }
         kills++;
         const dropped = result.includes('已自动拾取');
@@ -1275,16 +1302,27 @@ async function run() {
             const pending = curTasks.filter(t => !t.full && !attempted.has(t.rowNo + t.name));
             if (!pending.length) break;
             // 无「城市·野区」信息的任务（铁矿石这类收集类）：详情文本里没有城市，但游戏是靠
-            // 「你当前所在城市」决定能不能寻路的（任务.txt：任务条件可能分散在不同城市）。
-            // 所以每到一座城就试一次寻路：成功就做完；弹「没有目标地图」说明不是这座城，换下一城。
+            // 「你当前所在城市」决定能不能寻路的（用户：弹「没有目标地图」只说明不在任务所属城市）。
+            // 只认用户口头告知过的城市（MANUAL_HINTS），没告知过的就在当前城试一次，仍不通就记下来放着。
             const noCity = pending.filter(t => !t.city);
+            const hereNow = round === 1 ? here : await currentCity(page);
+            const noCityCity = new Map(); // 任务key -> 用户告知的城市
             for (const t of noCity) {
                 const prog = t.n === Infinity ? `${t.x}/?` : `${t.x}/${t.n}`;
-                console.log(`  [无地点] ${t.rowNo}.${t.name} ${prog}：无「城市·野区」，逐城试探寻路`);
+                const hit = locateTask(t);
+                if (hit) {
+                    noCityCity.set(t.rowNo + t.name, hit.city);
+                    console.log(`  [无地点] ${t.rowNo}.${t.name} ${prog}：你告知过「${hit.monster}掉落」→ 去${hit.city}（${hit.area || '野区'}）再点寻路`);
+                } else {
+                    console.log(`  [无地点] ${t.rowNo}.${t.name} ${prog}：无「城市·野区」，也没告知过任务城市 → 只在当前城试一次寻路，不通就记着等你告知`);
+                }
             }
             const routable = pending.filter(t => t.city);
-            const hereNow = round === 1 ? here : await currentCity(page);
             const cityOrder = [];
+            // 表里定位到的城市优先（别再一座座试——出航烧铜贝、传送烧银币）
+            for (const c of noCityCity.values()) {
+                if (!cityOrder.includes(c)) cityOrder.push(c);
+            }
             for (const t of routable) {
                 if (!cityOrder.includes(t.city)) cityOrder.push(t.city);
             }
@@ -1315,6 +1353,13 @@ async function run() {
                             results.push(`${t.rowNo}.${t.name}: 到不了城市`);
                             attempted.add(t.rowNo + t.name);
                         }
+                        // 无地点任务如果被告知的就是这座城，也要如实记账，别在汇总里静默消失
+                        for (const t of noCity) {
+                            if (noCityCity.get(`${t.rowNo}.${t.name}`) === city) {
+                                results.push(`${t.rowNo}.${t.name}: 到不了城市(${city})，等你告知`);
+                                attempted.add(t.rowNo + t.name);
+                            }
+                        }
                         continue;
                     }
                 }
@@ -1332,11 +1377,15 @@ async function run() {
                     results.push(`${t.rowNo}.${t.name}: ${r}`);
                     attempted.add(t.rowNo + t.name);
                 }
-                // 无地点任务：每座城试一次寻路，命中就做完，弹没有目标地图就换下一城
+                // 无地点任务：告知过城市 → 只在那座城试；没告知过 → 只在当前城试一次（不乱跑，省铜贝）
                 for (const t of noCity) {
                     if (attempted.has(t.rowNo + t.name)) continue;
                     if ((await currentCity(page)) !== city) break;
                     const tk = `${t.rowNo}.${t.name}`;
+                    const tellCity = noCityCity.get(tk);
+                    if (tellCity && tellCity !== city) continue;
+                    // 没告知过城市的任务只在当前城试一次，不通就放着，不跨城空跑（出航烧铜贝）
+                    if (!tellCity && [...noCityTried].some(k => k.startsWith(tk + '@'))) continue;
                     if (noCityTried.has(`${tk}@${city}`)) continue;
                     noCityTried.add(`${tk}@${city}`);
                     if (!unmatchedCities.has(tk)) unmatchedCities.set(tk, []);
@@ -1353,11 +1402,11 @@ async function run() {
                 }
             }
         }
-        // 无地点任务收尾：所有试过的城市都弹「没有目标地图」→ 如实记录，不当作已完成
+        // 无地点任务收尾：寻路全不通 → 如实记录放着，等用户告知去哪座城打哪只怪
         for (const [tk, cities] of unmatchedCities) {
             if (attempted.has(tk)) continue;
-            console.log(`  ${tk}: 试过 ${cities.length} 座城均无目标地图（${cities.join('/')}），需到它所属城市才能寻路`);
-            results.push(`${tk}: 未定位任务城市（试过 ${cities.join('/')}）`);
+            console.log(`  ${tk}: 试过 ${cities.length} 座城均无目标地图（${cities.join('/')}），跳过——等你告知该去哪座城打哪只怪`);
+            results.push(`${tk}: 未完成·寻路无目标地图（试过 ${cities.join('/')}），等你告知城市`);
         }
 
         console.log('==== 每日任务执行汇总 ====');
@@ -1380,4 +1429,7 @@ module.exports = {
     selectRegion, sailTo, sailFailReason, currentCity,
     openDailyList, parseDailyTasks, clickRow, atCity, onMainPage, backToMain, backToCity,
     selfCheck, tryClaim, runTask, listRowTag, submitBtnPos,
+    locateTask, MANUAL_HINTS,
+    // 下面几个只为探针/手动补跑导出（daily.js 自身流程不依赖外部调用）
+    readTaskDetail, listMonsters, monsterDrops, fightMonster, pickAndFight, wildSeg,
 };
