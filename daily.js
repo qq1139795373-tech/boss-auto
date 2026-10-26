@@ -859,8 +859,9 @@ async function runTask(page, task) {
         if (prog) {
             if (prog.full) {
                 console.log(`[${task.name}] 进度 ${prog.x}/${prog.n} 满，击杀${kills}只`);
-                await tryClaim(page, task);
-                return 'done';
+                // 提交结果按列表标签核对（toast 不可信），没交上要如实记进汇总
+                const ok = await tryClaim(page, task);
+                return ok ? 'done' : `full-但未提交成功(${prog.x}/${prog.n})`;
             }
             task.x = prog.x;
         } else {
@@ -877,40 +878,85 @@ async function runTask(page, task) {
 
 // 进度满后提交任务：详情里点「提交」→ toast「提交成功获得：...」
 // 提交后每日任务区会自动折叠（下次操作前 openDailyList 会重新展开）
-async function tryClaim(page, task) {
-    // 可能在野区/主页面（杀完怪回野区了），先开任务页再按行号点任务行
-    await openDailyList(page);
-    if (!(await clickRow(page, task.rowNo, task.name)) && !(await clickLeaf(page, task.name))) {
-        console.log(`[${task.name}] 提交时点不开任务行`);
-        return false;
-    }
-    await sleep(1200);
-    // 提交按钮元素级检测（页面文本里的「可提交」标签会假阳性）
-    const hasSubmitBtn = await page.evaluate(() =>
-        [...document.querySelectorAll('body *')].some(el => {
+// 详情页「提交」按钮的真实坐标（元素级检测，页面文本里的「可提交」标签会假阳性）
+async function submitBtnPos(page) {
+    return await page.evaluate(() => {
+        for (const el of document.querySelectorAll('body *')) {
             const s = (el.textContent || '').trim();
             const r = el.getBoundingClientRect();
-            return el.children.length === 0 && s === '提交' && r.width > 0 && r.height > 0;
-        })
-    );
-    if (!hasSubmitBtn) {
-        console.log(`[${task.name}] 详情里没有提交按钮（可能已提交过）`);
-        await clickLeaf(page, '取消');
-        return false;
+            if (el.children.length === 0 && s === '提交' && r.width > 0 && r.height > 0) {
+                return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+            }
+        }
+        return null;
+    }).catch(() => null);
+}
+
+// 读列表某行右列状态标签（已完成/可提交/进行中）—— 「提交到底成没成功」的唯一可靠判据
+async function listRowTag(page, rowNo, name) {
+    const txt = await openDailyList(page);
+    const segs = txt.split(/(?<![0-9])(?=\d+\.\s*\(每日\))/).filter(s => /\(每日\)/.test(s));
+    let byName = null;
+    for (const seg of segs) {
+        const m = seg.match(/^(\d+)\.\s*\(每日\)每日[·・]([\u4e00-\u9fa5]{2,8})/);
+        if (!m) continue;
+        const tag = (seg.match(/已完成|进行中|可提交/) || [null])[0];
+        if (m[1] === rowNo && m[2] === name) return tag;
+        if (m[2] === name && byName === null) byName = tag;   // 行号可能被滚动池改动，按名字兜底
     }
-    await clickLeaf(page, '提交'); // 实测提交按钮真机点击无响应，只吃合成事件（探针实证）
-    await sleep(1500);
-    await clickLeaf(page, '确定'); // 若有确认框
-    await sleep(1200);
-    txt = await getPageText(page);
-    const m = txt.match(/提交成功获得：([^\n]{0,60})/);
-    console.log(m ? `[${task.name}] 提交成功，获得: ${m[1].trim()}` : `[${task.name}] 已点提交（未见成功toast，待列表核对）`);
-    // 关详情弹窗（取消只吃合成事件的概率高，两法都试）
-    await clickLeaf(page, '取消');
-    await clickExact(page, '取消', 1500);
-    await clickExact(page, '关闭', 1500);
-    await sleep(500);
-    return true;
+    return byName;
+}
+
+// 提交单个任务。成功判据 = 提交后列表行右列变「已完成」。
+// 绝不能靠「提交成功获得：」toast 判断 —— 实测会读到上一个任务残留的 toast：
+// 10-26 CI master：地魔卫士 16:28:05 提交成功 → 10 秒后鸦片贩子也「提交成功」，
+// 但那个周期（开列表+点行+点提交+确认）最快也要 12 秒以上，且当天列表始终显示「可提交」。
+async function tryClaim(page, task) {
+    for (let att = 1; att <= 3; att++) {
+        // 可能在野区/主页面（杀完怪回野区了），先开任务页再按行号点任务行
+        await openDailyList(page);
+        if (!(await clickRow(page, task.rowNo, task.name)) && !(await clickLeaf(page, task.name))) {
+            console.log(`[${task.name}] 提交时点不开任务行`);
+            return false;
+        }
+        await sleep(1400);
+        const pos = await submitBtnPos(page);
+        if (!pos) {
+            const tag = await listRowTag(page, task.rowNo, task.name);
+            console.log(`[${task.name}] 详情里没有提交按钮，列表状态: ${tag}`);
+            return tag === '已完成';
+        }
+        await clickLeaf(page, '提交'); // 实测提交按钮真机点击无响应，只吃合成事件（探针实证）
+        await sleep(1200);
+        if (await submitBtnPos(page)) {
+            // 合成事件没生效 → 真实坐标再点一次
+            await page.mouse.click(pos.x, pos.y);
+            await sleep(1400);
+        }
+        // 确认框（「确定」两法都试）
+        for (let c = 0; c < 3; c++) {
+            const t = await getPageText(page);
+            if (!t.includes('确定')) break;
+            await clickLeaf(page, '确定');
+            await sleep(700);
+            await clickExact(page, '确定', 1200);
+            await sleep(600);
+        }
+        // 关详情弹窗（取消只吃合成事件的概率高，两法都试）
+        await clickLeaf(page, '取消');
+        await clickExact(page, '取消', 1500);
+        await clickExact(page, '关闭', 1500);
+        await sleep(1200);
+        const tag = await listRowTag(page, task.rowNo, task.name);
+        if (tag === '已完成') {
+            console.log(`[${task.name}] 提交成功（列表已变「已完成」）`);
+            return true;
+        }
+        console.log(`[${task.name}] 提交后列表仍是「${tag}」（第${att}次尝试），重开详情重试...`);
+    }
+    console.log(`[${task.name}] 提交失败：连续3次列表都没变「已完成」，截图存证`);
+    await page.screenshot({ path: `daily-claim-${task.rowNo}.png` }).catch(() => {});
+    return false;
 }
 
 // ---------- 寻路蜂补给 ----------
@@ -1086,8 +1132,8 @@ async function selfCheck(page) {
         total++;
         const cnt = seg.match(/(\d+\s*\/\s*\d+)/);
         let tag = (seg.match(/已完成|进行中|可提交/) || ['?'])[0];
-        // 补救提交：仍显示「可提交」= 汇总阶段漏提交 / 列表滞后（10-26 CI master 鸦片贩子即此情况：
-        // 16:28:15 已提交成功拿到奖励，16:28:20 自检仍显示「可提交」被误报未完成）
+        // 补救提交：仍显示「可提交」= 汇总阶段没交上（10-26 用户截图实证：master 鸦片贩子跑完仍是
+        // 「可提交」9/10，之前误以为是「列表刷新滞后的自检误报」，实际是根本没提交成功）
         if (tag === '可提交') {
             console.log(`  [自检补救] ${m[1]}.${m[2]} 仍显示可提交，补提交一次...`);
             const claimed = await tryClaim(page, { rowNo: Number(m[1]), name: m[2] }).catch(() => false);
@@ -1217,7 +1263,7 @@ async function run() {
                 await openDailyList(page);
                 const claimed = await tryClaim(page, t);
                 // 前面 runTask 可能把这行判成 fail（如「找不到寻路按钮」），但这里提交成功就应改记为成功，
-                // 否则汇总里留个 fail 误导排查（10-26 CI master 鸦片贩子即如此：实际提交成功仍记 fail）
+                // 否则汇总里留个 fail 误导排查
                 const key = `${t.rowNo}.${t.name}`;
                 const idx = results.findIndex(r => r.startsWith(key + ':'));
                 if (claimed) {
@@ -1333,5 +1379,5 @@ module.exports = {
     sleep, gotoGame, getPageText, clickText, clickLeaf, clickExact,
     selectRegion, sailTo, sailFailReason, currentCity,
     openDailyList, parseDailyTasks, clickRow, atCity, onMainPage, backToMain, backToCity,
-    selfCheck, tryClaim, runTask,
+    selfCheck, tryClaim, runTask, listRowTag, submitBtnPos,
 };
