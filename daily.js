@@ -194,10 +194,10 @@ async function sailTo(page, dest) {
         console.log(`已在${dest}，无需出航`);
         return true;
     }
-    // 若身处野区（无出航链接），先点城内地图回城
+    // 不在城内主界面（无「出航」）→ 点码头出口回城（点「城内地图」只弹目的地列表，人不动）
     if (!(await getPageText(page)).includes('出航')) {
-        await clickLeaf(page, '城内地图');
-        await sleep(2500);
+        console.log('当前不在城内主界面，尝试回城（点码头出口）...');
+        if (!(await backToCity(page))) console.log('回城未成功，继续尝试出航（大概率会失败）');
     }
     // 选海域：已知海域直接点；未知则逐海域轮询搜索城市（含出航确认检测）
     const region = CITY_REGION[dest];
@@ -721,9 +721,29 @@ async function runTask(page, task) {
         return 'fail';
     }
     if (!(await clickExact(page, '寻路', 3000))) {
-        console.log(`[${task.name}] 找不到寻路按钮（可能不在${task.city}）`);
+        // 双保险：多半是人还在上一个任务的野区（寻路按钮只在城内可用）→ 回城重开详情再试
+        console.log(`[${task.name}] 找不到寻路按钮，回城后重试...`);
         await clickExact(page, '取消', 1500);
-        return 'fail';
+        await backToMain(page);
+        const back = await backToCity(page);
+        if (back) {
+            await openDailyList(page);
+            for (let r = 0; r < 3; r++) {
+                await clickRow(page, task.rowNo, task.name);
+                await sleep(1500);
+                if ((await getPageText(page)).includes('任务进度')) break;
+            }
+            if (await clickExact(page, '寻路', 3000)) {
+                console.log(`[${task.name}] 回城后寻路成功`);
+            } else {
+                console.log(`[${task.name}] 回城后仍找不到寻路按钮（可能不在${task.city}）`);
+                await clickExact(page, '取消', 1500);
+                return 'fail';
+            }
+        } else {
+            console.log(`[${task.name}] 回城失败，放弃该条`);
+            return 'fail';
+        }
     }
     // 等自动走到野区：详情弹窗消失且页面有“你看到”
     // 城市不对会弹「只能寻路当前城市,请去再寻路吧」→ 点确定放弃该条（按城市聚合正常不会触发）
@@ -937,6 +957,59 @@ async function onMainPage(page) {
     return t.includes('当前城市') || /你看到：/.test(t);
 }
 
+// 回到「城内主界面」（页面带「出航」「传送」链接的那一页）。
+// 坑（2026-10-26 真机实证）：点「城内地图」只会弹出「选择目的地」列表，人不会移动！
+//   正确做法是点页面自带的方位出口「南：★码头」；点完页面重新出现「出航」才算回城成功。
+// 影响：10-26 CI 里 boss4 去泉州连续 3 次「海域标签东亚没点到」→ 走传送兜底，就是这里只做了半截。
+async function backToCity(page, maxTry = 4) {
+    for (let i = 0; i < maxTry; i++) {
+        let t = await getPageText(page);
+        if (t.includes('出航')) return true;
+        // 目的地列表弹窗会吃掉坐标点击，先关掉
+        if (t.includes('选择目的地')) {
+            await page.mouse.click(10, 10);
+            await page.keyboard.press('Escape');
+            await sleep(800);
+        }
+        // 优先点带方位的码头出口（页面自带出口，点了真的会移动）
+        const p = await page.evaluate(() => {
+            const cands = [];
+            for (const el of document.querySelectorAll('body *')) {
+                if (el.children.length) continue;
+                const s = (el.textContent || '').trim();
+                const r = el.getBoundingClientRect();
+                if (!r.width || !r.height || !s || s.length > 10) continue;
+                if (!/码头/.test(s)) continue;
+                cands.push({
+                    s, x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2),
+                    directed: /^[东西南北][：:]/.test(s),
+                });
+            }
+            cands.sort((a, b) => (b.directed ? 1 : 0) - (a.directed ? 1 : 0));
+            return cands[0] || null;
+        }).catch(() => null);
+        if (p) {
+            await page.mouse.click(p.x, p.y);
+            await sleep(2500);
+            t = await getPageText(page);
+            if (t.includes('出航')) return true;
+        }
+        // 兜底：城内地图 → 目的地列表里的★码头（有概率生效，故放最后）
+        if (await clickLeaf(page, '城内地图')) {
+            await sleep(2000);
+            await clickLeaf(page, '★码头');
+            await sleep(2200);
+            if ((await getPageText(page)).includes('出航')) return true;
+        } else {
+            await page.keyboard.press('Escape');
+            await sleep(900);
+        }
+    }
+    const ok = (await getPageText(page)).includes('出航');
+    if (!ok) console.log('回城失败：多次尝试后仍无「出航」入口（后续出航大概率失败）');
+    return ok;
+}
+
 // 关掉任务页等二级页面回主界面（二级页左上角是 uni-page-head 返回箭头图标，无文本；
 // 探针实证：DIV.uni-page-head-hd > I.uni-btn-icon @ (5,7,27x27)。Escape/遮罩无效）
 async function backToMain(page) {
@@ -1130,6 +1203,10 @@ async function run() {
                     }
                 }
                 for (const t of routable.filter(t => t.city === city)) {
+                    // 上一个任务会把人留在野区，而「寻路」只在城内主界面可用 —— 每个任务前强制回城
+                    // （10-26 CI 实证：boss3 盐矿、boss4 地魔弓箭手都因在野区报「找不到寻路按钮」→ 0 进度）
+                    await backToMain(page);
+                    if (!(await backToCity(page))) console.log(`${t.name}: 回城失败，仍尝试开任务列表`);
                     await openDailyList(page);
                     const r = await runTask(page, t);
                     results.push(`${t.rowNo}.${t.name}: ${r}`);
@@ -1156,4 +1233,5 @@ if (require.main === module) run();
 module.exports = {
     sleep, gotoGame, getPageText, clickText, clickLeaf, clickExact,
     selectRegion, sailTo, sailFailReason, currentCity,
+    openDailyList, parseDailyTasks, clickRow, atCity, onMainPage, backToMain, backToCity,
 };
