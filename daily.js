@@ -79,8 +79,32 @@ async function clickText(page, text, timeout = 5000) {
     return false;
 }
 
+// 读页面文本：只取**可见**节点。
+// textContent 会把 display:none 的节点也算进去，而游戏的 toast 弹过一次后 DOM 节点会永久留在页面里
+// → 上一条任务留下的「任务已完成」会被反复读到（10-27 boss2 劫匪 0 杀收工、boss4 盐矿 2 杀收工的根因）。
+// 这里保留 textContent 的「无分隔符拼接」特性（各进度正则依赖无空格），只跳过不可见子树。
 async function getPageText(page) {
-    return await page.textContent('body').catch(() => '');
+    return await page.evaluate(() => {
+        const visible = (el) => {
+            try {
+                const cs = getComputedStyle(el);
+                if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+                if (parseFloat(cs.opacity) === 0) return false;
+            } catch (e) { return false; }
+            return true;
+        };
+        const walk = (node) => {
+            let out = '';
+            for (const n of node.childNodes) {
+                if (n.nodeType === 3) { out += n.nodeValue; continue; }
+                if (n.nodeType !== 1) continue;
+                if (!visible(n)) continue;
+                out += walk(n);
+            }
+            return out;
+        };
+        return document.body ? walk(document.body) : '';
+    }).catch(() => '');
 }
 
 async function clickExact(page, text, timeout = 3000) {
@@ -768,7 +792,16 @@ async function runTask(page, task) {
     // 寻路按钮在野区也能点（10-26 用户指出 + 真机复验：野区点寻路能正常弹提示/导航），
     // 所以「找不到寻路按钮」不是位置问题，而是详情页状态/坐标点击打偏 → 先合成事件再点，最后才回城兜底
     if (!(await clickExact(page, '寻路', 3000))) {
-        console.log(`[${task.name}] 坐标点击没点到寻路，改用合成事件重试...`);
+        // 满进度的详情页只有「提交」没有「寻路」→ 以前在这白试四轮（坐标点击/合成事件/重开详情/回城），
+        // 每条浪费 30-60 秒（10-27 实证 boss2 偷盐贼·铁皮人、boss4 流浪犬·鸦片贩子各 2 条）。
+        // 先查列表行标签：已经可提交就直接提交，已经完成就直接算完成。
+        const tag0 = await listRowTag(page, task.rowNo, task.name).catch(() => null);
+        if (tag0 === '已完成' || tag0 === '可提交') {
+            console.log(`[${task.name}] 详情里没有寻路按钮，列表状态「${tag0}」→ 直接提交`);
+            const ok0 = tag0 === '已完成' ? true : await tryClaim(page, task);
+            return ok0 ? 'done' : 'full-但未提交成功';
+        }
+        console.log(`[${task.name}] 坐标点击没点到寻路（列表状态「${tag0 || '?'}」），改用合成事件重试...`);
         let clicked = await clickLeaf(page, '寻路');
         if (!clicked) {
             await page.screenshot({ path: `daily-xunlu-${task.name}.png` }).catch(() => {});
@@ -828,7 +861,11 @@ async function runTask(page, task) {
             // 等用户告知该去哪座城打哪只怪（用户 10-26 定）。
             return 'nomap';
         }
-        if (t.includes('你看到') && !t.includes('任务进度')) {
+        // 到达野区判据：只看「你看到：」到「当前城市/【聊天】」之间那段（wildSeg，天然屏蔽聊天刷屏）。
+        // 城里那段是「你看到：传送出航」，野区那段是「你看到：经验妖灵」之类 → 用「不含出航」区分。
+        // 不能用「当前城市」或「【城内地图】」判断：野区页面同样有这两个（farm-m4 实证）。
+        const seg = wildSeg(t);
+        if (seg && !t.includes('任务进度') && !seg.includes('出航')) {
             arrived = true;
             break;
         }
@@ -844,12 +881,9 @@ async function runTask(page, task) {
     let kills = 0;
     let hopNo = 0; // 本层找不到目标怪时换相邻房间的次数（怪常驻，不靠刷新）
     while (kills < cap) {
-        // 页面短暂弹“任务已完成”toast（击杀类）——直接收工
-        const t0 = await getPageText(page);
-        if (t0.includes('任务已完成')) {
-            console.log(`[${task.name}] 页面弹任务已完成，击杀${kills}只`);
-            return 'done';
-        }
+        // 注意：这里**不再**用「页面出现任务已完成」直接收工。
+        // toast 会滞留（且上一条任务的成功提示可能还在），是 10-27 boss2 劫匪 0 杀收工、
+        // boss4 盐矿 2 杀收工的直接原因。完成与否只认「每杀一只查详情进度」和「列表行标签」。
         const result = await pickAndFight(page, task);
         if (!result) {
             // 野区的怪是**固定常驻、可无限打**的（用户 10-26 纠正：不是随机刷新、不会消失；
@@ -880,7 +914,13 @@ async function runTask(page, task) {
         // 每杀1只查进度（收集类必须查；击杀类通常此时 toast 已出）
         // 查进度会进任务页，查完必须回野区，否则后续杀怪全空转（第10轮实测教训）
         const t = await openDailyList(page);
-        const prog = await readTaskDetail(page, task.rowNo, task.name);
+        let prog = await readTaskDetail(page, task.rowNo, task.name);
+        if (!prog) {
+            // 进度读不出来时，用列表行标签兜一层（标签才是权威判据）
+            const tagSeg = (t.split(/(?<![0-9])(?=\d+\.\s*\(每日\))/).find(s => s.includes(`每日·${task.name}`) || s.includes(`每日・${task.name}`)) || '');
+            const tg = (tagSeg.match(/已完成|可提交|进行中/) || [])[0];
+            if (tg === '可提交' || tg === '已完成') prog = { x: task.n, n: task.n, full: true, tag: tg };
+        }
         await backToMain(page);
         await sleep(800);
         if (prog) {
@@ -892,10 +932,11 @@ async function runTask(page, task) {
             }
             task.x = prog.x;
         } else {
-            // 查不到进度时依赖掉落/击杀数兜底
-            if (kills >= task.n && (dropped || t.includes('任务已完成'))) {
-                console.log(`[${task.name}] 详情不可读但击杀${kills}只且有完成信号`);
-                return 'done';
+            // 查不到进度时只能靠击杀数兜底，**不再看「任务已完成」字样**（toast 会滞留）
+            if (kills >= task.n) {
+                console.log(`[${task.name}] 详情不可读，击杀${kills}只 ≥ 需求${task.n}，按列表标签核对后提交`);
+                const ok = await tryClaim(page, task);
+                return ok ? 'done' : 'full-但未提交成功(详情不可读)';
             }
         }
     }
