@@ -1,7 +1,7 @@
 const { spawnSync } = require('child_process');
 
 // 任务闸门（和 index.js 打boss同一套逻辑，按北京时间判断）：
-//   00:00-00:59 → 每日签到（signin.js，已签自动跳过）→ 竞技场 → 钓鱼 → 秘宝抽奖（mibao.js，免费银贝箱，同在威尼斯）→ 每日任务（daily.js）（签到仅此窗口跑；竞技场不限地点先打，最后威尼斯钓鱼；master不跑炼器窟）
+//   00:00-00:59 → 每日签到（signin.js，已签自动跳过）→ 竞技场 → 炼器窟副本（伦敦）→ 基德宝藏（阿姆斯特丹）→ 钓鱼 → 秘宝抽奖（mibao.js，免费银贝箱，同在威尼斯）→ 每日任务（daily.js）（签到仅此窗口跑；竞技场不限地点先打；两个副本同在北海，连着跑省出航；最后威尼斯钓鱼）
 //   18:00-18:30 → 山寨农场 → 邮件领取（mail.js，领取所有+确定+返回）
 //   其他时间    → 跳过（中午11:50那趟由 index.js 自己的闸门打boss）
 // 任务跑完正常退出，交给 boss.yml 后面的 Run Boss / Run Farm（刷怪到6小时上限）
@@ -21,11 +21,18 @@ function resolveMode(hour, min) {
     return 'skip';
 }
 
-function runStep(name, script) {
+function runStep(name, script, timeoutMs) {
     console.log(`[tasks] >>> ${name} (${script}) 开始`);
     const t0 = Date.now();
-    const r = spawnSync(process.execPath, [script], { stdio: 'inherit', env: process.env });
+    const opts = { stdio: 'inherit', env: process.env };
+    // 副本类脚本可能卡在等按钮上，给个上限，宁可跳过也不拖死后面的步骤
+    if (timeoutMs) opts.timeout = timeoutMs;
+    const r = spawnSync(process.execPath, [script], opts);
     const sec = Math.round((Date.now() - t0) / 1000);
+    if (r.error && r.error.code === 'ETIMEDOUT') {
+        console.log(`[tasks] <<< ${name} 超时${sec}s，已终止并继续下一步`);
+        return;
+    }
     console.log(`[tasks] <<< ${name} 结束 exit=${r.status === null ? 'signal' : r.status} 耗时${sec}s`);
 }
 
@@ -41,6 +48,8 @@ function main() {
 
     if (mode === 'dawn') {
         runStep('竞技场', 'arena.js');
+        runStep('炼器窟副本', 'dungeon.js', 20 * 60 * 1000);
+        runStep('基德宝藏', 'kidd.js', 20 * 60 * 1000);
         runStep('钓鱼', 'fish.js');
         runStep('秘宝抽奖', 'mibao.js');
         runStep('每日任务', 'daily.js');
