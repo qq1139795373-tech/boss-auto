@@ -25,7 +25,8 @@ function runStep(name, script, timeoutMs) {
     console.log(`[tasks] >>> ${name} (${script}) 开始`);
     const t0 = Date.now();
     const opts = { stdio: 'inherit', env: process.env };
-    // 副本类脚本可能卡在等按钮上，给个上限，宁可跳过也不拖死后面的步骤
+    // 副本类步骤一律不设超时：宁可慢也要跑完（用户要求）。
+    // timeoutMs 参数保留，将来若某步必须限时再传。
     if (timeoutMs) opts.timeout = timeoutMs;
     const r = spawnSync(process.execPath, [script], opts);
     const sec = Math.round((Date.now() - t0) / 1000);
@@ -48,8 +49,8 @@ function main() {
 
     if (mode === 'dawn') {
         runStep('竞技场', 'arena.js');
-        runStep('炼器窟副本', 'dungeon.js', 20 * 60 * 1000);
-        runStep('基德宝藏', 'kidd.js', 20 * 60 * 1000);
+        runStep('炼器窟副本', 'dungeon.js');
+        runStep('基德宝藏', 'kidd.js');
         runStep('钓鱼', 'fish.js');
         runStep('秘宝抽奖', 'mibao.js');
         runStep('每日任务', 'daily.js');
