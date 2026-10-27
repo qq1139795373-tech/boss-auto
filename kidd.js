@@ -393,12 +393,16 @@ async function backToHub(page) {
 // 地图（用户确认）：秘藏入口**无怪**、枢纽广场**无怪**；验货棚/栈桥/接驳厅各 3 只基德仆从(10500) = 9 只。
 // 之前只走路不清怪，等于白漏这 9 只。首次进本与续打都走这里（无怪的房间自动跳过）。
 async function northToHubClearing(page) {
+    let kills = 0;
     for (let i = 0; i < 8 && !(await atHub(page)); i++) {
         const seg = viewSeg(await getPageText(page));
         const mobs = monstersIn(seg);
         if (mobs.length) {
             const k = await clearRoom(page, '走廊');
-            if (k) console.log(`[走廊] 清怪 ${k} 只（${mobs.join('/')}）`);
+            if (k) {
+                kills += k;
+                console.log(`[走廊] 清怪 ${k} 只（${mobs.join('/')}）`);
+            }
         }
         if (await exitLabel(page, '北')) {
             await clickExit(page, '北');
@@ -414,10 +418,13 @@ async function northToHubClearing(page) {
         const seg = viewSeg(await getPageText(page));
         if (monstersIn(seg).length) {
             const k = await clearRoom(page, '枢纽广场');
-            if (k) console.log(`[枢纽广场] 清怪 ${k} 只`);
+            if (k) {
+                kills += k;
+                console.log(`[枢纽广场] 清怪 ${k} 只`);
+            }
         }
     }
-    return await atHub(page);
+    return { ok: await atHub(page), kills };
 }
 
 // 清空当前房间的怪，返回击杀数
@@ -679,6 +686,7 @@ async function run() {
         }
 
         let totalKills = 0;
+        let corridorKills = 0;
         const armResults = [];
 
         // 扫荡优先：进本后页头（「回到起点」左侧）有「扫荡」就一键完成
@@ -686,13 +694,18 @@ async function run() {
         if (swept) {
             armResults.push('扫荡');
         } else {
-        // 回到枢纽广场：不在枢纽就先一路往北（沿途把走廊 4 间的基德仆从清掉）
-        if (!(await atHub(page)) && !(await northToHubClearing(page))) {
-            console.log('未能到达枢纽广场，退出');
-            await page.screenshot({ path: 'kidd-hub-fail.png' }).catch(() => {});
-            await browser.close();
-            return;
+        // 回到枢纽广场：不在枢纽就先一路往北（沿途把走廊 3 间的基德仆从清掉）
+        if (!(await atHub(page))) {
+            const r = await northToHubClearing(page);
+            corridorKills = r.kills;
+            if (!r.ok) {
+                console.log('未能到达枢纽广场，退出');
+                await page.screenshot({ path: 'kidd-hub-fail.png' }).catch(() => {});
+                await browser.close();
+                return;
+            }
         }
+        if (corridorKills) armResults.push(`走廊: ${corridorKills}杀`);
         console.log('到达枢纽广场，剩余', await remainMin(page), '分钟');
 
         for (const arm of ARMS) {
@@ -754,7 +767,9 @@ async function run() {
             }
         }
 
-        console.log('各线结果:', armResults.join(' | '), '| 总击杀:', totalKills, '| 剩余', await remainMin(page), '分钟');
+        console.log('各线结果:', armResults.join(' | '),
+            `| 总击杀: ${corridorKills + totalKills}（走廊${corridorKills} + 三线${totalKills}）`,
+            '| 剩余', await remainMin(page), '分钟');
         }
 
         const armsOk = armResults.filter(r => r.includes('杀/')).length;
