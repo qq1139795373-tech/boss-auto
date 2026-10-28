@@ -2,6 +2,8 @@ const { chromium } = require('playwright');
 // 出航复用 daily.js：它已处理任务页残留/已在目标城/区域横滚/暂无地图/海盗/自动航行，
 // 自带一套出航实现曾在 2026-10-28 大号上卡死 5 分钟且传送兜底也到不了伦敦。
 const daily = require('./daily.js');
+// 扫荡/领奖弹窗处理（「扫荡收获」只有一个「知道了」，点完必须验证真的关掉）
+const drain = require('./dungeon-recover.js');
 
 const ACCOUNT = process.env.GAME_ACCOUNT;
 const PASSWORD = process.env.GAME_PASSWORD;
@@ -62,8 +64,11 @@ async function clickText(page, text, timeout = 5000) {
     return false;
 }
 
+// 只拼可见节点。原实现 textContent('body') 不排除 display:none，
+// 弹窗关掉后节点仍留在 DOM 里 → 会读出「扫荡收获」「是否领取奖励？」这类幽灵文案，
+// 导致「弹窗关没关」永远判不出来（daily.js / gongcheng.js 早已改成同一写法）。
 async function getPageText(page) {
-    return await page.textContent('body').catch(() => '');
+    return await drain.visibleText(page);
 }
 
 // 精确提取副本剩余分钟数（正则从页面原文取，避免控制台乱码误读）
@@ -324,11 +329,16 @@ async function trySweep(page) {
         console.log('未出现扫荡结果，页面:', txt.substring(0, 150).replace(/\s+/g, ' '));
         return false;
     }
-    for (let i = 0; i < 4; i++) {
-        if (await clickExact(page, '知道了', 2000)) break;
-        if (await clickExact(page, '确定', 1500)) break;
-        await sleep(800);
+    // 「扫荡收获」弹窗只有一个「知道了」（2026-10-28 用户截图确认），
+    // 点完必须回头验证它真的消失了：它盖在「领取奖励」上面，
+    // 没关掉就去点领奖，会变成两层弹窗叠在一起只关掉最上面一层（boss(0) 就是这么废的）。
+    const closed = await drain.closeSweepPopup(page, { log: console.log });
+    if (!closed) {
+        console.log('「扫荡收获」弹窗关不掉，「领取奖励」会被它盖住');
+        await page.screenshot({ path: 'dungeon-sweep-popup-stuck.png' }).catch(() => {});
+        return false;
     }
+    console.log('已关闭「扫荡收获」，可以领奖了');
     await sleep(1500);
     console.log('扫荡成功（剩余', await remainMin(page), '分钟），跳过4线清怪');
     return true;
@@ -603,16 +613,30 @@ async function run() {
             console.log('条件行:', ci >= 0 ? pageText.substring(ci, cj > ci ? cj : ci + 120) : '(未见)');
             await page.screenshot({ path: 'dungeon-no-claim.png' }).catch(() => {});
         } else if (allArmsDone && pageText.includes('领取奖励')) {
-            console.log('领取奖励...');
-            await clickLeaf(page, '领取奖励');
-            await sleep(1500);
-            await clickExact(page, '确定');
-            await sleep(2500);
+            // 领奖要循环：可能还有「扫荡收获」压在下面，一层层关，直到「领取奖励」消失
+            // 或已经离开副本页。只点一次「确定」在弹窗叠层时会半途而废（boss(0) 实证）。
+            let got = false;
+            for (let round = 1; round <= 4; round++) {
+                pageText = await getPageText(page);
+                if (!pageText.includes('副本条件')) { got = true; break; }
+                if (!pageText.includes('领取奖励')) { got = true; break; }
+                console.log(`领取奖励（第 ${round} 轮）...`);
+                if (!(await drain.clickByText(page, '领取奖励'))) {
+                    console.log('「领取奖励」点不到');
+                    break;
+                }
+                await sleep(1500);
+                await drain.dismissPopups(page, { log: console.log });
+                await sleep(1500);
+            }
             pageText = await getPageText(page);
-            if (!pageText.includes('副本条件')) {
+            if (got && !pageText.includes('副本条件')) {
                 console.log('奖励已领取，已退出副本');
+            } else if (!pageText.includes('领取奖励')) {
+                console.log('奖励已领取（领取奖励入口已消失），仍在副本页');
             } else {
-                console.log('领奖后仍在副本页，页面:', pageText.substring(0, 200));
+                console.log('领奖失败：「领取奖励」仍在，页面:', pageText.substring(0, 300).replace(/\s+/g, ' '));
+                await page.screenshot({ path: 'dungeon-claim-fail.png' }).catch(() => {});
             }
         } else if (!allArmsDone) {
             console.log('未完成全部4线，不领奖');
