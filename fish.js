@@ -48,8 +48,10 @@ async function clickText(page, text, timeout = 5000) {
     return false;
 }
 
+// 只拼可见节点。原实现 textContent('body') 不排除 display:none，
+// 残留弹窗节点会一直留在 DOM 里 → 读出幽灵文案，把「没成」判成「成了」（2026-10-28 同源问题）。
 async function getPageText(page) {
-    return await page.textContent('body').catch(() => '');
+    return await drain.visibleText(page);
 }
 
 async function jsClick(page, text, exclude = '') {
