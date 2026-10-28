@@ -1,4 +1,7 @@
 const { chromium } = require('playwright');
+// 扫荡/领奖弹窗处理 + 只读可见节点的页面文本
+const drain = require('./dungeon-recover.js');
+const { visibleText } = drain;
 
 const ACCOUNT = process.env.GAME_ACCOUNT;
 const PASSWORD = process.env.GAME_PASSWORD;
@@ -66,8 +69,10 @@ async function clickText(page, text, timeout = 5000) {
     return false;
 }
 
+// 只拼可见节点。原实现 textContent('body') 不排除 display:none，
+// 残留弹窗节点会一直留在 DOM 里 → 读出幽灵文案，把「没成」判成「成了」（2026-10-28 同源问题）。
 async function getPageText(page) {
-    return await page.textContent('body').catch(() => '');
+    return await visibleText(page);
 }
 
 async function remainMin(page) {
@@ -487,11 +492,14 @@ async function trySweep(page) {
         console.log('未出现扫荡结果，页面:', txt.substring(0, 150).replace(/\s+/g, ' '));
         return false;
     }
-    for (let i = 0; i < 4; i++) {
-        if (await clickExact(page, '知道了', 2000)) break;
-        if (await clickExact(page, '确定', 1500)) break;
-        await sleep(800);
+    // 「扫荡收获」只有一个「知道了」，点完必须回头验证它真的关了，
+    // 否则它盖住「领取奖励」，领奖会废掉（炼器窟 boss(0) 就是这么废的）。
+    if (!(await drain.closeSweepPopup(page, { log: console.log }))) {
+        console.log('「扫荡收获」弹窗关不掉');
+        await page.screenshot({ path: 'kidd-sweep-popup-stuck.png' }).catch(() => {});
+        return false;
     }
+    console.log('已关闭「扫荡收获」，可以领奖了');
     await sleep(1500);
     console.log('扫荡成功（剩余', await remainMin(page), '分钟），跳过手动清怪');
     return true;
@@ -784,16 +792,30 @@ async function run() {
             console.log('条件行:', ci >= 0 ? pageText.substring(ci, cj > ci ? cj : ci + 120) : '(未见)');
             await page.screenshot({ path: 'kidd-no-claim.png' }).catch(() => {});
         } else if (allArmsDone && pageText.includes('领取奖励')) {
-            console.log('领取奖励...');
-            await clickLeaf(page, '领取奖励');
-            await sleep(1500);
-            await clickExact(page, '确定');
-            await sleep(2500);
+            // 领奖循环：一层层关弹窗，直到「领取奖励」消失或已离开副本页。
+            // 只点一次「确定」在弹窗叠层时会半途而废（炼器窟 boss(0) 实证）。
+            let got = false;
+            for (let round = 1; round <= 4; round++) {
+                pageText = await getPageText(page);
+                if (!pageText.includes('副本条件')) { got = true; break; }
+                if (!pageText.includes('领取奖励')) { got = true; break; }
+                console.log(`领取奖励（第 ${round} 轮）...`);
+                if (!(await drain.clickByText(page, '领取奖励'))) {
+                    console.log('「领取奖励」点不到');
+                    break;
+                }
+                await sleep(1500);
+                await drain.dismissPopups(page, { log: console.log });
+                await sleep(1500);
+            }
             pageText = await getPageText(page);
-            if (!pageText.includes('副本条件')) {
+            if (got && !pageText.includes('副本条件')) {
                 console.log('奖励已领取，已退出副本');
+            } else if (!pageText.includes('领取奖励')) {
+                console.log('奖励已领取（领取奖励入口已消失），仍在副本页');
             } else {
-                console.log('领奖后仍在副本页，页面:', pageText.substring(0, 200));
+                console.log('领奖失败：「领取奖励」仍在，页面:', pageText.substring(0, 300).replace(/\s+/g, ' '));
+                await page.screenshot({ path: 'kidd-claim-fail.png' }).catch(() => {});
             }
         } else if (!allArmsDone) {
             console.log('未完成全部3线，不领奖');
