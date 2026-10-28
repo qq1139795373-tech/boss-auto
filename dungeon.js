@@ -1,4 +1,7 @@
 const { chromium } = require('playwright');
+// 出航复用 daily.js：它已处理任务页残留/已在目标城/区域横滚/暂无地图/海盗/自动航行，
+// 自带一套出航实现曾在 2026-10-28 大号上卡死 5 分钟且传送兜底也到不了伦敦。
+const daily = require('./daily.js');
 
 const ACCOUNT = process.env.GAME_ACCOUNT;
 const PASSWORD = process.env.GAME_PASSWORD;
@@ -107,128 +110,10 @@ async function clickExact(page, text, timeout = 3000) {
 }
 
 async function sailFlow(page) {
-    let step = await clickText(page, '出航', 2000);
-    if (!step) {
-        await clickText(page, '城内地图');
-        await sleep(2000);
-        await clickText(page, '码头');
-        await sleep(3000);
-        step = await clickText(page, '出航');
-    }
-    await sleep(2000);
-    await clickExact(page, NAV_REGION);
-    await sleep(1000);
-
-    let picked = false;
-    for (let s = 0; s < 5; s++) {
-        if (await clickText(page, NAV_DEST, 2000)) {
-            await sleep(1500);
-            if ((await getPageText(page)).includes('出航确认')) {
-                picked = true;
-                break;
-            }
-        }
-        await page.mouse.wheel(0, 300);
-        await sleep(1000);
-    }
-    if (!picked) console.log('未看到出航确认框，继续尝试...');
-
-    await sleep(1000);
-    await clickText(page, '立即出发');
-    await sleep(2000);
-    await clickExact(page, '自动航行', 5000);
-    console.log('航行中...');
-
-    for (let w = 0; w < 80; w++) {
-        await sleep(3000);
-        const txt = await getPageText(page);
-        if (txt.includes(`当前城市：${NAV_DEST}`)) {
-            console.log(`到达${NAV_DEST}`);
-            return true;
-        }
-        if (txt.includes('遭遇海盗')) {
-            console.log('遭遇海盗，选择避战...');
-            await page.screenshot({ path: 'sail-pirate.png' }).catch(() => {});
-            await clickExact(page, '避战', 3000);
-            await sleep(2000);
-            const t2 = await getPageText(page);
-            if (t2.includes('成功避战')) console.log('成功避战');
-            if (!t2.includes('停止自动航行')) {
-                if (await clickExact(page, '自动航行', 3000)) console.log('恢复自动航行');
-            }
-            continue;
-        }
-        if (!txt.includes('停止自动航行') && await clickExact(page, '自动航行', 1500)) {
-            console.log('自动航行(重新)启动');
-        }
-    }
-    console.log('航行未完成（约5分钟）');
-    return false;
+    return await daily.sailTo(page, NAV_DEST);
 }
 
-async function teleportToDest(page) {
-    console.log('传送兜底: 重新登录游戏...');
-    try {
-        await gotoGame(page);
-        await page.waitForTimeout(3000);
-        const inputs = await page.$$('input');
-        if (inputs.length >= 2) {
-            await inputs[0].fill(ACCOUNT);
-            await inputs[1].fill(PASSWORD);
-            await page.getByText('登录').first().click();
-            await sleep(3000);
-        } else {
-            console.log('传送兜底: 会话有效，页面已自动进入游戏');
-        }
-        await closePopup(page);
-        await sleep(1000);
-        await clickText(page, '进入游戏');
-        await sleep(3000);
-
-        let ok = await clickText(page, '传送', 2000);
-        if (!ok) {
-            await clickText(page, '城内地图');
-            await sleep(2000);
-            await clickText(page, '码头');
-            await sleep(3000);
-            ok = await clickText(page, '传送');
-        }
-        if (!ok) {
-            console.log('传送兜底: 找不到传送入口');
-            return false;
-        }
-        await sleep(2000);
-
-        await clickExact(page, NAV_REGION);
-        await sleep(1000);
-
-        for (let s = 0; s < 5; s++) {
-            if (await clickText(page, NAV_DEST, 2000)) break;
-            await page.mouse.wheel(0, 300);
-            await sleep(1000);
-        }
-
-        await sleep(3000);
-        let txt = await getPageText(page);
-        if (!txt.includes(`当前城市：${NAV_DEST}`)) {
-            await clickText(page, '确定');
-            await sleep(2000);
-            await clickText(page, '确认');
-            await sleep(2000);
-            txt = await getPageText(page);
-        }
-        if (txt.includes(`当前城市：${NAV_DEST}`)) {
-            console.log(`传送兜底: 已到达${NAV_DEST}`);
-            return true;
-        }
-        console.log('传送兜底: 未检测到到达');
-        await page.screenshot({ path: 'teleport-fail.png' }).catch(() => {});
-        return false;
-    } catch (e) {
-        console.log('传送兜底错误:', e.message);
-        return false;
-    }
-}
+// （teleportToDest 已删除：传送花银币且同样依赖旧的面板点击逻辑，sailTo 内部已含「暂无地图」等判断）
 
 // “你看到：”到“背包”之间的区块（怪物列表+地图出口都在其中）
 function viewSeg(txt) {
@@ -546,11 +431,11 @@ async function run() {
             console.log(`已在${NAV_DEST}`);
         } else {
             console.log(`不在${NAV_DEST}，导航中...`);
-            const arrived = await sailFlow(page);
-            if (!arrived) {
-                console.log('出航约5分钟未完成，改用传送兜底...');
+            if (!(await sailFlow(page))) {
+                console.log('出航未完成，退出');
                 await page.screenshot({ path: 'nav-fail.png' }).catch(() => {});
-                await teleportToDest(page);
+                await browser.close();
+                return;
             }
             await sleep(2000);
             pageText = await getPageText(page);
