@@ -1,4 +1,6 @@
 const { chromium } = require('playwright');
+// 副本内自恢复（先扫荡/领奖再退本）
+const drain = require('./dungeon-recover.js');
 
 const ACCOUNT = process.env.GAME_ACCOUNT;
 const PASSWORD = process.env.GAME_PASSWORD;
@@ -106,11 +108,21 @@ async function clickLeaf(page, text, exactOnly = true) {
 }
 
 // 开出航面板→选区域→点目的地→轮询出航确认；失败关面板整轮重试（最多3轮）
-// 卡副本自恢复：身处副本房间先点「退出副本」回城（重登也会落回副本，必须点退出）
+// 卡副本自恢复：身处副本房间先**把副本做完（扫荡/领奖）**，实在没可领的才退本回城。
+// 2026-10-27 boss(0) 教训：炼器窟已扫荡、条件已达成、只差领奖，
+// 老逻辑读到「副本条件」直接退本，把当天奖励扔了。现在先交给 recoverDungeon 处理。
 async function exitDungeonIfInside(page) {
     const t0 = await getPageText(page);
     if (!(t0.includes('副本条件') && t0.includes('回到起点'))) return false;
-    console.log('自恢复：检测到身处副本，先退出副本...');
+    console.log('自恢复：检测到身处副本，先尝试完成副本（扫荡/领奖）...');
+    try {
+        const r = await drain.recoverDungeon(page, { tag: '自恢复', screenshot: 'dungeon-recover-fail.png' });
+        if (r.claimed) console.log(r.swept ? '已扫荡并领取奖励，副本结束' : '已领取奖励，副本结束');
+        if (r.exited) { console.log('已退出副本'); return true; }
+        console.log(`副本内没能完成/退出（${r.kind}，领奖=${r.claimed}），走兜底流程`);
+    } catch (e) {
+        console.log('副本内处理异常:', e.message);
+    }
     for (let i = 1; i <= 3; i++) {
         if (!(await clickText(page, '退出副本', 2000))) {
             await jsClick(page, '退出副本');
