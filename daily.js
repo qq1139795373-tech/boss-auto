@@ -37,7 +37,21 @@ const ALL_REGIONS = ['地中海', '北海', '非洲', '东亚', '印度洋', '�
 //   「没有目标地图」（游戏没给这条任务配目标地图，不是城市问题）→ 空烧一路铜贝。所以默认留空：
 //   寻路不通就直接记账放着（`未完成·寻路无目标地图…等你告知城市`），等用户在场时手动带着走。
 const MANUAL_HINTS = {
-    // 例：'铁矿石': { city: '威尼斯', monster: '偷矿者', area: '矿山' },  ← 已实测无效，勿开
+    // 格式：{ 任务名: { city, monster, area, walk? } }
+    //   walk = 用户告知的**固定走法**（只点这个方向，不做任何自动探索/推断）
+    //   没有 walk 的 hint 只表示「去这座城再点一次寻路」，多数没用（游戏没配目标地图，白跑一趟）
+    //
+    // ★ 用户 10-28 纠正：不是「特殊任务一律不动」，而是**告知过走法就要执行**，没告知过的才放着。
+    '铁矿石': {
+        city: '威尼斯',
+        monster: '偷矿者',
+        area: '矿山',
+        // 用户 2026-10-26 告知并实测（probe-walk-ore.run5.log 18 杀 3/3）：
+        // 威尼斯城内「北：西城门」→ 北：铁匠铺 → 北：居民区 → 北：北城门 → 北：矿山
+        // → 病鸡 → 野猪 → 野狼 → 僵尸 → 老虎 → 空层 → 第 12 层（偷矿者 + 白虎王）
+        // 一路只点「北」；空层那步合成事件点不动，必须补真实坐标点击。
+        walk: { dir: '北', maxSteps: 14 },
+    },
 };
 
 // 任务 → 用户告知过的城市（只查 MANUAL_HINTS，不做任何自动检索）
@@ -773,9 +787,98 @@ async function pickAndFight(page, task) {
     return null;
 }
 
+// ── 用户告知的固定走法（MANUAL_HINTS.walk）────────────────────────────
+// 读页面方位出口「北：矿山」→ [{dir, place, text, x, y}]
+async function readDirExits(page) {
+    return await page.evaluate(() => {
+        const out = [];
+        for (const el of document.querySelectorAll('body *')) {
+            if (el.children.length) continue;
+            const s = (el.textContent || '').trim();
+            const m = s.match(/^([东西南北])[：:]\s*(.{2,10})$/);
+            if (!m) continue;
+            const r = el.getBoundingClientRect();
+            if (!r.width || !r.height) continue;
+            out.push({ dir: m[1], place: m[2].trim(), text: s, x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) });
+        }
+        return out;
+    }).catch(() => []);
+}
+
+// 只按 hint.walk.dir 一个方向走，直到看见 hint.monster。
+// 不做任何出口筛选或分支判断 —— 路径是用户告知的，不是脚本推的。
+async function walkByHint(page, hint, taskName) {
+    const dir = hint.walk.dir;
+    const maxSteps = hint.walk.maxSteps || 14;
+    for (let s = 1; s <= maxSteps; s++) {
+        const txt = await getPageText(page);
+        const ms = txt.includes('你看到') ? await listMonsters(page) : [];
+        if (ms.some(m => m.includes(hint.monster))) {
+            console.log(`[${taskName}] 第${s}步见到${hint.monster}（${ms.join('/')}）`);
+            return true;
+        }
+        const e = (await readDirExits(page)).find(x => x.dir === dir);
+        if (!e) { console.log(`[${taskName}] 第${s}步没有「${dir}」出口，停`); break; }
+        const okLeaf = await clickLeaf(page, e.text);
+        await sleep(2500);
+        let after = await getPageText(page);
+        if (after === txt) {   // 合成事件点不动 → 补真实坐标点击（空层那一格就是这样）
+            await page.mouse.click(e.x, e.y).catch(() => {});
+            await sleep(2500);
+            after = await getPageText(page);
+        }
+        if (after === txt) { console.log(`[${taskName}] 第${s}步「${e.text}」走不动，停`); break; }
+        console.log(`[${taskName}] 第${s}步 → ${e.text}（${okLeaf ? '合成' : '坐标'}点击）`);
+    }
+    const t = await getPageText(page);
+    if (!t.includes('你看到')) return false;
+    return (await listMonsters(page)).some(m => m.includes(hint.monster));
+}
+
+// 走图 → 杀到满 → 提交。返回 'done' | 'full-但未提交成功' | 'fail'
+async function runTaskByWalk(page, task, hint) {
+    const name = task.name;
+    const drop = task.target || name;
+    console.log(`[${name}] 按你告知的走法执行：${hint.city} 一路「${hint.walk.dir}」找 ${hint.monster}`);
+    await backToMain(page);
+    if ((await currentCity(page)) !== hint.city) {
+        if (!(await sailTo(page, hint.city))) { console.log(`[${name}] 到不了${hint.city}，跳过`); return 'fail'; }
+    }
+    if (!(await getPageText(page)).includes('你看到')) await backToMain(page);
+    if (!(await walkByHint(page, hint, name))) {
+        await page.screenshot({ path: `daily-walk-${name}.png` }).catch(() => {});
+        return 'fail';
+    }
+    const cap = task.n === Infinity ? 24 : task.n * 8 + 8;
+    let kills = 0;
+    while (kills < cap) {
+        const r = await pickAndFight(page, { type: task.type, target: drop, name });
+        if (!r) { console.log(`[${name}] 这层没有掉${drop}的怪，停`); break; }
+        kills++;
+        if (kills % 4 === 0) {
+            const lt = await openDailyList(page);
+            const tag = (lt.match(new RegExp(`\\d+\\.\\s*[\\s\\S]{0,40}?${name}[\\s\\S]{0,60}?(已完成|可提交|进行中)`)) || [])[1];
+            await backToMain(page);
+            if (tag === '可提交' || tag === '已完成') { console.log(`[${name}] 列表已「${tag}」（${kills}杀）`); break; }
+        }
+    }
+    console.log(`[${name}] 走图击杀 ${kills} 只`);
+    await backToMain(page);
+    await openDailyList(page);
+    const fresh = await parseDailyTasks(page);
+    const f = fresh.find(t => t.name === name);
+    if (!f || (!f.full && !f.submitted)) { console.log(`[${name}] 走完仍未满，留到下轮`); return 'fail'; }
+    if (f.submitted) { console.log(`[${name}] 已提交`); return 'done'; }
+    const ok = await tryClaim(page, f);
+    console.log(`[${name}] 提交${ok ? '成功' : '失败'}`);
+    return ok ? 'done' : 'full-但未提交成功';
+}
+
 // 执行一条任务：导路 → 杀怪直到进度满（每杀1只查一次详情），带3倍保险上限
 // 返回: 'done' | 'cap' | 'fail'
 async function runTask(page, task) {
+    // 你告知过固定走法的任务（铁矿石）：直接走图，不点寻路（游戏没给这条配目标地图，点了也弹提示白等）
+    if (task.hint && task.hint.walk) return await runTaskByWalk(page, task, task.hint);
     const where = task.city ? `${task.city}·${task.area}` : '（无地点）';
     console.log(`[${task.name}] ${where} ${task.x}/${task.n}，点寻路...`);
     // 点任务行开详情（按行号，重试3次），确认出现「任务进度」再点寻路
@@ -865,7 +968,11 @@ async function runTask(page, task) {
         // 城里那段是「你看到：传送出航」，野区那段是「你看到：经验妖灵」之类 → 用「不含出航」区分。
         // 不能用「当前城市」或「【城内地图】」判断：野区页面同样有这两个（farm-m4 实证）。
         const seg = wildSeg(t);
-        if (seg && !t.includes('任务进度') && !seg.includes('出航')) {
+        // 补充判据（2026-10-28 coldwind2「泉州·码头 神秘人」实证）：
+        // 有些任务点在**城内落点**（码头），出航到达后人物本身就在那儿，页面仍是城内视图、带「传送/出航」，
+        // 靠「seg 不含出航」永远判不到（白等 15 秒）。所以「你看到」段里直接出现任务名 = 已到达。
+        const nameInView = !!task.name && seg.includes(task.name);
+        if ((seg && !t.includes('任务进度') && !seg.includes('出航')) || nameInView) {
             arrived = true;
             break;
         }
@@ -1353,7 +1460,8 @@ async function run() {
                 const hit = locateTask(t);
                 if (hit) {
                     noCityCity.set(t.rowNo + t.name, hit.city);
-                    console.log(`  [无地点] ${t.rowNo}.${t.name} ${prog}：你告知过「${hit.monster}掉落」→ 去${hit.city}（${hit.area || '野区'}）再点寻路`);
+                    t.hint = hit;   // 带 walk 的走图执行；不带的仍只是去该城再试一次寻路
+                    console.log(`  [无地点] ${t.rowNo}.${t.name} ${prog}：你告知过「${hit.monster}掉落」→ ${hit.walk ? '按告知的走法走图' : '去' + hit.city + '再点寻路'}`);
                 } else {
                     console.log(`  [无地点] ${t.rowNo}.${t.name} ${prog}：无「城市·野区」，也没告知过任务城市 → 只在当前城试一次寻路，不通就记着等你告知`);
                 }
@@ -1422,7 +1530,10 @@ async function run() {
                 for (const t of noCity) {
                     if (attempted.has(t.rowNo + t.name)) continue;
                     if ((await currentCity(page)) !== city) break;
-                    const tk = `${t.rowNo}.${t.name}`;
+                    // key 必须和 noCityCity / attempted 保持一致（都是 rowNo+name，不带点）：
+                    // 原来这里写成 `${rowNo}.${name}`，导致 tellCity 永远取不到、attempted 判断也永远不命中，
+                    // 收尾还会把已经完成的任务误报成「未完成·等你告知城市」（2026-10-28 铁矿石走图成功后才暴露）。
+                    const tk = t.rowNo + t.name;
                     const tellCity = noCityCity.get(tk);
                     if (tellCity && tellCity !== city) continue;
                     // 没告知过城市的任务只在当前城试一次，不通就放着，不跨城空跑（出航烧铜贝）
