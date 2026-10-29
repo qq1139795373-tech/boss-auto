@@ -1,11 +1,9 @@
 const { chromium } = require('playwright');
-// 副本内自恢复（先扫荡/领奖再退本）
-const drain = require('./dungeon-recover.js');
 
 const ACCOUNT = process.env.GAME_ACCOUNT;
 const PASSWORD = process.env.GAME_PASSWORD;
-// 农场固定去杭州西湖打水怪
-const NAV_DEST = '杭州';
+// 农场固定去广州沙滩
+const NAV_DEST = '广州';
 const NAV_REGION = '东亚';
 
 async function sleep(ms) {
@@ -50,10 +48,8 @@ async function clickText(page, text, timeout = 5000) {
     return false;
 }
 
-// 只拼可见节点。原实现 textContent('body') 不排除 display:none，
-// 残留弹窗节点会一直留在 DOM 里 → 读出幽灵文案，把「没成」判成「成了」（2026-10-28 同源问题）。
 async function getPageText(page) {
-    return await drain.visibleText(page);
+    return await page.textContent('body').catch(() => '');
 }
 
 // 截取"当前城市"到"【聊天】"之间的地图区块，用于日志观察位置变化
@@ -84,12 +80,6 @@ async function jsClick(page, text, exclude = '') {
     }, { t: text, ex: exclude });
 }
 
-// jsClick优先（穿遮罩），失败退回文本点击
-async function clickBtn(page, text, timeout = 3000) {
-    if (await jsClick(page, text)) return true;
-    return await clickText(page, text, timeout);
-}
-
 async function closePopup(page) {
     // 尝试点击不同位置关闭弹窗
     await page.mouse.click(10, 10);
@@ -113,79 +103,38 @@ async function clickExact(page, text, timeout = 3000) {
     }
 }
 
-async function pickConfirm(page, region, dest) {
-    for (let round = 1; round <= 3; round++) {
-        // 先关掉可能遮挡点击的弹窗/残留面板（高峰期弹窗会吃掉坐标点击）
-        await page.mouse.click(10, 10);
-        await sleep(300);
-        await page.keyboard.press('Escape');
-        await sleep(500);
-        let opened = await clickText(page, '出航', 2000);
-        if (!opened) {
-            await clickText(page, '城内地图');
-            await sleep(2000);
-            await clickText(page, '码头');
-            await sleep(3000);
-            await clickText(page, '出航');
-        }
-        await sleep(2000);
-        await clickExact(page, region);
-        await sleep(1000);
-        for (let s = 0; s < 5; s++) {
-            // 第2轮起用JS叶子派发点击，绕过遮罩对坐标点击的拦截
-            const ok = round === 1
-                ? await clickText(page, dest, 2000)
-                : await jsClick(page, dest);
-            if (ok) {
-                // 高峰期确认框慢半拍，单次1.5秒查询会误判，改成最多9秒轮询
-                for (let c = 0; c < 6; c++) {
-                    await sleep(1500);
-                    if ((await getPageText(page)).includes('出航确认')) return true;
-                }
-            }
-            await page.mouse.wheel(0, 300);
-            await sleep(1000);
-        }
-        console.log(`未看到出航确认框，重开面板重试(${round}/3)...`);
-    }
-    return false;
-}
-
-// 出航失败时把现场拍下来（此前失败路径无任何页面文本，无从定位）
-async function failNav(page, why) {
-    const t = await getPageText(page);
-    console.log(`出航中止(${why})，页面文本: ${t.replace(/\s+/g, ' ').substring(0, 300)}`);
-    await page.screenshot({ path: 'nav-fail-detail.png' }).catch(() => {});
-    return false;
-}
-
 // 出航流程：出航菜单→区域→城市→出航确认→自动航行→航行循环（海盗避战/恢复），返回是否到达
 async function sailFlow(page) {
-    let picked = await pickConfirm(page, NAV_REGION, NAV_DEST);
-    if (!picked) return failNav(page, '出航确认框始终未出现');
-
-    await clickText(page, '立即出发');
+    let step = await clickText(page, '出航', 2000);
+    if (!step) {
+        await clickText(page, '城内地图');
+        await sleep(2000);
+        await clickText(page, '码头');
+        await sleep(3000);
+        step = await clickText(page, '出航');
+    }
     await sleep(2000);
-    // 验证真进入航行状态（出现「停止自动航行」），未启动则整轮重来，最多2次
-    let sailing = false;
-    for (let a = 1; a <= 2 && !sailing; a++) {
-        await clickExact(page, '自动航行', 5000);
-        for (let c = 0; c < 5; c++) {
-            await sleep(1000);
-            if ((await getPageText(page)).includes('停止自动航行')) {
-                sailing = true;
+    await clickExact(page, NAV_REGION);
+    await sleep(1000);
+
+    let picked = false;
+    for (let s = 0; s < 5; s++) {
+        if (await clickText(page, NAV_DEST, 2000)) {
+            await sleep(1500);
+            if ((await getPageText(page)).includes('出航确认')) {
+                picked = true;
                 break;
             }
         }
-        if (!sailing && a === 1) {
-            console.log('自动航行未启动，重新开面板选目的地...');
-            picked = await pickConfirm(page, NAV_REGION, NAV_DEST);
-            if (!picked) break;
-            await clickText(page, '立即出发');
-            await sleep(2000);
-        }
+        await page.mouse.wheel(0, 300);
+        await sleep(1000);
     }
-    if (!sailing) return failNav(page, '自动航行未启动');
+    if (!picked) console.log('未看到出航确认框，继续尝试...');
+
+    await sleep(1000);
+    await clickText(page, '立即出发');
+    await sleep(2000);
+    await clickExact(page, '自动航行', 5000);
     console.log('航行中...');
 
     for (let w = 0; w < 80; w++) {
@@ -213,44 +162,6 @@ async function sailFlow(page) {
     }
     const txt = await getPageText(page);
     console.log('航行未完成（约5分钟），页面文本:', txt.substring(0, 300));
-    return false;
-}
-
-// 卡副本自恢复：身处副本房间先**把副本做完（扫荡/领奖）**，实在没可领的才退本回城。
-// 2026-10-27 boss(0) 教训：炼器窟已扫荡、条件已达成、只差领奖，
-// 老逻辑读到「副本条件」直接退本，把当天奖励扔了。现在先交给 recoverDungeon 处理。
-async function exitDungeonIfInside(page) {
-    const t0 = await getPageText(page);
-    if (!(t0.includes('副本条件') && t0.includes('回到起点'))) return false;
-    console.log('自恢复：检测到身处副本，先尝试完成副本（扫荡/领奖）...');
-    try {
-        const r = await drain.recoverDungeon(page, { tag: '自恢复', screenshot: 'dungeon-recover-fail.png' });
-        if (r.claimed) console.log(r.swept ? '已扫荡并领取奖励，副本结束' : '已领取奖励，副本结束');
-        if (r.exited) { console.log('已退出副本'); return true; }
-        console.log(`副本内没能完成/退出（${r.kind}，领奖=${r.claimed}），走兜底流程`);
-    } catch (e) {
-        console.log('副本内处理异常:', e.message);
-    }
-    for (let i = 1; i <= 3; i++) {
-        if (!(await clickText(page, '退出副本', 2000))) {
-            await jsClick(page, '退出副本');
-        }
-        await sleep(1500);
-        let t = await getPageText(page);
-        if (t.includes('副本条件') && t.includes('确定')) {
-            await clickExact(page, '确定', 2000);
-            await sleep(1500);
-            t = await getPageText(page);
-        }
-        if (!(t.includes('副本条件') && t.includes('回到起点'))) {
-            console.log('已退出副本');
-            return true;
-        }
-        console.log(`第${i}次退出副本未生效，重试...`);
-    }
-    const t = await getPageText(page);
-    console.log('退出副本失败，仍在:', t.replace(/\s+/g, ' ').substring(0, 200));
-    await page.screenshot({ path: 'dungeon-recover-fail.png' }).catch(() => {});
     return false;
 }
 
@@ -326,9 +237,6 @@ async function teleportToDest(page) {
         await sleep(3000);
         console.log('传送兜底: 重新登录完成');
 
-        // 重登可能落回副本房间，先退出再开传送面板
-        await exitDungeonIfInside(page);
-
         // 面板打不开多半是页面半渲染（点击无响应），重载页面再来一轮基本能救回
         let panelOpen = await openTeleportPanel(page);
         if (!panelOpen) {
@@ -336,43 +244,43 @@ async function teleportToDest(page) {
             await page.screenshot({ path: 'teleport-reload.png' }).catch(() => {});
             await reloadGame(page);
             await sleep(4000);
-            await exitDungeonIfInside(page);
             panelOpen = await openTeleportPanel(page);
         }
         if (!panelOpen) {
-            const pt = await getPageText(page);
-            console.log('传送兜底: 找不到传送入口，页面文本:', pt.replace(/\s+/g, ' ').substring(0, 300));
+            console.log('传送兜底: 找不到传送入口');
             await page.screenshot({ path: 'teleport-fail.png' }).catch(() => {});
             return false;
         }
+        await sleep(2000);
 
         await clickExact(page, NAV_REGION);
         await sleep(1000);
 
+        let picked = false;
         for (let s = 0; s < 5; s++) {
-            if (await clickText(page, NAV_DEST, 2000)) break;
+            if (await clickText(page, NAV_DEST, 2000)) {
+                picked = true;
+                break;
+            }
             await page.mouse.wheel(0, 300);
             await sleep(1000);
         }
+        if (!picked) console.log('传送兜底: 列表中找不到目的地');
 
-        // 传送即时生效：轮询到达，其间按需点确定/确认
-        let txt = '';
-        for (let i = 0; i < 8; i++) {
-            await sleep(1500);
+        await sleep(3000);
+        let txt = await getPageText(page);
+        if (!txt.includes(`当前城市：${NAV_DEST}`)) {
+            await clickText(page, '确定');
+            await sleep(2000);
+            await clickText(page, '确认');
+            await sleep(2000);
             txt = await getPageText(page);
-            if (txt.includes(`当前城市：${NAV_DEST}`)) {
-                console.log(`传送兜底: 已到达${NAV_DEST}`);
-                return true;
-            }
-            if (txt.includes('确定')) {
-                await clickText(page, '确定');
-                await sleep(1000);
-            } else if (txt.includes('确认')) {
-                await clickText(page, '确认');
-                await sleep(1000);
-            }
         }
-        console.log('传送兜底: 未检测到到达，页面文本:', txt.replace(/\s+/g, ' ').substring(0, 300));
+        if (txt.includes(`当前城市：${NAV_DEST}`)) {
+            console.log(`传送兜底: 已到达${NAV_DEST}`);
+            return true;
+        }
+        console.log('传送兜底: 未检测到到达，页面文本:', txt.substring(0, 300));
         await page.screenshot({ path: 'teleport-fail.png' }).catch(() => {});
         return false;
     } catch (e) {
@@ -407,60 +315,60 @@ async function relogin(page) {
     return true;
 }
 
-// 走到西湖（杭州城内：西城门 -> 龙井村 -> 西湖），失败返回 false
-async function gotoXihu(page) {
-    // 导航到西湖：西城门 -> 龙井村 -> 西湖（手机手动验证过的路径）
-    // 到达西城门的标志：状态行出现"西：龙井村"
-    console.log('导航到西湖...');
+// 走到沙滩（广州城内：东城门 -> 沙滩294 -> 沙滩），失败返回 false
+async function gotoBeach(page) {
+    // 导航到沙滩：东城门 -> 沙滩294 -> 沙滩（手机手动验证过的路径）
+    // 到达东城门的标志：主页面出现"东：沙滩294"
+    console.log('导航到沙滩...');
     await page.keyboard.press('Escape');
     await sleep(1000);
 
     let pageText;
 
-    // 第1步：走到西城门
+    // 第1步：走到东城门
     for (let i = 0; i < 4; i++) {
         pageText = await getPageText(page);
-        if (pageText.includes('西：龙井村') || pageText.includes('西:龙井村')) {
-            console.log('[nav] 已在西城门（看到龙井村）');
+        if (pageText.includes('沙滩294')) {
+            console.log('[nav] 已在东城门附近（看到沙滩294）');
             break;
         }
-        let ok = await jsClick(page, '西城门');
+        let ok = await jsClick(page, '东城门');
         if (!ok || i >= 1) {
             console.log(`[nav] 打开城内地图(${i + 1}):`, await jsClick(page, '城内地图'));
             await sleep(2000);
-            ok = await jsClick(page, '西城门');
+            ok = await jsClick(page, '东城门');
         }
-        console.log(`[nav] 点西城门(${i + 1}):`, ok, i >= 1 ? '(经城内地图)' : '(主页面)');
+        console.log(`[nav] 点东城门(${i + 1}):`, ok, i >= 1 ? '(经城内地图)' : '(主页面)');
         await sleep(3000);
         await page.screenshot({ path: `nav-2-gate-${i + 1}.png` }).catch(() => {});
     }
     pageText = await getPageText(page);
-    console.log('[nav] 第1步后地图:', mapBlock(pageText), '| 西向龙井村=' + (pageText.includes('西：龙井村') || pageText.includes('西:龙井村')));
+    console.log('[nav] 第1步后地图:', mapBlock(pageText), '| 沙滩294=' + pageText.includes('沙滩294'));
 
-    // 第2步：点龙井村（只在还站在西城门方向上时点）
+    // 第2步：点沙滩294（只在还站在东城门方向上时点）
     for (let i = 0; i < 3; i++) {
         pageText = await getPageText(page);
-        if (!pageText.includes('西：龙井村') && !pageText.includes('西:龙井村')) break;
-        console.log(`[nav] 点龙井村(${i + 1}):`, await jsClick(page, '龙井村'));
+        if (!pageText.includes('东：沙滩294') && !pageText.includes('东:沙滩294')) break;
+        console.log(`[nav] 点沙滩294(${i + 1}):`, await jsClick(page, '沙滩294'));
         await sleep(3000);
-        await page.screenshot({ path: `nav-3-ljc-${i + 1}.png` }).catch(() => {});
+        await page.screenshot({ path: `nav-3-294-${i + 1}.png` }).catch(() => {});
     }
     pageText = await getPageText(page);
-    console.log('[nav] 第2步后地图:', mapBlock(pageText), '| 北向西湖=' + (pageText.includes('北：西湖') || pageText.includes('北:西湖')));
+    console.log('[nav] 第2步后地图:', mapBlock(pageText), '| 东向沙滩294=' + (pageText.includes('东：沙滩294') || pageText.includes('东:沙滩294')));
 
-    // 第3步：进西湖
+    // 第3步：进沙滩
     for (let i = 0; i < 3; i++) {
         pageText = await getPageText(page);
-        if (pageText.includes('水怪')) break;
-        console.log(`[nav] 点西湖(${i + 1}):`, await jsClick(page, '西湖'));
+        if (pageText.includes('经验妖灵')) break;
+        console.log(`[nav] 点沙滩(${i + 1}):`, await jsClick(page, '沙滩', '294'));
         await sleep(3000);
-        await page.screenshot({ path: `nav-4-xihu-${i + 1}.png` }).catch(() => {});
+        await page.screenshot({ path: `nav-4-beach-${i + 1}.png` }).catch(() => {});
     }
 
     pageText = await getPageText(page);
-    console.log('[nav] 到达后地图:', mapBlock(pageText), '| 水怪=' + pageText.includes('水怪'));
-    if (pageText.includes('水怪') || pageText.includes('当前城市：杭州')) {
-        console.log('到达西湖');
+    console.log('[nav] 到达后地图:', mapBlock(pageText), '| 经验妖灵=' + pageText.includes('经验妖灵'));
+    if (pageText.includes('经验妖灵') || pageText.includes('当前城市：广州')) {
+        console.log('到达沙滩');
         return true;
     }
     return false;
@@ -558,7 +466,7 @@ async function run() {
         let pageText = await getPageText(page);
         if (pageText.includes('请输入账号密码') || pageText.includes('登录注册') || pageText.includes('选择角色')) {
             console.log('ERROR: 未进入游戏主界面，退出');
-            console.log('::error::登录失败：未进入游戏主界面，刷怪已退出');
+            console.log('::error::登录失败：未进入游戏主界面，农场已跳过');
             await page.screenshot({ path: 'login-fail.png' }).catch(() => {});
             await browser.close();
             return;
@@ -575,55 +483,51 @@ async function run() {
         pageText = await getPageText(page);
         console.log('关闭弹窗后前200字:', pageText.substring(0, 200));
 
-        // 卡副本自恢复（dungeon误进/未退出会把号留在房间里，后续全部步骤都会撞死）
-        await exitDungeonIfInside(page);
-
-        // 检查是否在杭州（失败不直接放弃：重载页面再试一轮，点击无响应多半能救回）
+        // 检查是否在广州（失败不直接放弃：重载页面再试一轮，点击无响应多半能救回）
         pageText = await getPageText(page);
-        if (pageText.includes('当前城市：杭州')) {
-            console.log('已在杭州');
+        if (pageText.includes('当前城市：广州')) {
+            console.log('已在广州');
         } else {
             for (let round = 1; round <= 2; round++) {
-                console.log(`不在杭州，导航中...(第${round}/2轮)`);
+                console.log(`不在广州，导航中...(第${round}/2轮)`);
 
                 if (round > 1) {
                     await reloadGame(page);
                     await sleep(4000);
-                    await exitDungeonIfInside(page);
                 }
 
                 const arrived = await sailFlow(page);
                 if (!arrived) {
-                    console.log('出航未完成（中止或约5分钟超时），改用传送兜底...');
+                    console.log('出航约5分钟未完成，改用传送兜底...');
                     await page.screenshot({ path: 'nav-fail.png' }).catch(() => {});
                     await teleportToDest(page);
                 }
                 await sleep(2000);
 
                 pageText = await getPageText(page);
-                if (pageText.includes('当前城市：杭州')) break;
+                if (pageText.includes('当前城市：广州')) break;
             }
 
-            // 严格校验：没到杭州绝不往下走（否则会在错误城市空转数小时）
-            if (!pageText.includes('当前城市：杭州')) {
-                console.log('未到达杭州，跳过农场');
+            // 严格校验：没到广州绝不往下走（否则会在错误城市空转数小时）
+            if (!pageText.includes('当前城市：广州')) {
+                console.log('未到达广州，跳过农场');
                 await page.screenshot({ path: 'farm-nav-fail.png' }).catch(() => {});
                 await browser.close();
                 return;
             }
-            console.log('到达杭州');
+            console.log('到达广州');
         }
 
-        if (!(await gotoXihu(page))) {
-            // 不在杭州时“西湖导航”会在错误城市空转，直接退出而不是假装到达
-            console.log('不在杭州，西湖导航失败，退出农场');
+        if (!(await gotoBeach(page))) {
+            // 不在广州时“沙滩导航”会在错误城市空转，直接退出而不是假装到达
+            console.log('不在广州，沙滩导航失败，退出农场');
             await page.screenshot({ path: 'farm-nav-fail.png' }).catch(() => {});
             await browser.close();
             return;
         }
 
-        // 循环打水怪（选怪→50→攻击→50→关闭→50，一刀一个）
-        // 日志节流：每轮都打印会刷出几十MB日志、拖垮runner，改为每60秒汇报一次进度
+        // 循环打经验妖灵
+        // 日志节流：每轮都打印会刷出几MB日志、拖垮runner，改为每60秒汇报一次进度
         let count = 0;
         const loopStart = Date.now();
         let lastLogAt = Date.now();
@@ -654,7 +558,7 @@ async function run() {
                 console.log(`已让位 ${Math.round((now - kickedAt) / 60000)} 分钟，尝试重新登录...`);
                 if (await relogin(page)) {
                     pageText = await getPageText(page);
-                    if (!pageText.includes('水怪')) await gotoXihu(page).catch(() => false);
+                    if (!pageText.includes('经验妖灵')) await gotoBeach(page).catch(() => false);
                     lastCountAt = Date.now();
                 }
                 kickedAt = 0;
@@ -663,8 +567,8 @@ async function run() {
             }
             kickedAt = 0;
 
-            if (pageText.includes('水怪')) {
-                await clickText(page, '水怪');
+            if (pageText.includes('经验妖灵')) {
+                await clickText(page, '经验妖灵');
                 await sleep(50);
 
                 // 一击必杀：直接点攻击，不循环
@@ -686,13 +590,13 @@ async function run() {
                 await sleep(50);
             }
 
-            // 10分钟没击杀=卡死（页面空白/人物异常），重登并走回西湖自愈
+            // 10分钟没击杀=卡死（页面空白/人物异常），重登并走回沙滩自愈
             if (Date.now() - lastCountAt >= 600000) {
-                console.log(`连续10分钟无击杀(已打${count}次)，尝试自愈：重登+走回西湖...`);
+                console.log(`连续10分钟无击杀(已打${count}次)，尝试自愈：重登+走回沙滩...`);
                 await page.screenshot({ path: 'farm-stuck.png' }).catch(() => {});
                 await relogin(page);
                 pageText = await getPageText(page);
-                if (!pageText.includes('水怪')) await gotoXihu(page).catch(() => false);
+                if (!pageText.includes('经验妖灵')) await gotoBeach(page).catch(() => false);
                 lastCountAt = Date.now();
                 continue;
             }
@@ -701,9 +605,9 @@ async function run() {
             if (now - lastLogAt >= 60000) {
                 lastLogAt = now;
                 const mins = Math.round((now - loopStart) / 60000);
-                const tail = pageText.includes('水怪')
+                const tail = pageText.includes('经验妖灵')
                     ? ''
-                    : ` | 未见水怪，页面: ${pageText.substring(0, 80)}`;
+                    : ` | 未见经验妖灵，页面: ${pageText.substring(0, 80)}`;
                 console.log(`打怪进行中：已完成 ${count} 次，已运行 ${mins} 分钟${tail}`);
             }
         }
