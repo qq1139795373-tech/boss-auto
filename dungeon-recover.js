@@ -209,16 +209,47 @@ async function readRewardToast(page, ms = 3000) {
     return '';
 }
 
-// 领奖成功后会回到副本入口页，按钮变成「进入副本（次数已用尽）」（用户 2026-10-29 截图）。
-// 这比「页面没有副本条件」更硬：说明这一次的次数确实被消耗、奖励确实结算了。
-//   返回 'used'      = 次数已用尽 → 确实领到了
-//        'available' = 还能进副本 → 很可能没领
-//        'unknown'   = 不在入口页
+// 副本入口页的「剩余次数」就是判据的根（用户 2026-10-29 截图）：
+//   没打过：  「进入副本（剩余1次）」
+//   打完领完：「进入副本（次数已用尽）」
+// 所以不靠「有没有这几个字」去猜，而是把数字读出来：打前记基线、领完再读一次，
+// 真的少了才算结算成功。有些副本写「剩余0次」而不是「次数已用尽」，两种都认。
+function remainTimes(t) {
+    const m = t.match(/进入副本\s*[（(]\s*剩余\s*(\d+)\s*次\s*[)）]/) || t.match(/剩余\s*(\d+)\s*次/);
+    if (m) return Number(m[1]);
+    if (/次数已用尽|次数不足|次数已用完/.test(t)) return 0;
+    return null;
+}
+
+// 把入口页「进入副本（…）」那条原文摘出来，日志里直接给人看
+function rawEntry(t) {
+    const m = t.match(/进入副本\s*[（(][^）)]{0,20}[)）]/) || t.match(/进入副本/);
+    return m ? m[0].replace(/\s+/g, ' ') : '';
+}
+
+// 返回 { state, remain, raw }
+//   state: 'used'      次数已用尽（remain=0）
+//          'available' 还能进副本（remain 可能是具体数字，读不到则为 null）
+//          'unknown'   不在入口页
 async function claimEvidence(page) {
     const t = await visibleText(page);
-    if (t.includes('次数已用尽') || t.includes('剩余0次')) return 'used';
-    if (t.includes('进入副本')) return 'available';
-    return 'unknown';
+    const remain = remainTimes(t);
+    if (remain === 0) return { state: 'used', remain: 0, raw: rawEntry(t) };
+    if (remain !== null) return { state: 'available', remain, raw: rawEntry(t) };
+    if (t.includes('进入副本')) return { state: 'available', remain: null, raw: rawEntry(t) };
+    return { state: 'unknown', remain: null, raw: '' };
+}
+
+// 用「打前基线」对账：剩余次数真的少了一次，才算这次领奖结算了
+//   before = 进本前入口页读到的剩余次数（读不到就传 null）
+function claimVerdict(before, after) {
+    if (after.state === 'used') return { ok: true, msg: '入口页「次数已用尽」，本次次数已消耗' };
+    if (before !== null && after.remain !== null) {
+        if (after.remain < before) return { ok: true, msg: `剩余次数 ${before}→${after.remain}，本次已消耗` };
+        return { ok: false, msg: `剩余次数仍是 ${after.remain}（进本前 ${before}），次数没被消耗，领奖可能未完成` };
+    }
+    if (after.state === 'available') return { ok: false, msg: `入口页仍显示「${after.raw || '进入副本'}」，领奖可能未完成` };
+    return { ok: null, msg: '不在副本入口页，无法核对剩余次数' };
 }
 
 function identify(t) {
@@ -287,10 +318,10 @@ async function recoverDungeon(page, opts = {}) {
         log(`${tag}：第 ${round} 轮领奖后仍在副本页（「领取奖励」还在）`);
     }
     if (claimed) log(`${tag}：奖励已领取，副本结束`);
-    // 领奖后人物回到副本入口页：这里核对「进入副本（次数已用尽）」，比「页面没有副本条件」更硬。
+    // 领奖后人物回到副本入口页：核对「进入副本（剩余N次 / 次数已用尽）」，比「页面没有副本条件」更硬。
     const ev = await claimEvidence(page);
-    if (ev === 'used') log(`${tag}：入口页显示「次数已用尽」= 本次次数已消耗，领奖确认`);
-    else if (ev === 'available') log(`${tag}：入口页仍可「进入副本」（未见次数已用尽），领奖可能未完成`);
+    const v = claimVerdict(opts.remainBefore ?? null, ev);
+    if (ev.state !== 'unknown') log(`${tag}：${v.msg}${ev.raw ? `（入口页「${ev.raw}」）` : ''}`);
 
     t = await visibleText(page);
     if (!t.includes('副本条件') && !t.includes('退出副本')) {
@@ -321,4 +352,4 @@ async function recoverDungeon(page, opts = {}) {
     return { inDungeon: true, kind, swept, claimed, exited: false };
 }
 
-module.exports = { recoverDungeon, closeSweepPopup, clickAndVerify, clickByText, visibleText, dismissPopups, readRewardToast, claimEvidence, sleep };
+module.exports = { recoverDungeon, closeSweepPopup, clickAndVerify, clickByText, visibleText, dismissPopups, readRewardToast, claimEvidence, remainTimes, rawEntry, claimVerdict, sleep };

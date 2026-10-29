@@ -457,6 +457,10 @@ async function run() {
             }
         }
 
+        // 入口页「进入副本（剩余N次）」里的数字 = 打前基线。
+        // 领奖后回到入口页再读一次：次数真的少 1 才算这次结算了（用户 2026-10-29 教）。
+        let remainBefore = null;
+
         if (!inDungeon) {
         // 铁匠铺 → 炼器师 → 炼器窟（说明书里写炼器窑，实际链接是炼器窟）
         console.log('导航到炼器窟入口...');
@@ -490,7 +494,12 @@ async function run() {
             return;
         }
 
-        if (pageText.includes('次数已用尽') || pageText.includes('剩余0次')) {
+        const remain = drain.remainTimes(pageText);
+        if (remain !== null) {
+            remainBefore = remain;
+            console.log(`入口页剩余次数：${remain}（${drain.rawEntry(pageText) || '进入副本'}）`);
+        }
+        if (remain === 0) {
             console.log('今日副本次数已用尽');
             await browser.close();
             return;
@@ -632,11 +641,10 @@ async function run() {
             }
             pageText = await getPageText(page);
             if (got && !pageText.includes('副本条件')) {
-                // 领奖后回到副本入口页（用户截图）：按钮显示「进入副本（次数已用尽）」= 次数确实消耗掉了。
+                // 领奖后回到副本入口页（用户截图）：按钮从「剩余1次」变成「次数已用尽」= 次数确实消耗掉了。
                 const ev = await drain.claimEvidence(page);
-                if (ev === 'used') console.log('奖励已领取，已退出副本（入口页「次数已用尽」= 本次次数已消耗）');
-                else if (ev === 'available') console.log('奖励已领取，已退出副本 —— 但入口页仍可「进入副本」（未见次数已用尽），领奖可能未完成');
-                else console.log('奖励已领取，已退出副本');
+                const v = drain.claimVerdict(remainBefore, ev);
+                console.log(`奖励已领取，已退出副本 —— ${v.msg}${ev.raw ? `（入口页「${ev.raw}」）` : ''}`);
             } else if (!pageText.includes('领取奖励')) {
                 console.log('奖励已领取（领取奖励入口已消失），仍在副本页');
             } else {
