@@ -169,22 +169,27 @@ async function dismissPopups(page, opts = {}) {
     return n;
 }
 
-// 领奖瞬间游戏会弹一个一闪而过的「提示」toast，内容就是这次到底给了什么：
+// 领奖瞬间游戏会弹一个一闪而过的「提示」toast，内容就是这次到底给了什么，例如：
 //   获得经验*0，铜币*30000，浴火之蝶*1，奔月副本箱*1，藏宝图碎片*10
 // 它盖在「领取奖励后默认退出副本，是否领取奖励？取消|确定」确认框之上（用户 2026-10-29 截图实证），
-// 点「确定」后页面直接回主城。也就是说：
-//   - 它是**唯一**能证明奖励真到账的读数（之前拿「铜贝 +20000」去对方向就错了，给的是铜币/物品）；
+// 点「确定」后页面回主城/副本门口（不是留在副本里）。也就是说：
+//   - 它是**唯一**能证明奖励真到账的读数（之前拿「铜贝 +20000」去对方向就错了）；
 //   - 它只存在一两秒，必须在点完「领取奖励」后立刻连着读几次，否则什么都抓不到。
+// 每个副本给的东西都不一样，所以**不认具体物品名**，只认「获得…」+ 像清单的文本。
 function pickReward(t) {
-    const i = t.indexOf('获得经验');
-    if (i < 0) return '';
-    let s = t.slice(i, i + 200).split('\n')[0];
-    for (const stop of ['领取奖励后', '提示', '取消', '确定']) {
-        const k = s.indexOf(stop);
-        if (k > 0) s = s.slice(0, k);
+    const re = /(?:你)?获得[^\n]{5,200}/g;
+    let m;
+    while ((m = re.exec(t))) {
+        let s = m[0];
+        for (const stop of ['领取奖励后', '提示', '取消', '确定']) {
+            const k = s.indexOf(stop);
+            if (k > 0) s = s.slice(0, k);
+        }
+        s = s.replace(/\s+/g, ' ').trim();
+        // 必须像一份奖励清单：带 *N / ×N 的数量标记，或是逗号分隔的多项
+        if (/[*×]\s*\d/.test(s) || /[，,]/.test(s)) return s;
     }
-    s = s.replace(/\s+/g, ' ').trim();
-    return s.length >= 5 ? s : '';
+    return '';
 }
 
 async function readRewardToast(page, ms = 3000) {
