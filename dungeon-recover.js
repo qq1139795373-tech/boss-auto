@@ -209,47 +209,35 @@ async function readRewardToast(page, ms = 3000) {
     return '';
 }
 
-// 副本入口页的「剩余次数」就是判据的根（用户 2026-10-29 截图）：
-//   没打过：  「进入副本（剩余1次）」
-//   打完领完：「进入副本（次数已用尽）」
-// 所以不靠「有没有这几个字」去猜，而是把数字读出来：打前记基线、领完再读一次，
-// 真的少了才算结算成功。有些副本写「剩余0次」而不是「次数已用尽」，两种都认。
+// ★ 副本的真实机制（用户 2026-10-29 说明，别再自己加戏）：
+//   1. 每个副本**每天自动刷新 1 次**机会，不是"剩余多次"、"剩余0次"那套。
+//   2. 只要进了副本，不超时 / 不主动退出 / 不领奖，**重登后仍然在副本里**（进本状态是持久的）。
+//      所以脚本被杀、被 cancel、下个波次重新登录，人还在里面。**这时候绝不能退本**：
+//      当天那 1 次已经花掉了，退出去今天再也进不来，等于白扔一次机会。
+//   3. 通关后出现「领取奖励」，领完退回进入副本前的页面（入口页）。
+//   4. 此时再点副本，按钮显示「次数为 0 / 次数已用尽」= 今天这一次已经用掉。
+//
+// 所以判据只有一条：入口页还能不能进。
+//   次数 0 / 已用尽 → 'used'      今天打完了
+//   剩余N次 / 能进   → 'available' 还没打，或被踢出来没打完
+//   都不是          → 'unknown'   不在入口页
 function remainTimes(t) {
-    const m = t.match(/进入副本\s*[（(]\s*剩余\s*(\d+)\s*次\s*[)）]/) || t.match(/剩余\s*(\d+)\s*次/);
+    const m = t.match(/剩余\s*(\d+)\s*次/);
     if (m) return Number(m[1]);
-    if (/次数已用尽|次数不足|次数已用完/.test(t)) return 0;
+    if (/次数\s*[为:：]?\s*0|次数已用尽|次数不足|次数已用完/.test(t)) return 0;
     return null;
 }
 
-// 把入口页「进入副本（…）」那条原文摘出来，日志里直接给人看
-function rawEntry(t) {
-    const m = t.match(/进入副本\s*[（(][^）)]{0,20}[)）]/) || t.match(/进入副本/);
-    return m ? m[0].replace(/\s+/g, ' ') : '';
+function claimEvidenceIn(t) {
+    const n = remainTimes(t);
+    if (n === 0) return 'used';
+    if (n !== null) return 'available';
+    if (t.includes('进入副本')) return 'available';
+    return 'unknown';
 }
 
-// 返回 { state, remain, raw }
-//   state: 'used'      次数已用尽（remain=0）
-//          'available' 还能进副本（remain 可能是具体数字，读不到则为 null）
-//          'unknown'   不在入口页
 async function claimEvidence(page) {
-    const t = await visibleText(page);
-    const remain = remainTimes(t);
-    if (remain === 0) return { state: 'used', remain: 0, raw: rawEntry(t) };
-    if (remain !== null) return { state: 'available', remain, raw: rawEntry(t) };
-    if (t.includes('进入副本')) return { state: 'available', remain: null, raw: rawEntry(t) };
-    return { state: 'unknown', remain: null, raw: '' };
-}
-
-// 用「打前基线」对账：剩余次数真的少了一次，才算这次领奖结算了
-//   before = 进本前入口页读到的剩余次数（读不到就传 null）
-function claimVerdict(before, after) {
-    if (after.state === 'used') return { ok: true, msg: '入口页「次数已用尽」，本次次数已消耗' };
-    if (before !== null && after.remain !== null) {
-        if (after.remain < before) return { ok: true, msg: `剩余次数 ${before}→${after.remain}，本次已消耗` };
-        return { ok: false, msg: `剩余次数仍是 ${after.remain}（进本前 ${before}），次数没被消耗，领奖可能未完成` };
-    }
-    if (after.state === 'available') return { ok: false, msg: `入口页仍显示「${after.raw || '进入副本'}」，领奖可能未完成` };
-    return { ok: null, msg: '不在副本入口页，无法核对剩余次数' };
+    return claimEvidenceIn(await visibleText(page));
 }
 
 function identify(t) {
@@ -258,7 +246,11 @@ function identify(t) {
     return '未知副本';
 }
 
-// 主流程：扫荡（有就扫）→ 领奖（有就领，循环到没有）→ 退本
+// 主流程：扫荡（有就扫）→ 领奖（有就领，循环到没有）→ 实在没得领才退本
+//
+// ★ 为什么「先领奖再退本」是硬要求：进本后重登**人还在副本里**，而每天只有 1 次机会。
+//   领完奖励才算这一天打完；没领就点「退出副本」= 那 1 次机会白扔（今天再也进不来）。
+//   这也是 2026-10-27 boss(0) 那次事故的实质损失，不是「少拿一份奖励」。
 async function recoverDungeon(page, opts = {}) {
     const log = opts.log || ((m) => console.log(m));
     const tag = opts.tag || '自恢复';
@@ -318,10 +310,11 @@ async function recoverDungeon(page, opts = {}) {
         log(`${tag}：第 ${round} 轮领奖后仍在副本页（「领取奖励」还在）`);
     }
     if (claimed) log(`${tag}：奖励已领取，副本结束`);
-    // 领奖后人物回到副本入口页：核对「进入副本（剩余N次 / 次数已用尽）」，比「页面没有副本条件」更硬。
-    const ev = await claimEvidence(page);
-    const v = claimVerdict(opts.remainBefore ?? null, ev);
-    if (ev.state !== 'unknown') log(`${tag}：${v.msg}${ev.raw ? `（入口页「${ev.raw}」）` : ''}`);
+    // 领完检查一次入口页：还是「剩余1次」= 这一次没结算掉，得说清楚
+    t = await visibleText(page);
+    const ev = claimEvidenceIn(t);
+    if (ev === 'used') log(`${tag}：入口页已显示「次数为 0」，今天这一次确实用掉了`);
+    else if (ev === 'available') log(`${tag}：入口页仍可「进入副本」（次数还在），领奖可能没结算掉`);
 
     t = await visibleText(page);
     if (!t.includes('副本条件') && !t.includes('退出副本')) {
@@ -329,7 +322,9 @@ async function recoverDungeon(page, opts = {}) {
     }
 
     // ---- 3) 退本：没有可领的了才走这里 ----
-    log(`${tag}：没有可领的奖励了，退出副本...`);
+    // 注意：退出副本后今天这 1 次机会就没了（进本状态持久，退了也进不来），
+    // 所以走到这里说明这个副本已经被判定为「本次没法打完/没东西可领」，日志里说清楚。
+    log(`${tag}：副本里没有可领的奖励了（多半没通关），退出副本 —— 今天这 1 次机会作废`);
     for (let i = 1; i <= 3; i++) {
         await clickByText(page, '退出副本');
         await sleep(1500);
@@ -352,4 +347,4 @@ async function recoverDungeon(page, opts = {}) {
     return { inDungeon: true, kind, swept, claimed, exited: false };
 }
 
-module.exports = { recoverDungeon, closeSweepPopup, clickAndVerify, clickByText, visibleText, dismissPopups, readRewardToast, claimEvidence, remainTimes, rawEntry, claimVerdict, sleep };
+module.exports = { recoverDungeon, closeSweepPopup, clickAndVerify, clickByText, visibleText, dismissPopups, readRewardToast, claimEvidence, claimEvidenceIn, remainTimes, sleep };
