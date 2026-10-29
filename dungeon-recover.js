@@ -209,6 +209,18 @@ async function readRewardToast(page, ms = 3000) {
     return '';
 }
 
+// 领奖成功后会回到副本入口页，按钮变成「进入副本（次数已用尽）」（用户 2026-10-29 截图）。
+// 这比「页面没有副本条件」更硬：说明这一次的次数确实被消耗、奖励确实结算了。
+//   返回 'used'      = 次数已用尽 → 确实领到了
+//        'available' = 还能进副本 → 很可能没领
+//        'unknown'   = 不在入口页
+async function claimEvidence(page) {
+    const t = await visibleText(page);
+    if (t.includes('次数已用尽') || t.includes('剩余0次')) return 'used';
+    if (t.includes('进入副本')) return 'available';
+    return 'unknown';
+}
+
 function identify(t) {
     if (/玄铁矿工|翡翠采掘者|血晶守卫|猫眼猎手|矿采场|赤晶|北幽猫|翠晶/.test(t)) return '炼器窟';
     if (/基德|暗仓|奴隶仓|枢纽广场|金库|机关厅|兽栏/.test(t)) return '基德的宝藏';
@@ -275,6 +287,10 @@ async function recoverDungeon(page, opts = {}) {
         log(`${tag}：第 ${round} 轮领奖后仍在副本页（「领取奖励」还在）`);
     }
     if (claimed) log(`${tag}：奖励已领取，副本结束`);
+    // 领奖后人物回到副本入口页：这里核对「进入副本（次数已用尽）」，比「页面没有副本条件」更硬。
+    const ev = await claimEvidence(page);
+    if (ev === 'used') log(`${tag}：入口页显示「次数已用尽」= 本次次数已消耗，领奖确认`);
+    else if (ev === 'available') log(`${tag}：入口页仍可「进入副本」（未见次数已用尽），领奖可能未完成`);
 
     t = await visibleText(page);
     if (!t.includes('副本条件') && !t.includes('退出副本')) {
@@ -305,4 +321,4 @@ async function recoverDungeon(page, opts = {}) {
     return { inDungeon: true, kind, swept, claimed, exited: false };
 }
 
-module.exports = { recoverDungeon, closeSweepPopup, clickAndVerify, clickByText, visibleText, dismissPopups, readRewardToast, sleep };
+module.exports = { recoverDungeon, closeSweepPopup, clickAndVerify, clickByText, visibleText, dismissPopups, readRewardToast, claimEvidence, sleep };
