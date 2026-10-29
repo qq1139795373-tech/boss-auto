@@ -169,6 +169,35 @@ async function dismissPopups(page, opts = {}) {
     return n;
 }
 
+// 领奖瞬间游戏会弹一个一闪而过的「提示」toast，内容就是这次到底给了什么：
+//   获得经验*0，铜币*30000，浴火之蝶*1，奔月副本箱*1，藏宝图碎片*10
+// 它盖在「领取奖励后默认退出副本，是否领取奖励？取消|确定」确认框之上（用户 2026-10-29 截图实证），
+// 点「确定」后页面直接回主城。也就是说：
+//   - 它是**唯一**能证明奖励真到账的读数（之前拿「铜贝 +20000」去对方向就错了，给的是铜币/物品）；
+//   - 它只存在一两秒，必须在点完「领取奖励」后立刻连着读几次，否则什么都抓不到。
+function pickReward(t) {
+    const i = t.indexOf('获得经验');
+    if (i < 0) return '';
+    let s = t.slice(i, i + 200).split('\n')[0];
+    for (const stop of ['领取奖励后', '提示', '取消', '确定']) {
+        const k = s.indexOf(stop);
+        if (k > 0) s = s.slice(0, k);
+    }
+    s = s.replace(/\s+/g, ' ').trim();
+    return s.length >= 5 ? s : '';
+}
+
+async function readRewardToast(page, ms = 3000) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < ms) {
+        const t = await visibleText(page);
+        const r = pickReward(t);
+        if (r) return r;
+        await sleep(300);
+    }
+    return '';
+}
+
 function identify(t) {
     if (/玄铁矿工|翡翠采掘者|血晶守卫|猫眼猎手|矿采场|赤晶|北幽猫|翠晶/.test(t)) return '炼器窟';
     if (/基德|暗仓|奴隶仓|枢纽广场|金库|机关厅|兽栏/.test(t)) return '基德的宝藏';
@@ -228,7 +257,13 @@ async function recoverDungeon(page, opts = {}) {
             break;
         }
         await sleep(1500);
+        const rw = await readRewardToast(page, 3000);   // 一闪而过，必须立刻抓
+        if (rw) log(`${tag}：领奖明细 ${rw}`);
         await dismissPopups(page, { log });        // 关「扫荡收获」+ 确认「是否领取奖励？」
+        if (!rw) {
+            const rw2 = await readRewardToast(page, 1500);
+            if (rw2) log(`${tag}：领奖明细 ${rw2}`);
+        }
         await sleep(1500);
         t = await visibleText(page);
         if (!t.includes('副本条件') || !t.includes('领取奖励')) { claimed = true; break; }
@@ -265,4 +300,4 @@ async function recoverDungeon(page, opts = {}) {
     return { inDungeon: true, kind, swept, claimed, exited: false };
 }
 
-module.exports = { recoverDungeon, closeSweepPopup, clickAndVerify, clickByText, visibleText, dismissPopups, sleep };
+module.exports = { recoverDungeon, closeSweepPopup, clickAndVerify, clickByText, visibleText, dismissPopups, readRewardToast, sleep };
