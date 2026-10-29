@@ -626,7 +626,13 @@ async function run() {
                     break;
                 }
                 await sleep(1500);
+                const rw = await drain.readRewardToast(page, 3000);   // 一闪而过，必须立刻抓
+                if (rw) console.log(`领奖明细：${rw}`);
                 await drain.dismissPopups(page, { log: console.log });
+                if (!rw) {
+                    const rw2 = await drain.readRewardToast(page, 1500);
+                    if (rw2) console.log(`领奖明细：${rw2}`);
+                }
                 await sleep(1500);
             }
             pageText = await getPageText(page);
