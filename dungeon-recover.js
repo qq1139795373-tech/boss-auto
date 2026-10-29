@@ -149,6 +149,9 @@ async function closeSweepPopup(page, opts = {}) {
 }
 
 // 点掉挡路的弹窗。扫荡收获只有一个「知道了」；领奖提示有「确定」（绝不点「取消」= 不领奖）
+// 关键时序（用户 2026-10-29 纠正）：奖励明细 toast 是**点完「确定」之后**才弹的，只活一两秒。
+// 而点完「确定」还要等 1.2 秒复核弹窗关没关 —— 先点再读会漏掉它。
+// 所以这里在点「确定」的同时就把抓 toast 的轮询挂上，点完直接取结果。
 async function dismissPopups(page, opts = {}) {
     const log = opts.log || (() => { });
     let n = 0;
@@ -161,7 +164,10 @@ async function dismissPopups(page, opts = {}) {
             await closeSweepPopup(page, { log });
         } else if (askClaim) {
             log('确认领奖提示（点「确定」）...');
+            const toastP = readRewardToast(page, opts.toastMs || 4000);   // 先挂上轮询
             await clickAndVerify(page, '确定', '是否领取奖励', { tries: 2 });
+            const rw = await toastP;
+            if (rw) log(`领奖明细：${rw}`);
         }
         n++;
         await sleep(800);
@@ -262,13 +268,7 @@ async function recoverDungeon(page, opts = {}) {
             break;
         }
         await sleep(1500);
-        const rw = await readRewardToast(page, 3000);   // 一闪而过，必须立刻抓
-        if (rw) log(`${tag}：领奖明细 ${rw}`);
-        await dismissPopups(page, { log });        // 关「扫荡收获」+ 确认「是否领取奖励？」
-        if (!rw) {
-            const rw2 = await readRewardToast(page, 1500);
-            if (rw2) log(`${tag}：领奖明细 ${rw2}`);
-        }
+        await dismissPopups(page, { log });        // 关「扫荡收获」→ 点「确定」并顺手抓奖励明细
         await sleep(1500);
         t = await visibleText(page);
         if (!t.includes('副本条件') || !t.includes('领取奖励')) { claimed = true; break; }
