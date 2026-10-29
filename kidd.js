@@ -435,6 +435,7 @@ async function northToHubClearing(page) {
 // 清空当前房间的怪，返回击杀数
 async function clearRoom(page, tag) {
     let kills = 0;
+    let emptyReads = 0;
     for (let attempt = 0; attempt < 15; attempt++) {
         const txt = await getPageText(page);
         const seg = viewSeg(txt);
@@ -444,7 +445,18 @@ async function clearRoom(page, tag) {
             continue;
         }
         const mobs = monstersIn(seg);
-        if (!mobs.length) return kills;
+        if (!mobs.length) {
+            // 「真空房间」和「怪还没渲染出来」必须分开。
+            // 2026-10-29 实证：东线「西库尽头」进房后第一次读就是 0 只怪，旧代码 `return kills`
+            // 立刻当空房 → 东线只记 8 间 / 24 杀（总 48/51）；同代码 10-28 同一间读到 3 只。
+            // 现在连续 3 次都读不到才认定空房（真空房多花约 4.5 秒，可接受）。
+            emptyReads++;
+            if (emptyReads >= 3) return kills;
+            console.log(`[${tag}] 房间没读到怪，等渲染（第${emptyReads}/3次）...`);
+            await sleep(1500);
+            continue;
+        }
+        emptyReads = 0;
         const before = seg.split(mobs[0]).length - 1;
         await fightOne(page, mobs[0]);
         const after = viewSeg(await getPageText(page));

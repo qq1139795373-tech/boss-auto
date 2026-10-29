@@ -1,4 +1,5 @@
 const { chromium } = require('playwright');
+const drain = require('./dungeon-recover.js');
 
 const ACCOUNT = process.env.GAME_ACCOUNT;
 const PASSWORD = process.env.GAME_PASSWORD;
@@ -1158,6 +1159,26 @@ async function beeCount(page) {
 }
 
 // 商城热卖页买 50 个寻路蜂
+// 退出商城回主界面（**所有**失败分支都必须调用）
+// 2026-10-29 coldwind8 实证：buyBees 在「没找到确认购买按钮」处直接 return false，
+// 商城页留在原地 → 随后 beeCount 找不到「包裹」入口 → parseDailyTasks 折叠区打不开
+// → 「没有可解析的每日任务」整轮 68 秒退出。前置步骤自己开的页面必须自己关。
+async function leaveMall(page) {
+    await clickExact(page, '取消', 1200);           // 关商品详情/二次确认，没弹窗时无所谓
+    await sleep(500);
+    if (!(await clickExact(page, '返回', 1500))) await closePopup(page);
+    await sleep(800);
+    let t = await getPageText(page);
+    if (t.includes('商城') || t.includes('立即购买') || t.includes('确认购买')) {
+        await page.keyboard.press('Escape');
+        await sleep(600);
+        t = await getPageText(page);
+    }
+    console.log(t.includes('当前城市') || t.includes('你看到')
+        ? '已退出商城'
+        : '退出商城未确认，页面: ' + t.replace(/\s+/g, ' ').substring(0, 80));
+}
+
 async function buyBees(page) {
     console.log('寻路蜂不足20，商城购买50个...');
     if (!(await clickText(page, '商城', 3000))) {
@@ -1168,36 +1189,40 @@ async function buyBees(page) {
     // 热卖网格里点寻路蜂卡片（叶子按文本短者优先，会命中最内层「寻路蜂」）
     if (!(await clickLeaf(page, '寻路蜂'))) {
         console.log('商城热卖里没找到寻路蜂卡片');
+        await leaveMall(page);
         return false;
     }
     await sleep(1000);
     if (!(await clickExact(page, '立即购买', 3000))) {
         console.log('没找到立即购买按钮');
+        await leaveMall(page);
         return false;
     }
     await sleep(1000);
     // 商品详情弹窗：快速购买档「50个」→「确认购买」
     if (!(await clickExact(page, '50个', 3000))) {
         console.log('快速购买没找到「50个」档位');
-        await clickExact(page, '取消', 1500);
+        await leaveMall(page);
         return false;
     }
     await sleep(500);
     if (!(await clickExact(page, '确认购买', 3000))) {
         console.log('没找到确认购买按钮');
+        await leaveMall(page);
         return false;
     }
     await sleep(500);
     if (!(await clickExact(page, '确认购买', 3000))) {
         console.log('没找到确认购买按钮');
+        await leaveMall(page);
         return false;
     }
     await sleep(1200);
     // 成功信号：页面中间短暂弹「购买成功」toast（无确认框）
     const ok = (await getPageText(page)).includes('购买成功');
     console.log(ok ? '购买成功（toast确认）' : '已点确认购买但未见「购买成功」toast，以包裹复核为准');
-    // 退出商城回主页
-    if (!(await clickExact(page, '返回', 2000))) await closePopup(page);
+    // 退出商城回主页（成功路径同样要走，否则后面读包裹/任务页全塌）
+    await leaveMall(page);
     await sleep(1000);
     return ok;
 }
@@ -1217,6 +1242,33 @@ async function ensureBee(page) {
 async function onMainPage(page) {
     const t = await getPageText(page);
     return t.includes('当前城市') || /你看到：/.test(t);
+}
+
+// 硬复位到主界面：任何前置步骤（商城/任务页/副本/玩法弹窗）留下的页面都会让后面整条链塌掉。
+// 2026-10-29 coldwind8 就是停在商城页里一直往下跑。这里逐轮尝试，失败就如实报错退出，
+// 不再「假装没事继续跑」——那样只会产出一堆看不懂的假失败。
+async function ensureMainPage(page, maxTry = 4) {
+    for (let i = 1; i <= maxTry; i++) {
+        const t = await getPageText(page);
+        if (t.includes('当前城市') || /你看到：/.test(t) || t.includes('你看到')) return true;
+
+        // 人在副本里：先走统一恢复（能扫荡就扫荡、能领奖就领奖，没得领才退本）
+        if (t.includes('副本条件') || (t.includes('退出副本') && t.includes('回到起点'))) {
+            console.log('复位：人在副本里，先尝试把副本做完...');
+            const r = await drain.recoverDungeon(page, { tag: '复位', screenshot: 'daily-dungeon-recover-fail.png' });
+            if (!r.exited) console.log('复位：副本未能退出（', r.kind, '）');
+            await sleep(2000);
+            continue;
+        }
+
+        console.log(`复位：不在主界面（第${i}/${maxTry}次），当前页面: ${t.replace(/\s+/g, ' ').substring(0, 100)}`);
+        // 商城/商品详情：先取消再返回
+        if (t.includes('商城') || t.includes('立即购买') || t.includes('确认购买')) await leaveMall(page);
+        else { await clickExact(page, '返回', 1500); await closePopup(page); }
+        await page.keyboard.press('Escape');
+        await sleep(1200);
+    }
+    return await onMainPage(page);
 }
 
 // 回到「城内主界面」（页面带「出航」「传送」链接的那一页）。
@@ -1386,6 +1438,15 @@ async function run() {
             await ensureBee(page);
         } else {
             console.log(`寻路蜂充足: ${beeN}`);
+        }
+
+        // 0.5 硬复位到主界面：寻路蜂检查/购买可能把页面留在商城，
+        // 后面 parseDailyTasks 要在主界面点「任务」入口，页面不对就必然失败（10-29 coldwind8）。
+        if (!(await ensureMainPage(page))) {
+            console.log('页面无法回到主界面，退出避免假失败');
+            await page.screenshot({ path: 'daily-mainpage-fail.png' }).catch(() => {});
+            await browser.close();
+            return;
         }
 
         // 1. 解析每日任务

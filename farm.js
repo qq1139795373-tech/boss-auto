@@ -7,6 +7,9 @@ const PASSWORD = process.env.GAME_PASSWORD;
 // 农场固定去杭州西湖打水怪
 const NAV_DEST = '杭州';
 const NAV_REGION = '东亚';
+// 刷怪时长上限（分钟）：job 的 6 小时上限会把「跑到上限」判成 failure，
+// 到点自己收尾 exit 0，红色只留给真故障。FARM_MAX_MIN=0 表示不限（旧行为）。
+const FARM_MAX_MIN = Number(process.env.FARM_MAX_MIN || 330);
 
 async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -633,6 +636,14 @@ async function run() {
         console.log('进入打怪循环（进度每60秒汇报一次）');
         while (true) {
             pageText = await getPageText(page);
+
+            // 到点主动收尾：job 的 timeout-minutes 是 360，被它砍掉时整个 run 标 failure，
+            // 于是「跑到上限」和「真故障」混成一片红（2026-10-29 00:00 波 4 个 job 全是这样）。
+            // 刷到这里就正常退出，red 只留给真问题。FARM_MAX_MIN=0 可关闭该限制。
+            if (FARM_MAX_MIN > 0 && Date.now() - loopStart >= FARM_MAX_MIN * 60000) {
+                console.log(`已刷满 ${FARM_MAX_MIN} 分钟（击杀 ${count} 次），主动收尾退出，避免撞 job 6 小时上限被判 failure`);
+                break;
+            }
 
             // 掉线自救：会话失效会退回登录页，原逻辑只点刷新，能空转几小时
             // 但掉线也可能是用户手动登录/新一波顶号，先让位 30 分钟，期间不自作主张重登抢号
