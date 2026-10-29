@@ -1,4 +1,5 @@
 const { chromium } = require('playwright');
+const drain = require('./dungeon-recover.js');
 
 const ACCOUNT = process.env.GAME_ACCOUNT;
 const PASSWORD = process.env.GAME_PASSWORD;
@@ -49,7 +50,8 @@ async function clickText(page, text, timeout = 5000) {
 }
 
 async function getPageText(page) {
-    return await page.textContent('body').catch(() => '');
+    // 只拼可见节点：textContent('body') 会把 display:none 的残留弹窗读进来（幽灵文案）
+    return await drain.visibleText(page);
 }
 
 // 截取"当前城市"到"【聊天】"之间的地图区块，用于日志观察位置变化
@@ -482,6 +484,21 @@ async function run() {
         // 再次检查
         pageText = await getPageText(page);
         console.log('关闭弹窗后前200字:', pageText.substring(0, 200));
+
+        // 卡副本自恢复：大号 0:00 波先跑炼器窟/基德，只要某一步没退本、或上一波被 cancel 时人还在本里，
+        // 这里就会带着「副本条件」页面往下走 —— 副本里既没有「出航」也没有「传送」，
+        // 导航必然失败，最后「未到达广州，跳过农场」，整波刷怪白扔。
+        // 先交给 dungeon-recover：能扫荡就扫荡、能领奖就领奖，实在没得领才退本；不在副本里时直接返回 false。
+        try {
+            const rec = await drain.recoverDungeon(page, { tag: '自恢复', screenshot: 'dungeon-recover-fail.png' });
+            if (rec.inDungeon) {
+                console.log(`自恢复：起始就在副本里（${rec.kind}），扫荡=${rec.swept} 领奖=${rec.claimed} 退本=${rec.exited}`);
+                await sleep(3000);
+                pageText = await getPageText(page);
+            }
+        } catch (e) {
+            console.log('副本自恢复异常:', e.message);
+        }
 
         // 检查是否在广州（失败不直接放弃：重载页面再试一轮，点击无响应多半能救回）
         pageText = await getPageText(page);
