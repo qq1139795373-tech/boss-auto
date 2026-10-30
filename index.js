@@ -407,13 +407,24 @@ async function getBjTime() {
     return { hour: (now.getUTCHours() + 8) % 24, min: now.getUTCMinutes() };
 }
 
+// 世界boss 开放时段（北京时间）。10-29 更新公告：攻击时间调整为 11:30-12:30。
+// 以前硬编码 12:00 开打，11:50 出门到达后要死等到 12:00，每天白扔 5~10 分钟。
+// 以后游戏再调时段，只改这两个数字即可。
+const BOSS_OPEN_MIN = 11 * 60 + 30;    // 11:30 开放
+const BOSS_CLOSE_MIN = 12 * 60 + 30;   // 12:30 关闭
+const BOSS_OPEN_TEXT = '11:30-12:30';
+function inBossWindow(h, m) {
+    const t = h * 60 + m;
+    return t >= BOSS_OPEN_MIN && t <= BOSS_CLOSE_MIN;
+}
+
 async function run() {
     const { hour, min } = await getBjTime();
     console.log(`北京时间: ${hour}:${String(min).padStart(2, '0')}`);
 
-    // 只有11:50-12:30才打boss，其他时间跳过（11:50出门，12:00开打，兼容3:50 UTC的cron触发）
-    if (!FORCE && (hour > 12 || (hour === 12 && min >= 30) || hour < 11 || (hour === 11 && min < 50))) {
-        console.log('非boss时间，跳过boss');
+    // 只有 11:30-12:30 才打boss，其他时间跳过（cron 11:50 出门也能直接开打，不再空等）
+    if (!FORCE && !inBossWindow(hour, min)) {
+        console.log(`非boss时间（开放时段 ${BOSS_OPEN_TEXT}），跳过boss`);
         return;
     }
 
@@ -491,11 +502,12 @@ async function run() {
             await sleep(2000);
         }
 
-        if (!FORCE && (hour < 12 || (hour === 12 && min === 0))) {
-            console.log('等待boss开放...');
+        // 到达太早（早于 11:30）才等待；11:30 之后到就直接开打
+        if (!FORCE && (hour * 60 + min) < BOSS_OPEN_MIN) {
+            console.log(`等待boss开放（${BOSS_OPEN_TEXT}）...`);
             while (true) {
                 const { hour: h, min: m } = await getBjTime();
-                if (h === 12 && m >= 0) break;
+                if (h * 60 + m >= BOSS_OPEN_MIN) break;
                 await sleep(10000);
             }
         }
@@ -516,7 +528,7 @@ async function run() {
 
         for (let i = 0; i < remainTimes; i++) {
             const { hour: h, min: m } = await getBjTime();
-            if (!FORCE && (h !== 12 || m >= 30)) {
+            if (!FORCE && !inBossWindow(h, m)) {
                 console.log('挑战时间结束');
                 break;
             }
@@ -558,7 +570,7 @@ async function run() {
                         break;
                     }
                     const { hour: h2, min: m2 } = await getBjTime();
-                    if (!FORCE && (h2 !== 12 || m2 >= 30)) {
+                    if (!FORCE && !inBossWindow(h2, m2)) {
                         console.log('挑战时间结束');
                         break;
                     }

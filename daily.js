@@ -778,7 +778,14 @@ async function pickAndFight(page, task) {
         return await fightMonster(page, hit);
     }
     for (const m of monsters) {
-        const drops = await monsterDrops(page, m);
+        let drops = await monsterDrops(page, m);
+        if (drops !== null && !drops.trim()) {
+            // 点到了「查看」却没读出「掉落预览」段 = 页面还没渲染完，不等于这只怪不掉东西。
+            // 10-30 boss1 铁矿石实证：同一只偷矿者连读两次结论相反（先「掉落含铁矿石」开打，
+            // 第二次读失败就判「不掉」跳过），整层直接放弃 → 读空就再读一次再下结论。
+            console.log(`  [选怪] ${m} 掉落预览没读出来，再读一次`);
+            drops = await monsterDrops(page, m);
+        }
         if (drops && drops.includes(task.target)) {
             console.log(`  [选怪] ${m} 掉落含「${task.target}」，开打`);
             return await fightMonster(page, m);
@@ -839,7 +846,6 @@ async function walkByHint(page, hint, taskName) {
 // 走图 → 杀到满 → 提交。返回 'done' | 'full-但未提交成功' | 'fail'
 async function runTaskByWalk(page, task, hint) {
     const name = task.name;
-    const drop = task.target || name;
     console.log(`[${name}] 按你告知的走法执行：${hint.city} 一路「${hint.walk.dir}」找 ${hint.monster}`);
     await backToMain(page);
     if ((await currentCity(page)) !== hint.city) {
@@ -853,8 +859,11 @@ async function runTaskByWalk(page, task, hint) {
     const cap = task.n === Infinity ? 24 : task.n * 8 + 8;
     let kills = 0;
     while (kills < cap) {
-        const r = await pickAndFight(page, { type: task.type, target: drop, name });
-        if (!r) { console.log(`[${name}] 这层没有掉${drop}的怪，停`); break; }
+        // 用户告知的 walk 里已经指明了是哪只怪掉这个材料（hint.monster），直接按怪名打。
+        // 不再读掉落预览验证 —— 10-30 boss1 铁矿石实证：同一只偷矿者第一次读「掉落含铁矿石」
+        // 开打，第二次读失败就判「不掉」跳过，整层直接放弃（走图击杀 1 只、进度停在 0/3）。
+        const r = await pickAndFight(page, { type: 'kill', target: hint.monster, name });
+        if (!r) { console.log(`[${name}] 这层没有${hint.monster}，停`); break; }
         kills++;
         if (kills % 4 === 0) {
             const lt = await openDailyList(page);
@@ -895,6 +904,8 @@ async function runTask(page, task) {
     }
     // 寻路按钮在野区也能点（10-26 用户指出 + 真机复验：野区点寻路能正常弹提示/导航），
     // 所以「找不到寻路按钮」不是位置问题，而是详情页状态/坐标点击打偏 → 先合成事件再点，最后才回城兜底
+    // 点寻路之前先记页面文本：clickExact 可能命中 display:none 的模板节点，报成功但没点中
+    const beforeXunlu = await getPageText(page);
     if (!(await clickExact(page, '寻路', 3000))) {
         // 满进度的详情页只有「提交」没有「寻路」→ 以前在这白试四轮（坐标点击/合成事件/重开详情/回城），
         // 每条浪费 30-60 秒（10-27 实证 boss2 偷盐贼·铁皮人、boss4 流浪犬·鸦片贩子各 2 条）。
@@ -944,9 +955,20 @@ async function runTask(page, task) {
     // 等自动走到野区：详情弹窗消失且页面有“你看到”
     // 城市不对会弹「只能寻路当前城市,请去再寻路吧」→ 点确定放弃该条（按城市聚合正常不会触发）
     let arrived = false;
+    let poked = false;
     for (let w = 0; w < 15; w++) {
         await sleep(1000);
         const t = await getPageText(page);
+        // 点了寻路页面却和点之前一模一样 = 那一下没生效（10-30 master 地魔刺客实证：
+        // clickExact 报成功、详情弹窗都没关，白等 15 秒后判「导路后未到达野区」）
+        // → 第 3 秒补一次合成事件点击，不重开详情也不再回城。
+        if (w === 2 && !poked && t === beforeXunlu) {
+            poked = true;
+            console.log(`[${task.name}] 点寻路后页面没变化，补一次合成事件点击`);
+            await clickLeaf(page, '寻路');
+            await sleep(1500);
+            continue;
+        }
         if (t.includes('只能寻路当前城市')) {
             console.log(`[${task.name}] 导路被拒（不在${task.city}），点确定跳过`);
             await clickExact(page, '确定', 2000);
