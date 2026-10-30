@@ -9,7 +9,10 @@ const NAV_DEST = '杭州';
 const NAV_REGION = '东亚';
 // 刷怪时长上限（分钟）：job 的 6 小时上限会把「跑到上限」判成 failure，
 // 到点自己收尾 exit 0，红色只留给真故障。FARM_MAX_MIN=0 表示不限（旧行为）。
-const FARM_MAX_MIN = Number(process.env.FARM_MAX_MIN || 330);
+// 300 而不是 330：farm 是在 Run Tasks 之后启动的，00:00 那一波任务段要跑 0:04→0:32（约 28 分钟），
+// 330+28=358 分钟再叠加启动与 index.js 就压线超过 360（10-30 实证 master 与 boss0/3/4 全被砍）。
+// 300 留 60 分钟余量，任务段再怎么拖也不会撞上限。
+const FARM_MAX_MIN = Number(process.env.FARM_MAX_MIN || 300);
 
 async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
