@@ -543,7 +543,27 @@ async function navBack(page) {
     return ok;
 }
 
+// 秘宝抽奖活动闸门。10-29 公告：「福利院及天魔残魂将在 11 月 1 号下线」，
+// 而秘宝抽奖的入口就是 城内地图→福利院→神秘机器→银贝秘藏，福利院没了入口也就没了。
+// 因此 11/1 起默认不跑：**不登录、不出航、不花铜贝、不打 ::error::**，直接说明跳过。
+// 代码完整保留 —— 这是不定期活动，官方会重新上线，届时不改逻辑只开口子：
+//   MIBAO_FORCE=1 强制跑（重开时用）／ MIBAO_FORCE=0 临时压住
+//   / 或把下面的 MIBAO_OFFLINE_AT 改成新日期。
+const MIBAO_OFFLINE_AT = Date.parse('2026-11-01T00:00:00+08:00');
+function mibaoActive() {
+    const force = String(process.env.MIBAO_FORCE || '').trim();
+    if (force === '1') return true;
+    if (force === '0') return false;
+    return Date.now() < MIBAO_OFFLINE_AT;
+}
+
 async function run() {
+    if (!mibaoActive()) {
+        log('活动已下线（10-29 公告：福利院 11/1 下线），本次跳过：不登录、不出航、不花铜贝');
+        log('代码保留；活动重开时给 MIBAO_FORCE=1 即可恢复，逻辑无需改动');
+        return;
+    }
+
     const browser = await chromium.launch({ headless: true });
     const context = await browser.newContext();
     const page = await context.newPage();
@@ -819,4 +839,4 @@ async function run() {
 // tasks.js 以 node mibao.js 独立进程启动(仍执行run)；probe 测试脚本 require 本模块时只取函数不跑流程
 if (require.main === module) run();
 
-module.exports = { sleep, getPageText, clickText, clickExact, jsClick, pickConfirm, sailFlow };
+module.exports = { sleep, getPageText, clickText, clickExact, jsClick, pickConfirm, sailFlow, mibaoActive, MIBAO_OFFLINE_AT, run };
