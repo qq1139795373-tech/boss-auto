@@ -955,53 +955,90 @@ async function runTask(page, task) {
     // 等自动走到野区：详情弹窗消失且页面有“你看到”
     // 城市不对会弹「只能寻路当前城市,请去再寻路吧」→ 点确定放弃该条（按城市聚合正常不会触发）
     let arrived = false;
-    let poked = false;
-    for (let w = 0; w < 15; w++) {
-        await sleep(1000);
-        const t = await getPageText(page);
-        // 点了寻路页面却和点之前一模一样 = 那一下没生效（10-30 master 地魔刺客实证：
-        // clickExact 报成功、详情弹窗都没关，白等 15 秒后判「导路后未到达野区」）
-        // → 第 3 秒补一次合成事件点击，不重开详情也不再回城。
-        if (w === 2 && !poked && t === beforeXunlu) {
-            poked = true;
-            console.log(`[${task.name}] 点寻路后页面没变化，补一次合成事件点击`);
-            await clickLeaf(page, '寻路');
-            await sleep(1500);
-            continue;
-        }
-        if (t.includes('只能寻路当前城市')) {
-            console.log(`[${task.name}] 导路被拒（不在${task.city}），点确定跳过`);
-            await clickExact(page, '确定', 2000);
-            await sleep(800);
+    let xunluBefore = beforeXunlu;
+    // 有界重试：15 秒没走到野区 → 关详情、重开列表、重新点行再点一次寻路（最多 2 轮，失败才多花 ~40 秒）。
+    // 10-31 三例实证（泉州·玄火洞 地火兽、泉州·丹霞山 强悍劫匪、杭州·西湖 水怪）都是「新航行到该城的
+    // 第一条任务」第一次点寻路没生效，之后直接判 fail；而同一账号重跑同样的城市同样的野区一次就过
+    // （coldwind6 地火兽、coldwind 地魔刺客均如此）→ 重开详情再点一次是最有效的恢复动作。
+    for (let attempt = 0; attempt < 2 && !arrived; attempt++) {
+        if (attempt > 0) {
+            console.log(`[${task.name}] 第一次导路 15 秒未到野区，重开详情再点一次寻路`);
             await clickExact(page, '取消', 1500);
-            return 'fail';
+            await backToMain(page);
+            await openDailyList(page);
+            let reop = false;
+            for (let r = 0; r < 3 && !reop; r++) {
+                await clickRow(page, task.rowNo, task.name);
+                await sleep(1500);
+                reop = (await getPageText(page)).includes('任务进度');
+            }
+            if (!reop) { console.log(`[${task.name}] 重开后点不开详情`); break; }
+            xunluBefore = await getPageText(page);
+            if (!(await clickExact(page, '寻路', 3000))) await clickLeaf(page, '寻路');
+            await sleep(1200);
         }
-        // 「当前任务条件没有目标地图，无法自动寻路」= 人不在任务所属的那座城（用户确认 + 任务.txt：
-        // 「每日任务每个城市都可以点开，但任务条件可能分散在不同城市」），不是"任务做不了"
-        if (t.includes('没有目标地图')) {
-            console.log(`[${task.name}] 「没有目标地图」→ 当前城市不是它的任务城市，换城市再寻路`);
-            await clickExact(page, '确定', 2000);
-            await sleep(800);
-            await clickExact(page, '取消', 1500);
-            // 不做任何自动走图/自动推断：查不到城市就如实返回 nomap 交给上层换城，全试完就记下来放着，
-            // 等用户告知该去哪座城打哪只怪（用户 10-26 定）。
-            return 'nomap';
-        }
-        // 到达野区判据：只看「你看到：」到「当前城市/【聊天】」之间那段（wildSeg，天然屏蔽聊天刷屏）。
-        // 城里那段是「你看到：传送出航」，野区那段是「你看到：经验妖灵」之类 → 用「不含出航」区分。
-        // 不能用「当前城市」或「【城内地图】」判断：野区页面同样有这两个（farm-m4 实证）。
-        const seg = wildSeg(t);
-        // 补充判据（2026-10-28 coldwind2「泉州·码头 神秘人」实证）：
-        // 有些任务点在**城内落点**（码头），出航到达后人物本身就在那儿，页面仍是城内视图、带「传送/出航」，
-        // 靠「seg 不含出航」永远判不到（白等 15 秒）。所以「你看到」段里直接出现任务名 = 已到达。
-        const nameInView = !!task.name && seg.includes(task.name);
-        if ((seg && !t.includes('任务进度') && !seg.includes('出航')) || nameInView) {
-            arrived = true;
-            break;
+        let poked = false;
+        for (let w = 0; w < 15; w++) {
+            await sleep(1000);
+            const t = await getPageText(page);
+            // 点寻路被游戏拦下（10-31 实证 3 例，全部是新航行到该城的第一个任务）。
+            // 旧判据只认「页面一字未变」，可实际是弹了提示（页面变了）→ 补点永远不触发，白等 15 秒报
+            // 「导路后未到达野区」。改成：认出拒绝文案就记原文 + 点掉；详情还开着就补一次合成事件点击。
+            if (w >= 1 && !poked) {
+                const why = t.match(/条件不足|无法自动寻路|无法寻路|不能寻路|请先[^\s，。！？]{1,24}/);
+                const stillDetail = t.includes('任务进度');
+                if (why || stillDetail) {
+                    poked = true;
+                    if (why) {
+                        console.log(`[${task.name}] 寻路被拒：${why[0]}（页面${t === xunluBefore ? '未' : '已'}变化）`);
+                        for (const wd of ['确定', '关闭']) { if (await clickExact(page, wd, 1200)) break; }
+                        await sleep(800);
+                    } else {
+                        console.log(`[${task.name}] 点寻路后详情没关（页面${t === xunluBefore ? '未' : '已'}变化），补一次合成事件点击`);
+                    }
+                    await clickLeaf(page, '寻路');
+                    await sleep(1500);
+                    continue;
+                }
+            }
+            if (t.includes('只能寻路当前城市')) {
+                console.log(`[${task.name}] 导路被拒（不在${task.city}），点确定跳过`);
+                await clickExact(page, '确定', 2000);
+                await sleep(800);
+                await clickExact(page, '取消', 1500);
+                return 'fail';
+            }
+            // 「当前任务条件没有目标地图，无法自动寻路」= 人不在任务所属的那座城（用户确认 + 任务.txt：
+            // 「每日任务每个城市都可以点开，但任务条件可能分散在不同城市」），不是"任务做不了"
+            if (t.includes('没有目标地图')) {
+                console.log(`[${task.name}] 「没有目标地图」→ 当前城市不是它的任务城市，换城市再寻路`);
+                await clickExact(page, '确定', 2000);
+                await sleep(800);
+                await clickExact(page, '取消', 1500);
+                // 不做任何自动走图/自动推断：查不到城市就如实返回 nomap 交给上层换城，全试完就记下来放着，
+                // 等用户告知该去哪座城打哪只怪（用户 10-26 定）。
+                return 'nomap';
+            }
+            // 到达野区判据：只看「你看到：」到「当前城市/【聊天】」之间那段（wildSeg，天然屏蔽聊天刷屏）。
+            // 城里那段是「你看到：传送出航」，野区那段是「你看到：经验妖灵」之类 → 用「不含出航」区分。
+            // 不能用「当前城市」或「【城内地图】」判断：野区页面同样有这两个（farm-m4 实证）。
+            const seg = wildSeg(t);
+            // 补充判据（2026-10-28 coldwind2「泉州·码头 神秘人」实证）：
+            // 有些任务点在**城内落点**（码头），出航到达后人物本身就在那儿，页面仍是城内视图、带「传送/出航」，
+            // 靠「seg 不含出航」永远判不到（白等 15 秒）。所以「你看到」段里直接出现任务名 = 已到达。
+            const nameInView = !!task.name && seg.includes(task.name);
+            if ((seg && !t.includes('任务进度') && !seg.includes('出航')) || nameInView) {
+                arrived = true;
+                break;
+            }
         }
     }
     if (!arrived) {
-        console.log(`[${task.name}] 导路后未到达野区`);
+        // 这条以前既无截图也无页面文本，10-29/10-31 两次复盘都拿不到证据（泉州两例至今说不清是
+        // 弹窗挡住还是点空）。失败必须留下现场。
+        const dump = (await getPageText(page)).replace(/\s+/g, ' ').slice(0, 300);
+        console.log(`[${task.name}] 导路后未到达野区 | 页面文本: ${dump}`);
+        await page.screenshot({ path: `daily-notarrive-${task.name}.png` }).catch(() => {});
         return 'fail';
     }
     console.log(`[${task.name}] 已到${task.area}`);
