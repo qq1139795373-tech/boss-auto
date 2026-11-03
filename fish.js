@@ -574,6 +574,58 @@ function atDockView(txt) {
     return txt.includes('出航') && txt.includes('鱼老板');
 }
 
+// 页面是否还没渲染出游戏内容（整页 reload 后 Vue 未挂载，只有 noscript 一句）
+// 注意：noscript 那句在正常页面里也一直存在（11-03 实证），所以只能以"有没有游戏特征"判断，
+// 绝不能拿 Please enable JavaScript 当空壳标志，否则永远等不到就绪
+const GAME_RENDERED_RE = /你看到|当前城市|纵横四海|鱼老板|出航/;
+function isLoadingShell(txt) {
+    if (!txt || !txt.trim()) return true;
+    return !GAME_RENDERED_RE.test(txt);
+}
+
+// 等游戏真正渲染出来再操作。返航/重进会整页重载，1~3 秒内是空壳
+async function waitGameReady(page, timeoutMs = 40000, tag = '') {
+    const t0 = Date.now();
+    let last = '';
+    while (Date.now() - t0 < timeoutMs) {
+        const t = await getPageText(page);
+        last = t;
+        if (!isLoadingShell(t) && t.trim().length > 20) {
+            const sec = ((Date.now() - t0) / 1000).toFixed(1);
+            if (sec > 1.5) console.log(`[就绪${tag ? ' ' + tag : ''}] 等了 ${sec}s 页面才渲染出来`);
+            return true;
+        }
+        await sleep(700);
+    }
+    console.log(`[就绪${tag ? ' ' + tag : ''}] 超时 ${Math.round(timeoutMs / 1000)}s，仍是空壳:`, last.replace(/\s+/g, ' ').substring(0, 120));
+    return false;
+}
+
+// 重载后回到威尼斯码头：主界面不一定有"当前城市"字样，靠城内地图→码头显式导航
+async function rebuildDock(page) {
+    for (let i = 0; i < 4; i++) {
+        let t = await getPageText(page);
+        if (atDockView(t)) return true;
+        // 公告/弹层会挡住城内地图按钮
+        if (t.includes('更新公告') || t.includes('活动公告')) {
+            await clickLeaf(page, '×', false).catch(() => {});
+            await sleep(800);
+        }
+        await jsClick(page, '城内地图');
+        await sleep(1800);
+        if (atDockView(await getPageText(page))) return true;
+        await jsClick(page, '码头');
+        await sleep(2200);
+        if (atDockView(await getPageText(page))) {
+            console.log(`[重建码头] 第${i + 1}轮导航成功`);
+            return true;
+        }
+        await page.keyboard.press('Escape').catch(() => {});
+        await sleep(1000);
+    }
+    return atDockView(await getPageText(page));
+}
+
 // 回到码头视图：返回箭头(goBack) → 兜底刷新重进
 async function backToDock(page) {
     for (let i = 0; i < 3; i++) {
@@ -601,6 +653,10 @@ async function ensureDock(page) {
     for (let i = 0; i < 6; i++) {
         let t = await getPageText(page);
         if (atDockView(t)) return true;
+        if (isLoadingShell(t)) {
+            if (!(await waitGameReady(page, 30000, 'ensureDock'))) return false;
+            continue;
+        }
         if (t.includes(`当前城市：${NAV_DEST}`)) {
             await jsClick(page, '码头');
             await sleep(2000);
@@ -610,6 +666,8 @@ async function ensureDock(page) {
             await sleep(2000);
             await jsClick(page, '码头');
             await sleep(2000);
+        } else if (await rebuildDock(page)) {
+            return true;
         } else {
             return false;
         }
@@ -740,23 +798,35 @@ async function openBoss(page) {
         if (attempt > 1) {
             await page.keyboard.press('Escape');
             await sleep(1000);
-            await ensureDock(page);
+        }
+        // 返航/重载后先等游戏渲染完：空壳上点鱼老板必然点空（11-02 boss(3) 三次全栽在这）
+        if (!(await waitGameReady(page, attempt === 1 ? 45000 : 20000, `openBoss#${attempt}`))) {
+            console.log(`[openBoss#${attempt}] 页面一直没渲染，刷新重试`);
+            await page.reload().catch(() => {});
+            await sleep(3000);
+            await waitGameReady(page, 40000, `openBoss#${attempt}-reload`);
+        }
+        // 不在码头（重载常回主界面）就先导航回码头，别对着地图点"鱼老板"
+        if (!atDockView(await getPageText(page))) {
+            if (!(await ensureDock(page))) await rebuildDock(page);
         }
         // 查包裹的滚动可能把页面停在中间，鱼老板在视口外时force点击会点空：先归位再点
         await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
         const el = page.getByText('鱼老板', { exact: false }).first();
-        await el.scrollIntoViewIfNeeded().catch(() => {});
+        await el.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {});
         await sleep(400);
         if (!(await clickText(page, '鱼老板', 3000))) {
             await jsClick(page, '鱼老板');
         }
-        // 高峰期服务器响应慢，固定等2秒不够：轮询最多6秒等购买鱼饵出现
-        for (let w = 0; w < 6; w++) {
+        // 高峰期服务器响应慢，固定等2秒不够：轮询最多8秒等鱼老板页真正出现
+        for (let w = 0; w < 8; w++) {
             await sleep(1000);
-            if ((await getPageText(page)).includes('购买鱼饵')) return true;
+            const t = await getPageText(page);
+            if (t.includes('购买鱼饵') || t.includes('出售鱼')) return true;
         }
         const t = await getPageText(page);
-        console.log(`第${attempt}次未打开鱼老板页:`, t.substring(0, 100));
+        console.log(`第${attempt}次未打开鱼老板页:`, t.replace(/\s+/g, ' ').substring(0, 150));
+        await page.screenshot({ path: `fish-boss-open-${attempt}.png` }).catch(() => {});
     }
     console.log('ERROR: 鱼老板页3次未打开');
     console.log('::error::钓鱼：鱼老板页3次未打开');
@@ -1281,6 +1351,51 @@ async function run() {
         await exitDungeonIfInside(page);
         pageText = await getPageText(page);
 
+        // 只卖鱼模式（FISH_SELL_ONLY=1）：补卖没卖出去的鱼，不买饵、不出航、不钓鱼
+        if (process.env.FISH_SELL_ONLY === '1') {
+            console.log('=== 只卖鱼模式：不买饵、不出航、不钓鱼，只把包裹里的鱼卖掉 ===');
+            await waitGameReady(page, 60000, '只卖鱼');
+            pageText = await getPageText(page);
+            if (!pageText.includes(`当前城市：${NAV_DEST}`)) {
+                console.log(`当前不在${NAV_DEST}，直接传送兜底...`);
+                await teleportToDest(page);
+                await waitGameReady(page, 60000, '只卖鱼-传送后');
+            }
+            let dockOk = await ensureDock(page);
+            if (!dockOk) {
+                console.log('未进入码头，尝试重建码头视图');
+                dockOk = await rebuildDock(page);
+            }
+            if (!dockOk) {
+                console.log('ERROR: 未进入威尼斯码头，无法卖鱼');
+                console.log('::error::只卖鱼：未到威尼斯码头');
+                await page.screenshot({ path: 'fish-sellonly-nodock.png' }).catch(() => {});
+                await browser.close();
+                return;
+            }
+            let ok = await openBoss(page);
+            if (!ok) {
+                console.log('鱼老板页打不开，重新加载后再试一次');
+                await page.reload().catch(() => {});
+                await sleep(4000);
+                await waitGameReady(page, 60000, '只卖鱼重载');
+                await ensureDock(page);
+                ok = await openBoss(page);
+            }
+            if (!ok) {
+                console.log('::error::只卖鱼：鱼老板页打不开，鱼还在包裹里');
+                await browser.close();
+                return;
+            }
+            const sold = await sellAll(page);
+            await page.screenshot({ path: 'fish-sellonly.png' }).catch(() => {});
+            await backToDock(page).catch(() => {});
+            console.log(`只卖鱼完成: 卖鱼${sold ? '全部卖完' : '仍有剩余'} | 结束于码头=${atDockView(await getPageText(page))}`);
+            if (!sold) console.log('::error::只卖鱼：包裹仍有剩鱼');
+            await browser.close();
+            return;
+        }
+
         // 1. 到威尼斯（失败不直接放弃：重载页面再试一轮，点击无响应多半能救回）
         if (pageText.includes(`当前城市：${NAV_DEST}`)) {
             console.log(`已在${NAV_DEST}`);
@@ -1401,13 +1516,26 @@ async function run() {
         }
 
         // 5. 卖鱼
+        // 返航瞬间页面会整页重载（noscript 空壳），先等渲染稳定再判码头，否则必然点空
+        await waitGameReady(page, 45000, '卖鱼');
         if (!(await ensureDock(page))) {
             console.log('返航后未见码头视图，退出');
             await page.screenshot({ path: 'fish-dock2-fail.png' }).catch(() => {});
             await browser.close();
             return;
         }
-        if (!(await openBoss(page))) {
+        let bossOk = await openBoss(page);
+        if (!bossOk) {
+            // 兜底：彻底重载一次再来，能救回"只剩鱼没卖"的号
+            console.log('卖鱼: 鱼老板页打不开，重新加载页面后再试一次');
+            await page.reload().catch(() => {});
+            await sleep(4000);
+            await waitGameReady(page, 45000, '卖鱼重载');
+            await ensureDock(page);
+            bossOk = await openBoss(page);
+        }
+        if (!bossOk) {
+            console.log('::error::钓鱼：鱼还在包裹里（鱼老板页始终打不开）');
             await browser.close();
             return;
         }
@@ -1432,5 +1560,6 @@ if (require.main === module) run();
 module.exports = {
     sleep, gotoGame, getPageText, clickText, clickLeaf, clickExact, jsClick,
     pickConfirm, sailFlow, sailFailReason, atDockView, backToDock, ensureDock, getBaitStock, openBoss,
-    parseBossSilver, exitShanzhai, sellDurian,
+    parseBossSilver, exitShanzhai, sellDurian, sellAll,
+    isLoadingShell, waitGameReady, rebuildDock,
 };
