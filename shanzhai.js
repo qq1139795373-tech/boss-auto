@@ -345,20 +345,80 @@ async function plantAll(page) {
     return true;
 }
 
-async function doWater(page) {
-    let ok = await clickLeaf(page, '一键浇水');
-    if (!ok) ok = await clickText(page, '一键浇水', 3000);
-    if (!ok) ok = await jsClick(page, '一键浇水');
-    console.log(`[浇水] 点击=${ok}`);
-    const toast = await grabToast(page, ['一键浇水完成', '浇水成功', '没有可浇水', '请先播种', '暂无可浇水']);
-    console.log(`[浇水] ${toast || '未捕获提示'}`);
-    if (!toast) {
-        await page.screenshot({ path: 'shanzhai-water-fail.png' }).catch(() => {});
+// 读地块「生长 X时Y分」的剩余分钟（取最小值）。
+// 兼容「1天0时」这种跨天写法：榴莲基础 24h 未浇水时可能直接显示天。
+// 读不到（已成熟显示「可收 剩N」/ 页面没渲染）返回 null。
+async function readGrowMinutes(page) {
+    for (let i = 1; i <= 3; i++) {
         const t = await getPageText(page);
-        const i = t.indexOf('浇');
-        if (i >= 0) console.log('[浇水] 页面含浇字上下文:', t.substring(Math.max(0, i - 30), i + 50).replace(/\s+/g, ' '));
+        const re = /生长\s*(?:(\d+)\s*天)?\s*(\d+)\s*时\s*(?:(\d+)\s*分)?/g;
+        const mins = [];
+        let m;
+        while ((m = re.exec(t)) !== null) {
+            mins.push((+(m[1] || 0)) * 1440 + (+m[2]) * 60 + (+(m[3] || 0)));
+        }
+        if (mins.length) return Math.min(...mins);
+        await sleep(1200);
     }
-    await sleep(1500);
+    return null;
+}
+
+function fmtMin(min) {
+    if (min === null || min === undefined) return '未知';
+    const d = Math.floor(min / 1440);
+    const h = Math.floor((min % 1440) / 60);
+    const mi = min % 60;
+    return (d ? `${d}天` : '') + `${h}时${mi}分`;
+}
+
+async function doWater(page) {
+    // ★ 浇水会把榴莲成熟时间从 24h 压到约 21h35m（实测缩短 2h25m）。
+    // 这一步没浇上的话，次日 18:00 会差几分钟收不到 → 收菜顺延一天，
+    // 所以浇完必须回读地块剩余时间，确认真的缩短了，不行就再浇一次。
+    // 参照：2026-11-04 实测 cw0，播种 19:59 + 浇水，20:22 显示「生长 21时12分」。
+    let toast = null;
+    for (let round = 1; round <= 2; round++) {
+        const before = await readGrowMinutes(page);
+        let ok = await clickLeaf(page, '一键浇水');
+        if (!ok) ok = await clickText(page, '一键浇水', 3000);
+        if (!ok) ok = await jsClick(page, '一键浇水');
+        console.log(`[浇水] 第${round}轮 点击=${ok}`);
+        toast = await grabToast(page, ['一键浇水完成', '浇水成功', '没有可浇水', '请先播种', '暂无可浇水']);
+        console.log(`[浇水] 第${round}轮 ${toast || '未捕获提示'}`);
+        if (!toast) {
+            await page.screenshot({ path: 'shanzhai-water-fail.png' }).catch(() => {});
+            const t = await getPageText(page);
+            const i = t.indexOf('浇');
+            if (i >= 0) console.log('[浇水] 页面含浇字上下文:', t.substring(Math.max(0, i - 30), i + 50).replace(/\s+/g, ' '));
+        }
+        await sleep(1500);
+
+        // 本来就没东西可浇（今天已浇过 / 没播种）→ 不用校验，也不算失败
+        if (toast && /没有可浇水|暂无可浇水|请先播种/.test(toast)) {
+            console.log('[浇水] 提示无需浇水，跳过校验');
+            break;
+        }
+
+        const after = await readGrowMinutes(page);
+        if (before === null || after === null) {
+            console.log(`[浇水] 校验跳过（读不到生长时间 before=${fmtMin(before)} after=${fmtMin(after)}，多半已成熟）`);
+            break;
+        }
+        // 自然流逝也会让数字变小，所以只有缩短幅度接近「浇水收益」才算生效
+        const shrunk = before - after;
+        if (shrunk >= 60) {
+            console.log(`[浇水] 校验通过: ${fmtMin(before)} → ${fmtMin(after)}，缩短 ${fmtMin(Math.max(shrunk, 0))}`);
+            break;
+        }
+        console.log(`[浇水] 校验未通过: ${fmtMin(before)} → ${fmtMin(after)}（只少 ${shrunk} 分，浇水应缩短约 2时25分）`);
+        if (round < 2) {
+            console.log('[浇水] 重试一次');
+        } else {
+            // 用 warning 而不是 error：这是「可能顺延一天」，不该把整个 job 判失败
+            console.log('::warning::山寨农场: 浇水未生效（地块剩余时间未缩短），明天收菜可能顺延一天');
+            await page.screenshot({ path: 'shanzhai-water-noeffect.png' }).catch(() => {});
+        }
+    }
     return toast;
 }
 
@@ -940,4 +1000,9 @@ async function run() {
     }
 }
 
-run();
+// 直接运行才走主流程；被 require 时只导出函数供单测使用
+if (require.main === module) {
+    run();
+} else {
+    module.exports = { doWater, readGrowMinutes, fmtMin };
+}
