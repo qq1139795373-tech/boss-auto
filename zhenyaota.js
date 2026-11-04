@@ -367,8 +367,16 @@ function pageState(txt, ignoreBattle = false) {
     //   结果第 1 层就跑去点领取结算 → 白扔一局。
     //   真结算页的文案是「挑战结束，请领取结算」（带逗号），且不会再出现「挑战本层」按钮。
     const hasFloorBtn = txt.includes('挑战本层');
-    if (!hasFloorBtn && /挑战结束[，,]/.test(txt) && txt.includes('领取结算')) return 'end';
-    if (/三选一/.test(txt) && /增益/.test(txt)) return 'buff';
+    // ★★ 坑（2026-11-04 CI 实证 coldwind1 第10层 / coldwind2 第20层）：
+    //   「快速碾压」推完 4 层落在 5 的倍数层时，页面进入**增益待选的中间态**——
+    //   同一屏同时出现「请选择本层增益」「碾压中…」「本局待领取奖励…领取结算」。
+    //   旧逻辑见「领取结算」就判 end → 4 次去点被增益弹层盖住的领取结算全部点空，
+    //   报 claim-fail 收工，实际还剩二三十层没打（一局空扔）。
+    //   这一态必须先判 buff：增益不选完，碾压不会继续，结算按钮也点不到。
+    //   真结束页是「挑战结束，请领取结算」，不会带「碾压中」「请选择本层增益」。
+    const buffPending = /碾压中|请选择本层增益|请选择增益/.test(txt);
+    if (!hasFloorBtn && /挑战结束[，,]/.test(txt) && txt.includes('领取结算') && !buffPending) return 'end';
+    if ((/三选一/.test(txt) && /增益/.test(txt)) || buffPending) return 'buff';
     // 实际文案是「战胜了 第29层·机关怪兽」——"了"和"第"之间**有空格**，旧正则 /战胜了第/ 匹配不到，
     // 2026-11-02 coldwind2 第 29 层就因此被判成 floor，对着战胜弹窗点了 40 秒「挑战本层」后放弃。
     if (/战胜了\s*第\s*\d+\s*层/.test(txt) || (/战胜了/.test(txt) && txt.includes('继续'))) return 'won';
@@ -391,7 +399,7 @@ function pageState(txt, ignoreBattle = false) {
     if (txt.includes('确认开始')) return 'confirm';
     if (/第\s*\d+\s*回合/.test(txt)) return 'battle';
     if (hasFloorBtn) return 'floor';
-    if (!hasFloorBtn && txt.includes('领取结算')) return 'end';   // 兜底
+    if (!hasFloorBtn && txt.includes('领取结算') && !buffPending) return 'end';   // 兜底
     if (txt.includes('开始挑战') || txt.includes('继续挑战')) return 'ready';
     if (txt.includes('进入镇妖塔')) return 'lobby';   // 还在泉州主页面
     return 'unknown';
@@ -807,6 +815,7 @@ async function climbTower(page, attr = {}) {
     let lastAtkOkAt = 0, battleDumped = false;   // 战斗停摆取证用
     let lastState = '';
     let floorStuckSince = 0, floorNudged = false;   // 层间页点不动时的自愈
+    let buffEmptySince = 0;                         // 增益待选但读不到卡时的自愈
     let unknownSince = 0, unknownLogged = false;   // 认不出页面持续多久（城里聊天会滚动，不能靠文本变化判卡住）
     let result = 'unknown';
 
@@ -856,6 +865,12 @@ async function climbTower(page, attr = {}) {
             if (c.ok) {
                 log(`领取结算成功（第${c.tries}次 / ${c.way}）：待领取奖励已清空`);
                 result = 'end';
+            } else if (c.mid) {
+                // 页面还在增益待选，说明这一局没结束（pageState 已修，理论上到不了这里）。
+                // 不打断本局，回主循环重新判状态，免得把能继续打的局当成结束扔掉。
+                log('★ 判断为未结束（增益待选），回主循环继续');
+                floorStuckSince = 0; floorNudged = false;
+                continue;
             } else {
                 log('★ 领取结算失败：奖励仍挂在塔里。本局保留残局，下次进来会先结算（不再谎报成功）');
                 await dumpStuck(page, 'claim-fail');
@@ -868,10 +883,22 @@ async function climbTower(page, attr = {}) {
         if (s === 'buff') {
             const cards = await readBuffCards(page);
             if (cards.length < 2) {
+                // 碾压中/增益弹层刚出现时卡还没渲染，正常几百毫秒就好；
+                // 但若是「碾压中」卡死不散（页面残留），不能无限等：20 秒兜底退出，
+                // 保留残局（奖励还在塔里，下次进来先结算），绝不在这里误点「领取结算」。
+                if (!buffEmptySince) buffEmptySince = Date.now();
+                if (Date.now() - buffEmptySince > 20000) {
+                    const t2 = await getPageText(page);
+                    log(`增益卡 20 秒仍读不到，页面文本: ${t2.substring(0, 120)}`);
+                    await dumpStuck(page, 'buff-empty');
+                    result = 'stuck';
+                    break;
+                }
                 log(`增益弹窗读到 ${cards.length} 张卡，等一下重读`);
                 await sleep(600);
                 continue;
             }
+            buffEmptySince = 0;
             const pick = chooseCard(cards, st);
             const show = cards.map(c => `${c.name}+${c.value}%(品质${c.quality})`).join(' / ');
             log(`[增益] 第${lastFloor}层 三选一: ${show} → 选 ${pick.c.name}+${pick.c.value}%(品质${pick.c.quality})，理由=${pick.why}`);
@@ -1168,6 +1195,13 @@ async function confirmClaimPopup(page) {
 async function claimSettlement(page) {
     let confirms = 0;
     for (let i = 1; i <= 4; i++) {
+        // ⓿ 安全闸：页面还有「增益待选 / 碾压中」时绝不点「领取结算」——
+        //   11-04 CI 两次 claim-fail 就是在这个态上连点 4 次全部点空（被增益弹层盖住）。
+        const pre = await getPageText(page);
+        if (/请选择本层增益|请选择增益|碾压中/.test(pre)) {
+            log('页面还有增益待选/碾压进行中，先不点领取结算');
+            return { ok: false, tries: i - 1, confirms, mid: true };
+        }
         // ① 已经在确认框上（上一轮点完确认框才弹出来）：直接点确定
         if (await confirmClaimPopup(page)) {
             confirms++;
