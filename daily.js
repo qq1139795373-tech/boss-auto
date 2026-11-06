@@ -223,6 +223,38 @@ async function closePopup(page) {
     await sleep(1000);
 }
 
+// 任务详情弹窗（「前往XX」标题 + 任务介绍 + 任务要求 + 取消/寻路两个按钮）
+// 它挂在自定义弹层上（不在 uni-page-head 里），backToMain 的 ✕ 和 Escape 都关不掉，
+// 会整块盖住出航面板左侧的海域标签栏。
+// 11-06 coldwind1 实证：三次「海域标签「非洲」没点到」→ 三次「未看到亚特兰蒂斯出航确认框」
+// → 传送兜底「未检测到到达」→ 整项任务判「到不了城市」作废。
+function taskDetailOpen(txt) {
+    return txt.includes('任务介绍') && txt.includes('任务要求');
+}
+
+async function hasRegionBar(page) {
+    return await page.evaluate(() => !!document.querySelector('.region-bar')).catch(() => false);
+}
+
+async function closeTaskDetail(page) {
+    for (let i = 0; i < 3; i++) {
+        const t = await getPageText(page);
+        if (!taskDetailOpen(t)) return true;
+        if (i === 0) console.log('  任务详情弹窗挡着，先关掉再继续...');
+        // 「取消」优先：合成事件先试（uni-app 的 tap），不行再按文本精确点
+        let ok = await clickLeaf(page, '取消');
+        if (!ok) ok = await clickExact(page, '取消', 1500);
+        await sleep(1200);
+        if (!taskDetailOpen(await getPageText(page))) return true;
+        // 没有取消按钮的变体：点空白 + Escape
+        await closePopup(page);
+        await sleep(800);
+    }
+    const still = taskDetailOpen(await getPageText(page));
+    if (still) console.log('  任务详情弹窗连点 3 轮仍未关掉，继续尝试（可能仍会失败）');
+    return !still;
+}
+
 async function currentCity(page) {
     const m = (await getPageText(page)).match(/当前城市[：:]\s*([\u4e00-\u9fa5]{2,6})/);
     return m ? m[1] : null;
@@ -251,6 +283,7 @@ async function waitSailing(page, sec) {
 async function sailTo(page, dest) {
     SAIL_FAIL = '';
     await backToMain(page); // 任务页/弹窗残留会让出航面板打不开
+    await closeTaskDetail(page); // 任务详情弹窗会盖住海域标签栏（11-06 cw1 实证）
     // 已在目标城市：出航列表不列当前城市，硬选必然失败
     const preSail = await getPageText(page);
     if (!preSail.includes('停止自动航行') && !preSail.includes('剩余距离') && preSail.includes(`当前城市：${dest}`)) {
@@ -280,6 +313,24 @@ async function sailTo(page, dest) {
             await clickText(page, '出航');
         }
         await sleep(2000);
+        // 面板没打开（最常见原因：任务详情弹窗盖着）→ 关弹窗再开一次，
+        // 别在面板不存在的情况下硬点海域标签（点了也是空的，还会连累传送兜底）
+        if (!(await hasRegionBar(page))) {
+            console.log(`第${round}轮：出航面板没打开，关弹窗后重开...`);
+            await closeTaskDetail(page);
+            await page.mouse.click(10, 10);
+            await page.keyboard.press('Escape');
+            await sleep(600);
+            if (!(await clickText(page, '出航', 2000))) {
+                await clickText(page, '城内地图');
+                await sleep(2000);
+                await clickText(page, '码头');
+                await sleep(3000);
+                await clickText(page, '出航');
+            }
+            await sleep(2000);
+            if (!(await hasRegionBar(page))) console.log(`第${round}轮：出航面板仍打不开`);
+        }
         let regionNoMap = false;
         for (const r of regions) {
             // 地区栏横向滚动，最右「新大陆」需横滚才露出来
@@ -1702,6 +1753,7 @@ module.exports = {
     openDailyList, parseDailyTasks, clickRow, atCity, onMainPage, backToMain, backToCity,
     selfCheck, tryClaim, runTask, listRowTag, submitBtnPos,
     locateTask, MANUAL_HINTS,
+    closeTaskDetail, taskDetailOpen, hasRegionBar,
     // 下面几个只为探针/手动补跑导出（daily.js 自身流程不依赖外部调用）
     readTaskDetail, listMonsters, monsterDrops, fightMonster, pickAndFight, wildSeg,
 };
