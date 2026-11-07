@@ -1750,6 +1750,7 @@ if (require.main === module) run();
 module.exports = {
     sleep, gotoGame, getPageText, clickText, clickLeaf, clickExact,
     selectRegion, sailTo, sailFailReason, currentCity,
+    teleportToDest,
     openDailyList, parseDailyTasks, clickRow, atCity, onMainPage, backToMain, backToCity,
     selfCheck, tryClaim, runTask, listRowTag, submitBtnPos,
     locateTask, MANUAL_HINTS,

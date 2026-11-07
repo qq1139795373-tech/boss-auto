@@ -3,6 +3,8 @@ const { chromium } = require('playwright');
 const { visibleText } = require('./dungeon-recover.js');
 // 复用秘宝的出航/选海域逻辑（同一套「出航→选区域→点目的地→等到达」）
 const mb = require('./mibao.js');
+// 传送兜底（城市参数化，daily 里已验证）
+const daily = require('./daily.js');
 // 副本内自恢复（先扫荡/领奖再退本），和 mibao/daily 共用同一套
 const drain = require('./dungeon-recover.js');
 
@@ -1270,7 +1272,18 @@ async function run() {
         let t = await getPageText(page);
         if (!t.includes(`当前城市：${NAV_DEST}`)) {
             log(`当前不在${NAV_DEST}，出航前往...`);
-            const ok = await mb.sailFlow(page, NAV_DEST, NAV_REGION);
+            let ok = await mb.sailFlow(page, NAV_DEST, NAV_REGION);
+            // ★ 跨洋航程 5 分钟走不完（11-07 cw0 实测：马赛→泉州，5 分钟后船仍在海上，
+            //   截图剩余距离 2.5/4.5）。sailFlow 的 80 轮是短途上限，且它开头就判「已在航行中
+            //   → 跳过出航选择直接等待」，所以再调一次等于在原航线上续等 5 分钟，不会重新选目的地。
+            if (!ok) {
+                log('首轮航行 5 分钟未到达（跨洋航程偏长），船仍在海上 → 续等一轮...');
+                ok = await mb.sailFlow(page, NAV_DEST, NAV_REGION);
+            }
+            if (!ok) {
+                log('续等仍未到达，走传送兜底...');
+                ok = await daily.teleportToDest(page, NAV_DEST);
+            }
             if (!ok) {
                 await fail(page, `出航到${NAV_DEST}失败，镇妖塔已跳过`, 'zhenyaota-nav-fail.png');
                 return;
