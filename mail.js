@@ -127,15 +127,52 @@ async function scrollMailToBottom(page) {
     return (await getPageText(page)).includes('已加载全部数据');
 }
 
-// 领取所有：点按钮 → 等确认弹窗(必弹) → 精确点「确定」→ 等弹窗关闭，返回 {ok, why?, t}
-async function claimAll(page) {
-    if (!(await clickText(page, '领取所有', 4000))) return { ok: false, why: '邮件页未见「领取所有」按钮' };
-    let t = '';
-    for (let i = 0; i < 5; i++) {
-        await sleep(1500);
-        t = await getPageText(page);
-        if (t.includes('确定要领取所有未领邮件奖励')) break;
+// 点「领取所有」。11-08 coldwind6：getByText('领取所有', exact:false).first() 会命中包裹
+// 容器（非按钮），click 看似成功但事件没落到按钮上，确认框永远不弹。改成先按文本找
+// 叶子节点、用真实鼠标坐标点（uni-app 按钮只认这个），找不到才退回 getByText。
+async function clickClaimAll(page) {
+    const pt = await page.evaluate(() => {
+        const els = [...document.querySelectorAll('body *')].filter(el => {
+            if (el.children.length !== 0) return false;
+            if ((el.textContent || '').trim() !== '领取所有') return false;
+            const r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+        });
+        if (!els.length) return null;
+        const r = els[0].getBoundingClientRect();
+        return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    }).catch(() => null);
+    if (pt) {
+        await page.mouse.click(pt.x, pt.y).catch(() => {});
+        await sleep(1200);
+        return true;
     }
+    return await clickText(page, '领取所有', 4000);
+}
+
+// 领取所有：点按钮 → 等确认弹窗(必弹) → 精确点「确定」→ 等弹窗关闭，返回 {ok, why?, note?, t}
+// 点完只会有三种结果：① 弹确认框 ② toast「暂无可领取的奖励」（列表里那些未读未领其实没奖励）
+// ③ 什么都没有（点击被吞）→ 补点一次，仍无才判失败
+async function claimAll(page) {
+    if (!(await clickClaimAll(page))) return { ok: false, why: '邮件页未见「领取所有」按钮' };
+    let t = '';
+    let noReward = false;
+    for (let tryClick = 1; tryClick <= 2; tryClick++) {
+        let sawDialog = false, sawToast = false;
+        for (let i = 0; i < 5; i++) {
+            await sleep(1000);
+            t = await getPageText(page);
+            if (t.includes('确定要领取所有未领邮件奖励')) { sawDialog = true; break; }
+            if (t.includes('暂无可领取的奖励')) { sawToast = true; break; }
+        }
+        if (sawDialog) break;
+        if (sawToast) { noReward = true; break; }
+        if (tryClick === 1) {
+            log('点「领取所有」后既无确认框也无提示，补点一次');
+            await clickClaimAll(page);
+        }
+    }
+    if (noReward) return { ok: true, note: '暂无可领取的奖励', t };
     if (!t.includes('确定要领取所有未领邮件奖励')) return { ok: false, why: '点「领取所有」后未见确认弹窗', t };
     // 精确匹配按钮「确定」（弹窗正文也含“确定”二字，非精确会点到正文）
     if (!(await clickExact(page, '确定', 4000))) return { ok: false, why: '确认弹窗内未找到「确定」按钮', t };
@@ -273,6 +310,7 @@ async function run() {
 
             // 6. 滚到底核对：仍有未读未领就补领（最多3次核对），确保不遗漏
             let verified = false;
+            let noReward = false;
             for (let attempt = 0; attempt < 3; attempt++) {
                 await scrollMailToBottom(page);
                 t = await getPageText(page);
@@ -288,9 +326,17 @@ async function run() {
                     break;
                 }
                 logToast(r.t);
+                // 游戏自己明确回「暂无可领取的奖励」：那些「未读未领」就是没有奖励的邮件，
+                // 再补领也是同样结果，核对该收工而不是报错（11-08 coldwind6 遇到的形态）。
+                if (r.note) {
+                    noReward = true;
+                    break;
+                }
             }
             if (verified) {
                 log('核对完成：无「未读未领」（已读已领/未读正常，未读=无奖励邮件忽略）');
+            } else if (noReward) {
+                log('核对：游戏提示「暂无可领取的奖励」，残留「未读未领」按无奖励邮件忽略');
             } else {
                 await fail(page, '领取后核对仍有「未读未领」邮件', 'mail-verify-fail.png');
             }

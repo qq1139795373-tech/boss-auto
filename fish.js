@@ -1076,10 +1076,25 @@ async function departForFishing(page) {
         await page.screenshot({ path: 'fish-depart-fail.png' }).catch(() => {});
         return false;
     }
-    await clickExact(page, '立即出发', 3000);
-    await sleep(2000);
-    const t = await getPageText(page);
-    if (!t.includes('航行中') && !t.includes('剩余距离')) {
+    // 11-08 coldwind8：点「立即出发」后只等 2 秒就判失败，整项钓鱼 0 竿。
+    // 实际原因有两类：① uni-app 按钮偶发吞点击（点了没反应）② 页面重载后渲染慢，
+    // 2 秒时「航行中/剩余距离」还没出来。现在改成：点一次 → 最多轮询 8 秒；
+    // 若期间发现还停在出航面板（仍能看到「立即出发」），立刻补点一次，最多 3 次。
+    let sailing = false;
+    for (let tryClick = 1; tryClick <= 3 && !sailing; tryClick++) {
+        if (tryClick > 1) console.log(`「立即出发」第${tryClick}次点击(上次没进航行)...`);
+        await clickExact(page, '立即出发', 3000);
+        for (let i = 0; i < 14; i++) {
+            await sleep(600);
+            const t = await getPageText(page);
+            if (t.includes('航行中') || t.includes('剩余距离')) { sailing = true; break; }
+            // 前 3 秒给页面渲染时间；之后若出航面板还挂着（仍有「立即出发」）就是点击被吞，
+            // 不再干等，直接回去补点。
+            if (i >= 4 && t.includes('立即出发')) break;
+        }
+    }
+    if (!sailing) {
+        const t = await getPageText(page);
         console.log('未进入航行中:', t.substring(0, 150));
         await page.screenshot({ path: 'fish-sailing-fail.png' }).catch(() => {});
         return false;
@@ -1500,8 +1515,31 @@ async function run() {
             console.log('买饵完成，回到码头');
         }
 
-        // 3. 出航马赛开钓
-        if (!(await departForFishing(page))) {
+        // 3. 出航马赛开钓（11-08 起失败不再直接放弃：重载页面回到码头再出航，最多 3 轮）
+        let departed = await departForFishing(page);
+        for (let round = 2; round <= 3 && !departed; round++) {
+            // 重载会打断航行，先复查一次：万一刚才只是判定慢半拍、船已经在海上，
+            // 直接接着钓，别把已出发的船重载回来。
+            const nowT = await getPageText(page);
+            if (nowT.includes('航行中') || nowT.includes('剩余距离')) {
+                console.log('复查发现已在航行中（上一次判定慢了半拍），继续钓鱼');
+                departed = true;
+                break;
+            }
+            console.log(`出航失败，第${round}/3轮重试：重载页面 → 回码头 → 再出航`);
+            await page.screenshot({ path: `fish-depart-retry${round}.png` }).catch(() => {});
+            await page.reload().catch(() => {});
+            await sleep(4000);
+            await waitGameReady(page, 60000, '出航重试');
+            if (!(await ensureDock(page))) {
+                console.log('重试时未回到码头，继续下一轮');
+                continue;
+            }
+            departed = await departForFishing(page);
+        }
+        if (!departed) {
+            console.log('ERROR: 3 轮均未进入航行，本次钓鱼放弃');
+            console.log('::error::钓鱼：出航 3 轮均未进入航行中，0竿');
             await browser.close();
             return;
         }
