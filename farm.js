@@ -4,8 +4,8 @@ const drain = require('./dungeon-recover.js');
 
 const ACCOUNT = process.env.GAME_ACCOUNT;
 const PASSWORD = process.env.GAME_PASSWORD;
-// 农场固定去杭州西湖打水怪
-const NAV_DEST = '杭州';
+// 农场固定去广州沙滩打经验妖灵（11-09 起小号也走广州，不再去杭州西湖）
+const NAV_DEST = '广州';
 const NAV_REGION = '东亚';
 // 刷怪时长上限（分钟）：job 的 6 小时上限会把「跑到上限」判成 failure，
 // 到点自己收尾 exit 0，红色只留给真故障。FARM_MAX_MIN=0 表示不限（旧行为）。
@@ -218,7 +218,7 @@ async function sailFlow(page, rounds = 200) {
         console.log('航行中...');
     }
 
-    // 旧上限 80 轮≈4 分钟，跨海域（杭州/东亚→远港）走不完 → 默认 200 轮≈10 分钟
+    // 旧上限 80 轮≈4 分钟，跨海域（大阪→广州）走不完 → 默认 200 轮≈10 分钟
     for (let w = 0; w < rounds; w++) {
         await sleep(3000);
         const txt = await getPageText(page);
@@ -464,60 +464,60 @@ async function relogin(page) {
     return true;
 }
 
-// 走到西湖（杭州城内：西城门 -> 龙井村 -> 西湖），失败返回 false
-async function gotoXihu(page) {
-    // 导航到西湖：西城门 -> 龙井村 -> 西湖（手机手动验证过的路径）
-    // 到达西城门的标志：状态行出现"西：龙井村"
-    console.log('导航到西湖...');
+// 走到沙滩（广州城内：东城门 -> 沙滩294 -> 沙滩），失败返回 false
+async function gotoBeach(page) {
+    // 导航到沙滩：东城门 -> 沙滩294 -> 沙滩（手机手动验证过的路径）
+    // 到达东城门的标志：主页面出现"东：沙滩294"
+    console.log('导航到沙滩...');
     await page.keyboard.press('Escape');
     await sleep(1000);
 
     let pageText;
 
-    // 第1步：走到西城门
+    // 第1步：走到东城门
     for (let i = 0; i < 4; i++) {
         pageText = await getPageText(page);
-        if (pageText.includes('西：龙井村') || pageText.includes('西:龙井村')) {
-            console.log('[nav] 已在西城门（看到龙井村）');
+        if (pageText.includes('沙滩294')) {
+            console.log('[nav] 已在东城门附近（看到沙滩294）');
             break;
         }
-        let ok = await jsClick(page, '西城门');
+        let ok = await jsClick(page, '东城门');
         if (!ok || i >= 1) {
             console.log(`[nav] 打开城内地图(${i + 1}):`, await jsClick(page, '城内地图'));
             await sleep(2000);
-            ok = await jsClick(page, '西城门');
+            ok = await jsClick(page, '东城门');
         }
-        console.log(`[nav] 点西城门(${i + 1}):`, ok, i >= 1 ? '(经城内地图)' : '(主页面)');
+        console.log(`[nav] 点东城门(${i + 1}):`, ok, i >= 1 ? '(经城内地图)' : '(主页面)');
         await sleep(3000);
         await page.screenshot({ path: `nav-2-gate-${i + 1}.png` }).catch(() => {});
     }
     pageText = await getPageText(page);
-    console.log('[nav] 第1步后地图:', mapBlock(pageText), '| 西向龙井村=' + (pageText.includes('西：龙井村') || pageText.includes('西:龙井村')));
+    console.log('[nav] 第1步后地图:', mapBlock(pageText), '| 沙滩294=' + pageText.includes('沙滩294'));
 
-    // 第2步：点龙井村（只在还站在西城门方向上时点）
+    // 第2步：点沙滩294（只在还站在东城门方向上时点）
     for (let i = 0; i < 3; i++) {
         pageText = await getPageText(page);
-        if (!pageText.includes('西：龙井村') && !pageText.includes('西:龙井村')) break;
-        console.log(`[nav] 点龙井村(${i + 1}):`, await jsClick(page, '龙井村'));
+        if (!pageText.includes('东：沙滩294') && !pageText.includes('东:沙滩294')) break;
+        console.log(`[nav] 点沙滩294(${i + 1}):`, await jsClick(page, '沙滩294'));
         await sleep(3000);
-        await page.screenshot({ path: `nav-3-ljc-${i + 1}.png` }).catch(() => {});
+        await page.screenshot({ path: `nav-3-294-${i + 1}.png` }).catch(() => {});
     }
     pageText = await getPageText(page);
-    console.log('[nav] 第2步后地图:', mapBlock(pageText), '| 北向西湖=' + (pageText.includes('北：西湖') || pageText.includes('北:西湖')));
+    console.log('[nav] 第2步后地图:', mapBlock(pageText), '| 东向沙滩294=' + (pageText.includes('东：沙滩294') || pageText.includes('东:沙滩294')));
 
-    // 第3步：进西湖
+    // 第3步：进沙滩
     for (let i = 0; i < 3; i++) {
         pageText = await getPageText(page);
-        if (pageText.includes('水怪')) break;
-        console.log(`[nav] 点西湖(${i + 1}):`, await jsClick(page, '西湖'));
+        if (pageText.includes('经验妖灵')) break;
+        console.log(`[nav] 点沙滩(${i + 1}):`, await jsClick(page, '沙滩', '294'));
         await sleep(3000);
-        await page.screenshot({ path: `nav-4-xihu-${i + 1}.png` }).catch(() => {});
+        await page.screenshot({ path: `nav-4-beach-${i + 1}.png` }).catch(() => {});
     }
 
     pageText = await getPageText(page);
-    console.log('[nav] 到达后地图:', mapBlock(pageText), '| 水怪=' + pageText.includes('水怪'));
-    if (pageText.includes('水怪') || pageText.includes('当前城市：杭州')) {
-        console.log('到达西湖');
+    console.log('[nav] 到达后地图:', mapBlock(pageText), '| 经验妖灵=' + pageText.includes('经验妖灵'));
+    if (pageText.includes('经验妖灵') || pageText.includes('当前城市：广州')) {
+        console.log('到达沙滩');
         return true;
     }
     return false;
@@ -635,13 +635,13 @@ async function run() {
         // 卡副本自恢复（dungeon误进/未退出会把号留在房间里，后续全部步骤都会撞死）
         await exitDungeonIfInside(page);
 
-        // 检查是否在杭州（失败不直接放弃：重载页面再试一轮，点击无响应多半能救回）
+        // 检查是否在广州（失败不直接放弃：重载页面再试一轮，点击无响应多半能救回）
         pageText = await getPageText(page);
-        if (pageText.includes('当前城市：杭州')) {
-            console.log('已在杭州');
+        if (pageText.includes('当前城市：广州')) {
+            console.log('已在广州');
         } else {
             for (let round = 1; round <= 2; round++) {
-                console.log(`不在杭州，导航中...(第${round}/2轮)`);
+                console.log(`不在广州，导航中...(第${round}/2轮)`);
 
                 if (round > 1) {
                     await reloadGame(page);
@@ -668,28 +668,28 @@ async function run() {
                 await sleep(2000);
 
                 pageText = await getPageText(page);
-                if (pageText.includes('当前城市：杭州')) break;
+                if (pageText.includes('当前城市：广州')) break;
             }
 
-            // 严格校验：没到杭州绝不往下走（否则会在错误城市空转数小时）
-            if (!pageText.includes('当前城市：杭州')) {
-                console.log('未到达杭州，跳过农场');
+            // 严格校验：没到广州绝不往下走（否则会在错误城市空转数小时）
+            if (!pageText.includes('当前城市：广州')) {
+                console.log('未到达广州，跳过农场');
                 await page.screenshot({ path: 'farm-nav-fail.png' }).catch(() => {});
                 await browser.close();
                 return;
             }
-            console.log('到达杭州');
+            console.log('到达广州');
         }
 
-        if (!(await gotoXihu(page))) {
-            // 不在杭州时“西湖导航”会在错误城市空转，直接退出而不是假装到达
-            console.log('不在杭州，西湖导航失败，退出农场');
+        if (!(await gotoBeach(page))) {
+            // 不在广州时“沙滩导航”会在错误城市空转，直接退出而不是假装到达
+            console.log('不在广州，沙滩导航失败，退出农场');
             await page.screenshot({ path: 'farm-nav-fail.png' }).catch(() => {});
             await browser.close();
             return;
         }
 
-        // 循环打水怪（选怪→50→攻击→50→关闭→50，一刀一个）
+        // 循环打经验妖灵（选怪→50→攻击→50→关闭→50，一刀一个）
         // 日志节流：每轮都打印会刷出几十MB日志、拖垮runner，改为每60秒汇报一次进度
         let count = 0;
         const loopStart = Date.now();
@@ -729,7 +729,7 @@ async function run() {
                 console.log(`已让位 ${Math.round((now - kickedAt) / 60000)} 分钟，尝试重新登录...`);
                 if (await relogin(page)) {
                     pageText = await getPageText(page);
-                    if (!pageText.includes('水怪')) await gotoXihu(page).catch(() => false);
+                    if (!pageText.includes('经验妖灵')) await gotoBeach(page).catch(() => false);
                     lastCountAt = Date.now();
                 }
                 kickedAt = 0;
@@ -738,8 +738,8 @@ async function run() {
             }
             kickedAt = 0;
 
-            if (pageText.includes('水怪')) {
-                await clickText(page, '水怪');
+            if (pageText.includes('经验妖灵')) {
+                await clickText(page, '经验妖灵');
                 await sleep(50);
 
                 // 一击必杀：直接点攻击，不循环
@@ -761,13 +761,13 @@ async function run() {
                 await sleep(50);
             }
 
-            // 10分钟没击杀=卡死（页面空白/人物异常），重登并走回西湖自愈
+            // 10分钟没击杀=卡死（页面空白/人物异常），重登并走回沙滩自愈
             if (Date.now() - lastCountAt >= 600000) {
-                console.log(`连续10分钟无击杀(已打${count}次)，尝试自愈：重登+走回西湖...`);
+                console.log(`连续10分钟无击杀(已打${count}次)，尝试自愈：重登+走回沙滩...`);
                 await page.screenshot({ path: 'farm-stuck.png' }).catch(() => {});
                 await relogin(page);
                 pageText = await getPageText(page);
-                if (!pageText.includes('水怪')) await gotoXihu(page).catch(() => false);
+                if (!pageText.includes('经验妖灵')) await gotoBeach(page).catch(() => false);
                 lastCountAt = Date.now();
                 continue;
             }
@@ -776,9 +776,9 @@ async function run() {
             if (now - lastLogAt >= 60000) {
                 lastLogAt = now;
                 const mins = Math.round((now - loopStart) / 60000);
-                const tail = pageText.includes('水怪')
+                const tail = pageText.includes('经验妖灵')
                     ? ''
-                    : ` | 未见水怪，页面: ${pageText.substring(0, 80)}`;
+                    : ` | 未见经验妖灵，页面: ${pageText.substring(0, 80)}`;
                 console.log(`打怪进行中：已完成 ${count} 次，已运行 ${mins} 分钟${tail}`);
             }
         }
