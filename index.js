@@ -177,7 +177,7 @@ async function pickConfirm(page, region, dest) {
             // 第2轮起用JS叶子派发点击，绕过遮罩对坐标点击的拦截
             const ok = round === 1
                 ? await clickText(page, dest, 2000)
-                : await jsClick(page, dest);
+                : await jsClick(page, dest, '拍卖');
             if (ok) {
                 // 高峰期确认框慢半拍，单次1.5秒查询会误判，改成最多8秒轮询
                 for (let c = 0; c < 8; c++) {
@@ -228,7 +228,7 @@ async function waitSailing(page, sec) {
     return false;
 }
 
-async function sailFlow(page) {
+async function sailFlow(page, rounds = 240) {
     SAIL_FAIL = '';
     if (FORCE && process.env.TEST_FALLBACK === 'true') {
         console.log('测试模式: 跳过出航流程，直接走传送兜底');
@@ -266,17 +266,25 @@ async function sailFlow(page) {
                 sailing = await waitSailing(page, 25);
             }
         }
-        if (!sailing) return failNav(page, '起航未确认(航行中/剩余距离都没出现)');
+        // 强校验：只有「停止自动航行」在场才算真离港；只靠「航行中」会被面板说明文字骗过
+        let confirmed = false;
+        for (let c = 0; c < 8 && !confirmed; c++) {
+            if ((await getPageText(page)).includes('停止自动航行')) confirmed = true;
+            else await sleep(1000);
+        }
+        if (!sailing || !confirmed) return failNav(page, '起航未确认(停止自动航行未出现)，不白等');
     }
     console.log('3. 航行中...');
 
-    for (let w = 0; w < 80; w++) {
+    // 旧上限 80 轮≈4 分钟，跨海域（大阪→孟买/广州）走不完 → 240 轮≈12 分钟
+    for (let w = 0; w < rounds; w++) {
         await sleep(3000);
         const txt = await getPageText(page);
         if (txt.includes(`当前城市：${NAV_DEST}`)) {
             console.log(`到达${NAV_DEST}`);
             return true;
         }
+        if (w > 0 && w % 20 === 0) console.log(`航行中... 已等 ${Math.round(w * 3 / 60)} 分钟（${(txt.match(/当前城市：\S+/) || ['位置未知'])[0]}）`);
         if (txt.includes('遭遇海盗')) {
             console.log('遭遇海盗，选择避战...');
             await page.screenshot({ path: 'sail-pirate.png' }).catch(() => {});
@@ -294,7 +302,7 @@ async function sailFlow(page) {
         }
     }
     const txt = await getPageText(page);
-    console.log('航行未完成（约5分钟），页面文本:', txt.substring(0, 300));
+    console.log(`航行 ${Math.round(rounds * 3 / 60)} 分钟仍未到达，页面文本:`, txt.substring(0, 300));
     return false;
 }
 
@@ -305,6 +313,10 @@ async function teleportToDest(page) {
     if (chk.includes(`当前城市：${NAV_DEST}`)) {
         console.log(`传送兜底: 其实已在${NAV_DEST}，跳过传送(省银币)`);
         return true;
+    }
+    if (chk.includes('停止自动航行') || chk.includes('剩余距离')) {
+        console.log('传送兜底: 仍在航行，海上点不了传送 → 放弃（不重登打断航行）');
+        return false;
     }
     console.log('传送兜底: 重新登录游戏...');
     try {
@@ -495,8 +507,15 @@ async function run() {
                     await page.screenshot({ path: 'nav-nomap.png' }).catch(() => {});
                 } else {
                     await page.screenshot({ path: 'nav-fail.png' }).catch(() => {});
-                    console.log('出航约5分钟未完成，改用传送兜底...');
-                    await teleportToDest(page);
+                    // 船还在海上（跨洋没走完）→ 续等一轮，别重登（重登会打断航行，且海上点不了传送）
+                    const now = await getPageText(page);
+                    if (now.includes('停止自动航行') || now.includes('剩余距离')) {
+                        console.log('首轮航行未到港但船仍在海上 → 续等 6 分钟...');
+                        if (!(await sailFlow(page, 120))) await teleportToDest(page);
+                    } else {
+                        console.log('出航未完成（没起航/已回港），改用传送兜底...');
+                        await teleportToDest(page);
+                    }
                 }
             }
             await sleep(2000);
