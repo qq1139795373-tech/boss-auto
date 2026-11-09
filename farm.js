@@ -111,47 +111,114 @@ async function clickExact(page, text, timeout = 3000) {
     }
 }
 
-// 出航流程：出航菜单→区域→城市→出航确认→自动航行→航行循环（海盗避战/恢复），返回是否到达
-async function sailFlow(page) {
-    let step = await clickText(page, '出航', 2000);
-    if (!step) {
-        await clickText(page, '城内地图');
-        await sleep(2000);
-        await clickText(page, '码头');
-        await sleep(3000);
-        step = await clickText(page, '出航');
-    }
-    await sleep(2000);
-    await clickExact(page, NAV_REGION);
-    await sleep(1000);
+// 出航失败原因（nomap = 该号没有目标城市的海图，传送一样没用，别白花银币）
+let SAIL_FAIL = '';
 
-    let picked = false;
-    for (let s = 0; s < 5; s++) {
-        if (await clickText(page, NAV_DEST, 2000)) {
-            await sleep(1500);
-            if ((await getPageText(page)).includes('出航确认')) {
-                picked = true;
-                break;
+async function failNav(page, why) {
+    const t = await getPageText(page);
+    console.log(`出航中止(${why})，${mapBlock(t)}`);
+    await page.screenshot({ path: 'nav-fail-detail.png' }).catch(() => {});
+    return false;
+}
+
+// 选目的地并等到「出航确认」框。
+// 11-08 06:00 实证的坑：广州两个字同时出现在聊天栏（"[公共] 中华 ： 在广州拍卖行等着"），
+// clickText 的 getByText(exact:false).first() 命中的是聊天栏 → 城市根本没选上，
+// 老代码却照样点「立即出发」空等 5 分钟，必然失败（当天 00:00/06:00 两波刷怪 0 次）。
+// 现在：① 第2轮起改用 JS 叶子派发并排除聊天栏；② 见到「出航确认」才算选上，否则不出发。
+async function pickConfirm(page) {
+    SAIL_FAIL = '';
+    for (let round = 1; round <= 3; round++) {
+        // 关掉可能遮挡点击的弹窗/残留面板（高峰期弹窗会吃掉坐标点击）
+        await page.mouse.click(10, 10);
+        await sleep(300);
+        await page.keyboard.press('Escape');
+        await sleep(600);
+        let opened = await clickText(page, '出航', 2500);
+        if (!opened) {
+            await clickText(page, '城内地图');
+            await sleep(2000);
+            await clickText(page, '码头');
+            await sleep(3000);
+            opened = await clickText(page, '出航', 2500);
+        }
+        await sleep(2000);
+        await clickExact(page, NAV_REGION, 3000);
+        await sleep(1200);
+        for (let s = 0; s < 5; s++) {
+            const ok = round === 1
+                ? await clickText(page, NAV_DEST, 2000)
+                : await jsClick(page, NAV_DEST, '拍卖');
+            if (ok) {
+                // 确认框慢半拍，最多轮询 8 秒；「暂无地图」与确认框会同时出现，必须先判 nomap
+                for (let c = 0; c < 8; c++) {
+                    await sleep(1000);
+                    const t = await getPageText(page);
+                    if (t.includes('暂无地图')) {
+                        console.log(`「暂无地图，查看失败」→ 该号没有${NAV_DEST}的海图，不传送`);
+                        SAIL_FAIL = 'nomap';
+                        return false;
+                    }
+                    if (t.includes('出航确认')) return true;
+                }
+            }
+            await page.mouse.wheel(0, 300);
+            await sleep(1000);
+        }
+        console.log(`未看到出航确认框，重开出航面板重试(${round}/3)...`);
+    }
+    return false;
+}
+
+// 出航流程：出航菜单→区域→城市→出航确认→自动航行→航行循环（海盗避战/恢复），返回是否到达
+// 已在海上时跳过出航选择、直接进入等待（跨洋续等复用同一函数，不会重新选目的地）
+async function sailFlow(page, rounds = 200) {
+    const pre = await getPageText(page);
+    if (pre.includes(`当前城市：${NAV_DEST}`)) {
+        console.log(`已在${NAV_DEST}，无需出航`);
+        return true;
+    }
+    const atSea = pre.includes('停止自动航行') || pre.includes('剩余距离');
+    if (atSea) {
+        console.log('已在航行中，跳过出航选择直接等待到达...');
+    } else {
+        const picked = await pickConfirm(page);
+        if (!picked) {
+            return failNav(page, SAIL_FAIL === 'nomap' ? `目的地${NAV_DEST}无地图` : '出航确认框始终未出现');
+        }
+        await clickText(page, '立即出发');
+        await sleep(2000);
+        // 校验真起航：老代码无条件打印「航行中...」，面板没关也在假装航行
+        let sailing = false;
+        for (let a = 1; a <= 2 && !sailing; a++) {
+            await clickExact(page, '自动航行', 5000);
+            for (let c = 0; c < 5; c++) {
+                await sleep(1000);
+                if ((await getPageText(page)).includes('停止自动航行')) {
+                    sailing = true;
+                    break;
+                }
+            }
+            if (!sailing && a === 1) {
+                console.log('自动航行未启动，重新开面板选目的地...');
+                if (!(await pickConfirm(page))) break;
+                await clickText(page, '立即出发');
+                await sleep(2000);
             }
         }
-        await page.mouse.wheel(0, 300);
-        await sleep(1000);
+        if (!sailing) return failNav(page, '自动航行未启动');
+        console.log('航行中...');
     }
-    if (!picked) console.log('未看到出航确认框，继续尝试...');
 
-    await sleep(1000);
-    await clickText(page, '立即出发');
-    await sleep(2000);
-    await clickExact(page, '自动航行', 5000);
-    console.log('航行中...');
-
-    for (let w = 0; w < 80; w++) {
+    // 旧上限 80 轮≈4 分钟，跨海域（大阪→广州）根本不够 → 默认 200 轮≈10 分钟
+    for (let w = 0; w < rounds; w++) {
         await sleep(3000);
         const txt = await getPageText(page);
         if (txt.includes(`当前城市：${NAV_DEST}`)) {
             console.log(`到达${NAV_DEST}`);
             return true;
         }
+        if (w > 0 && w % 20 === 0) console.log(`航行中... 已等 ${Math.round(w * 3 / 60)} 分钟 ${mapBlock(txt)}`);
         if (txt.includes('遭遇海盗')) {
             console.log('遭遇海盗，选择避战...');
             await page.screenshot({ path: 'sail-pirate.png' }).catch(() => {});
@@ -169,7 +236,8 @@ async function sailFlow(page) {
         }
     }
     const txt = await getPageText(page);
-    console.log('航行未完成（约5分钟），页面文本:', txt.substring(0, 300));
+    console.log(`航行 ${Math.round(rounds * 3 / 60)} 分钟仍未到达，${mapBlock(txt)}`);
+    await page.screenshot({ path: 'nav-timeout.png' }).catch(() => {});
     return false;
 }
 
@@ -222,6 +290,30 @@ async function openTeleportPanel(page) {
 
 // 传送兜底：出航流程失败后重新登录 → 码头点传送 → 点目标城市瞬间到达
 async function teleportToDest(page) {
+    // 防白花银币：已到达 / 仍在海上（传送在航行中打不开）都别重登折腾
+    const chk = await getPageText(page);
+    if (chk.includes(`当前城市：${NAV_DEST}`)) {
+        console.log(`传送兜底: 其实已在${NAV_DEST}，跳过传送(省银币)`);
+        return true;
+    }
+    if (chk.includes('停止自动航行') || chk.includes('剩余距离')) {
+        console.log('传送兜底: 仍在航行，海上点不了传送 → 原地再等 3 分钟');
+        for (let i = 0; i < 60; i++) {
+            await sleep(3000);
+            const t = await getPageText(page);
+            if (t.includes(`当前城市：${NAV_DEST}`)) {
+                console.log(`传送兜底: 已到达${NAV_DEST}`);
+                return true;
+            }
+            if (t.includes('遭遇海盗')) {
+                await clickExact(page, '避战', 3000);
+                await sleep(2000);
+                if (await clickExact(page, '自动航行', 3000)) console.log('恢复自动航行');
+            }
+        }
+        console.log('传送兜底: 仍在海上，放弃（不重登打断航行）');
+        return false;
+    }
     console.log('传送兜底: 重新登录游戏...');
     try {
         if (!(await gotoGame(page))) {
@@ -520,10 +612,21 @@ async function run() {
                 }
 
                 const arrived = await sailFlow(page);
-                if (!arrived) {
-                    console.log('出航约5分钟未完成，改用传送兜底...');
+                if (!arrived && SAIL_FAIL !== 'nomap') {
                     await page.screenshot({ path: 'nav-fail.png' }).catch(() => {});
-                    await teleportToDest(page);
+                    // 船还在海上（跨洋没走完）→ 续等一轮，别重登（重登会打断航行）
+                    const now = await getPageText(page);
+                    if (now.includes('停止自动航行') || now.includes('剩余距离')) {
+                        console.log('首轮航行未到港但船仍在海上 → 续等 5 分钟...');
+                        const arrived2 = await sailFlow(page, 100);
+                        if (!arrived2) await teleportToDest(page);
+                    } else {
+                        console.log('出航未完成（没起航/已回港），改用传送兜底...');
+                        await teleportToDest(page);
+                    }
+                } else if (!arrived && SAIL_FAIL === 'nomap') {
+                    console.log(`⚠ ${NAV_DEST} 暂无地图（该号没有这张海图），不传送`);
+                    await page.screenshot({ path: 'nav-nomap.png' }).catch(() => {});
                 }
                 await sleep(2000);
 
