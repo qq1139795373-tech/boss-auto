@@ -98,6 +98,41 @@ async function clickLeaf(page, text, exactOnly = true) {
     }, { t: text, ex: exactOnly });
 }
 
+// 点登录按钮：登录页常驻的 uni-toast 遮罩（div.uni-mask, duration 极大）会拦住
+// Playwright 的 actionability 检查。旧代码直接 getByText('登录').first().click()
+// 在这里被拦满 30 秒后抛错 → 整个任务跳到 catch 静默成功退出
+// （2026-11-10 coldwind1 18:00 事故：没收获没播种没浇水没刷订单，run 却是绿的）。
+// 改为「叶子节点真实坐标鼠标点击 → 合成事件 → force click(5s)」三级降级，绝不长时间阻塞。
+async function clickLoginButton(page) {
+    const pos = await page.evaluate(() => {
+        const all = [...document.querySelectorAll('body *')].filter(el => {
+            const s = (el.textContent || '').trim();
+            const r = el.getBoundingClientRect();
+            return el.children.length === 0 && r.width > 0 && r.height > 0 && s === '登录';
+        });
+        if (!all.length) return null;
+        const r = all[0].getBoundingClientRect();
+        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+    }).catch(() => null);
+    if (pos) {
+        await page.mouse.click(pos.x, pos.y).catch(() => {});
+        return `坐标(${pos.x},${pos.y})`;
+    }
+    if (await clickLeaf(page, '登录', true).catch(() => false)) return '合成事件';
+    try {
+        await page.getByText('登录', { exact: false }).first().click({ force: true, timeout: 5000 });
+        return 'force';
+    } catch {
+        return null;
+    }
+}
+
+// 判断是否已经进到游戏里（主界面/城内地图都能读到这些词）
+async function inGameText(page) {
+    const t = await getPageText(page);
+    return t.includes('进入游戏') || t.includes('你看到') || t.includes('当前城市');
+}
+
 async function closePopup(page) {
     await page.mouse.click(10, 10);
     await sleep(500);
@@ -895,45 +930,68 @@ async function run() {
         await gotoGame(page);
         await page.waitForTimeout(3000);
 
+        // 每轮先看是不是已经进了游戏（会话有效 / 上一轮点击其实已生效），再填表提交。
+        // 点击一律走 clickLoginButton，避免 uni-mask 拦截时白等 30 秒抛错。
+        let loggedIn = false;
         for (let attempt = 0; attempt < 10; attempt++) {
-            const inputs = await page.$$('input');
+            if (await inGameText(page)) {
+                console.log('已在游戏流程中（会话有效），跳过登录');
+                loggedIn = true;
+                break;
+            }
+            let inputs = await page.$$('input');
             if (inputs.length < 2) {
-                let t = await getPageText(page);
-                if (t.includes('进入游戏') || t.includes('你看到') || t.includes('当前城市')) {
-                    console.log('无表单但已在游戏流程中（会话有效），跳过登录');
-                    break;
-                }
                 console.log('找不到输入框，刷新页面...');
                 await gotoGame(page);
                 await page.waitForTimeout(3000);
-                const newInputs = await page.$$('input');
-                if (newInputs.length < 2) {
-                    t = await getPageText(page);
-                    if (t.includes('进入游戏') || t.includes('你看到') || t.includes('当前城市')) {
-                        console.log('无表单但已在游戏流程中（会话有效），跳过登录');
-                        break;
-                    }
+                if (await inGameText(page)) {
+                    console.log('刷新后已在游戏流程中，跳过登录');
+                    loggedIn = true;
+                    break;
+                }
+                inputs = await page.$$('input');
+                if (inputs.length < 2) {
                     console.log('刷新后仍找不到输入框，重试...');
                     await sleep(2000);
                     continue;
                 }
-                await newInputs[0].fill(ACCOUNT);
-                await newInputs[1].fill(PASSWORD);
-            } else {
-                await inputs[0].fill(ACCOUNT);
-                await inputs[1].fill(PASSWORD);
             }
-            await page.getByText('登录').first().click();
+            await inputs[0].fill(ACCOUNT);
+            await inputs[1].fill(PASSWORD);
+
+            const how = await clickLoginButton(page);
             await sleep(3000);
-            console.log(`登录尝试${attempt + 1}`);
+            console.log(`登录尝试${attempt + 1}`, how ? `(点击方式:${how})` : '(没点到登录按钮)');
 
             let pageText = await getPageText(page);
             if (pageText.includes('进入游戏') || pageText.includes('你看到') || pageText.includes('当前城市')) {
                 console.log('登录成功');
+                loggedIn = true;
                 break;
+            }
+            // toast 已弹「登录成功」但主界面还没渲染出来：再等一会儿，别急着重复点
+            if (pageText.includes('登录成功')) {
+                console.log('toast 提示登录成功，等待主界面渲染...');
+                for (let w = 0; w < 8; w++) {
+                    await sleep(1500);
+                    pageText = await getPageText(page);
+                    if (pageText.includes('进入游戏') || pageText.includes('你看到') || pageText.includes('当前城市')) break;
+                }
+                if (pageText.includes('进入游戏') || pageText.includes('你看到') || pageText.includes('当前城市')) {
+                    console.log('登录成功');
+                    loggedIn = true;
+                    break;
+                }
             }
             console.log('登录未成功，重试...');
             await sleep(2000);
+        }
+        if (!loggedIn) {
+            console.log('ERROR: 10 轮登录均未进入游戏');
+            console.log('::error::登录失败：未进入游戏主界面，山寨农场已跳过');
+            await page.screenshot({ path: 'login-fail.png' }).catch(() => {});
+            process.exitCode = 1;
+            return;
         }
 
         for (let i = 0; i < 10; i++) {
@@ -958,17 +1016,20 @@ async function run() {
         await page.keyboard.press('Escape');
         await sleep(2000);
 
-        let pageText = await getPageText(page);
-        if (pageText.includes('请输入账号密码') || pageText.includes('选择角色')) {
+        // 真正进到主界面才算成功：登录页/选角页都不会出现「你看到 / 当前城市」
+        if (!(await inGameText(page))) {
             console.log('ERROR: 未进入游戏主界面，退出');
             console.log('::error::登录失败：未进入游戏主界面，山寨农场已跳过');
             await page.screenshot({ path: 'login-fail.png' }).catch(() => {});
-            await browser.close();
+            process.exitCode = 1;
             return;
         }
 
         if (!(await openShanzhai(page))) {
-            await browser.close();
+            console.log('ERROR: 打不开山寨农场页面');
+            console.log('::error::山寨农场页面打开失败，本次未执行');
+            await page.screenshot({ path: 'shanzhai-open-fail.png' }).catch(() => {});
+            process.exitCode = 1;
             return;
         }
         console.log('进入山寨农场');
@@ -995,6 +1056,8 @@ async function run() {
     } catch (e) {
         console.error('错误:', e.message);
         await page.screenshot({ path: 'shanzhai-error.png' }).catch(() => {});
+        // 抛出异常也必须让退出码非 0：11-10 coldwind1 就是异常被吞掉，run 显示成功
+        process.exitCode = 1;
     } finally {
         await browser.close();
     }

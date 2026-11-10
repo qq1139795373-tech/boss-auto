@@ -10,6 +10,9 @@ const { existsSync } = require('fs');
 
 const MODE = (process.env.TASKS_MODE || 'auto').toLowerCase();
 
+// 失败步骤汇总：只要有一个脚本非 0 退出，tasks.js 最后也非 0（不再静默绿）
+const FAILED_STEPS = [];
+
 function bjNow() {
     const now = new Date();
     return { hour: (now.getUTCHours() + 8) % 24, min: now.getUTCMinutes() };
@@ -40,9 +43,18 @@ function runStep(name, script, timeoutMs) {
     const sec = Math.round((Date.now() - t0) / 1000);
     if (r.error && r.error.code === 'ETIMEDOUT') {
         console.log(`[tasks] <<< ${name} 超时${sec}s，已终止并继续下一步`);
+        FAILED_STEPS.push(name);
+        console.log(`::error::${name} 超时（${sec}s），详见上方日志`);
         return;
     }
-    console.log(`[tasks] <<< ${name} 结束 exit=${r.status === null ? 'signal' : r.status} 耗时${sec}s`);
+    const code = r.status === null ? 'signal' : r.status;
+    console.log(`[tasks] <<< ${name} 结束 exit=${code} 耗时${sec}s`);
+    // 非 0 必须让整条 run 变红：11-10 coldwind1 山寨农场异常被吞掉，
+    // 日志里没有「山寨农场完成」，run 却显示成功，白丢一整天。
+    if (code !== 0) {
+        FAILED_STEPS.push(name);
+        console.log(`::error::${name} 失败（exit=${code}），详见上方日志`);
+    }
 }
 
 function main() {
@@ -74,6 +86,10 @@ function main() {
     }
 
     console.log('[tasks] 任务阶段结束（无论成败都继续后面的刷怪）');
+    if (FAILED_STEPS.length) {
+        console.log(`[tasks] 失败步骤 ${FAILED_STEPS.length} 个: ${FAILED_STEPS.join(' / ')}`);
+        process.exit(1);
+    }
     process.exit(0);
 }
 
