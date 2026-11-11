@@ -218,12 +218,32 @@ async function failNav(page, why) {
 }
 
 // 出航流程：出航菜单→区域→城市→出航确认→自动航行→航行循环（海盗避战/恢复），返回是否到达
-// 起航判定：航行中/剩余距离/停止自动航行 任一出现即算离港（同 fish.js，见注释）
+// 起航判定：先认硬证据（停止自动航行/剩余距离），只看到「航行中」算弱确认('soft')。
+// 只认「停止自动航行」会误判——按钮渲染慢/文案被遮罩盖住时，船其实已在海上却判成出航失败，白走传送。
 async function waitSailing(page, sec) {
     for (let i = 0; i < sec; i++) {
         const t = await getPageText(page);
-        if (t.includes('航行中') || t.includes('剩余距离') || t.includes('停止自动航行')) return true;
+        if (t.includes('停止自动航行') || t.includes('剩余距离')) return 'hard';
+        if (t.includes('航行中')) return 'soft';
         await sleep(1000);
+    }
+    return '';
+}
+
+// 起航未确认时的观察窗口：宁可多盯 60 秒，也不要误判成失败去花银币传送。
+// 11-11 11:50 实测：报「起航未确认」后 3 秒就在海上（避战→到孟买），全靠后面的续等擦屁股。
+async function observeSail(page, sec = 60) {
+    for (let i = 0; i < sec; i++) {
+        await sleep(1000);
+        const t = await getPageText(page);
+        if (t.includes(`当前城市：${NAV_DEST}`)) { console.log('起航观察: 已到港'); return true; }
+        if (t.includes('停止自动航行') || t.includes('剩余距离')) { console.log('起航观察: 已离港'); return true; }
+        if (t.includes('遭遇海盗')) {
+            await clickExact(page, '避战', 3000);
+            await sleep(1500);
+        } else if (i % 8 === 7 && await clickExact(page, '自动航行', 1500)) {
+            console.log('起航观察: 自动航行(重新)启动');
+        }
     }
     return false;
 }
@@ -266,13 +286,11 @@ async function sailFlow(page, rounds = 240) {
                 sailing = await waitSailing(page, 25);
             }
         }
-        // 强校验：只有「停止自动航行」在场才算真离港；只靠「航行中」会被面板说明文字骗过
-        let confirmed = false;
-        for (let c = 0; c < 8 && !confirmed; c++) {
-            if ((await getPageText(page)).includes('停止自动航行')) confirmed = true;
-            else await sleep(1000);
+        // 仍读不到起航迹象 → 进 60 秒观察窗口，别急着判失败走传送
+        if (!sailing) {
+            console.log('起航未确认，进 60 秒观察窗口...');
+            if (!(await observeSail(page))) return failNav(page, '起航未确认(观察60秒仍无航行迹象)');
         }
-        if (!sailing || !confirmed) return failNav(page, '起航未确认(停止自动航行未出现)，不白等');
     }
     console.log('3. 航行中...');
 

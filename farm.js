@@ -170,6 +170,36 @@ async function pickConfirm(page) {
     return false;
 }
 
+// 起航判定：先认硬证据（停止自动航行/剩余距离），只看到「航行中」算弱确认('soft')。
+// 只认「停止自动航行」会误判——按钮渲染慢/文案被遮罩盖住时，船其实已在海上却判成出航失败，白走传送。
+async function waitSailing(page, sec) {
+    for (let i = 0; i < sec; i++) {
+        const t = await getPageText(page);
+        if (t.includes('停止自动航行') || t.includes('剩余距离')) return 'hard';
+        if (t.includes('航行中')) return 'soft';
+        await sleep(1000);
+    }
+    return '';
+}
+
+// 起航未确认时的观察窗口：宁可多盯 60 秒，也不要误判成失败去花银币传送。
+// 期间任何硬证据/到港都算成功，并顺手点「自动航行」补救。
+async function observeSail(page, sec = 60) {
+    for (let i = 0; i < sec; i++) {
+        await sleep(1000);
+        const t = await getPageText(page);
+        if (t.includes(`当前城市：${NAV_DEST}`)) { console.log('起航观察: 已到港'); return true; }
+        if (t.includes('停止自动航行') || t.includes('剩余距离')) { console.log('起航观察: 已离港'); return true; }
+        if (t.includes('遭遇海盗')) {
+            await clickExact(page, '避战', 3000);
+            await sleep(1500);
+        } else if (i % 8 === 7 && await clickExact(page, '自动航行', 1500)) {
+            console.log('起航观察: 自动航行(重新)启动');
+        }
+    }
+    return false;
+}
+
 // 出航流程：出航菜单→区域→城市→出航确认→自动航行→航行循环（海盗避战/恢复），返回是否到达
 // 已在海上时跳过出航选择、直接进入等待（跨洋续等复用同一函数，不会重新选目的地）
 async function sailFlow(page, rounds = 200) {
@@ -188,25 +218,24 @@ async function sailFlow(page, rounds = 200) {
         }
         await clickText(page, '立即出发');
         await sleep(2000);
-        // 校验真起航：老代码无条件打印「航行中...」，面板没关也在假装航行
-        let sailing = false;
-        for (let a = 1; a <= 2 && !sailing; a++) {
+        // 起航校验：硬证据优先，只看到「航行中」也算离港；
+        // 都读不到时进 60 秒观察窗口（11-11 11:50 教训：判「未启动」后 3 秒实际已在海上，白走传送）
+        let state = await waitSailing(page, 10);
+        for (let a = 1; a <= 2 && !state; a++) {
             await clickExact(page, '自动航行', 5000);
-            for (let c = 0; c < 5; c++) {
-                await sleep(1000);
-                if ((await getPageText(page)).includes('停止自动航行')) {
-                    sailing = true;
-                    break;
-                }
-            }
-            if (!sailing && a === 1) {
+            state = await waitSailing(page, 8);
+            if (!state && a === 1) {
                 console.log('自动航行未启动，重新开面板选目的地...');
                 if (!(await pickConfirm(page))) break;
                 await clickText(page, '立即出发');
                 await sleep(2000);
             }
         }
-        if (!sailing) return failNav(page, '自动航行未启动');
+        if (!state) {
+            console.log('起航未确认，进 60 秒观察窗口...');
+            if (!(await observeSail(page))) return failNav(page, '起航未确认(观察60秒仍无航行迹象)');
+        }
+        console.log(state === 'soft' ? '航行中...(仅见「航行中」)' : '航行中...');
         console.log('航行中...');
     }
 
