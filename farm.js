@@ -14,6 +14,28 @@ const NAV_REGION = '东亚';
 // 300 留 60 分钟余量，任务段再怎么拖也不会撞上限。
 const FARM_MAX_MIN = Number(process.env.FARM_MAX_MIN || 300);
 
+// 退出诊断：GitHub 的 job 日志偶发 404 全丢（2026-11-12 00:00 小号波 farm failure 就是这样查不下去），
+// 所以进程自己把「退出原因 + 退出码 + 击杀数 + 运行时长」压成一行打在末尾。
+// 规则：正常到点收尾 exit 0；登录失败/没到目的地/未捕获异常一律 exit 1，红色只留给真故障。
+const EXIT_DIAG = { reason: '未设置', kills: 0, startedAt: Date.now() };
+function diag(reason, code) {
+    EXIT_DIAG.reason = reason;
+    if (code) process.exitCode = code;
+}
+function exitLine() {
+    return `=== farm 收尾：原因=${EXIT_DIAG.reason} 退出码=${process.exitCode || 0} 击杀=${EXIT_DIAG.kills} 次 运行=${Math.round((Date.now() - EXIT_DIAG.startedAt) / 60000)} 分钟 ===`;
+}
+// 崩溃路径必须同步写 stdout：CI 里 stdout 是管道，console.log 是异步的，
+// process.exit() 会把还没 flush 的日志丢掉（正是 11-12 那次查不下去的原因）。
+function crashExit(e, kind) {
+    diag(`${kind}: ${e && e.message ? e.message : e}`, 1);
+    const msg = `::error::farm ${kind}: ${e && e.stack ? e.stack : e}\n${exitLine()}\n`;
+    try { require('fs').writeSync(1, msg); } catch (_) { console.error(msg); }
+    process.exit(1);
+}
+process.on('unhandledRejection', (e) => crashExit(e, '未捕获 Promise 拒绝'));
+process.on('uncaughtException', (e) => crashExit(e, '未捕获异常'));
+
 async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -644,6 +666,7 @@ async function run() {
         if (pageText.includes('请输入账号密码') || pageText.includes('登录注册') || pageText.includes('选择角色')) {
             console.log('ERROR: 未进入游戏主界面，退出');
             console.log('::error::登录失败：未进入游戏主界面，刷怪已退出');
+            diag('登录失败：未进入游戏主界面', 1);
             await page.screenshot({ path: 'login-fail.png' }).catch(() => {});
             await browser.close();
             return;
@@ -702,6 +725,8 @@ async function run() {
             // 严格校验：没到广州绝不往下走（否则会在错误城市空转数小时）
             if (!pageText.includes('当前城市：广州')) {
                 console.log('未到达广州，跳过农场');
+                console.log('::error::farm 出航失败：未到达广州，刷怪未开始');
+                diag(`未到达广州（出航/传送均失败，SAIL_FAIL=${SAIL_FAIL || 'none'}）`, 1);
                 await page.screenshot({ path: 'farm-nav-fail.png' }).catch(() => {});
                 await browser.close();
                 return;
@@ -712,6 +737,8 @@ async function run() {
         if (!(await gotoBeach(page))) {
             // 不在广州时“沙滩导航”会在错误城市空转，直接退出而不是假装到达
             console.log('不在广州，沙滩导航失败，退出农场');
+            console.log('::error::farm 沙滩导航失败：未到打怪点，刷怪未开始');
+            diag('沙滩导航失败（未到打怪点）', 1);
             await page.screenshot({ path: 'farm-nav-fail.png' }).catch(() => {});
             await browser.close();
             return;
@@ -728,12 +755,14 @@ async function run() {
         console.log('进入打怪循环（进度每60秒汇报一次）');
         while (true) {
             pageText = await getPageText(page);
+            EXIT_DIAG.kills = count;
 
             // 到点主动收尾：job 的 timeout-minutes 是 360，被它砍掉时整个 run 标 failure，
             // 于是「跑到上限」和「真故障」混成一片红（2026-10-29 00:00 波 4 个 job 全是这样）。
             // 刷到这里就正常退出，red 只留给真问题。FARM_MAX_MIN=0 可关闭该限制。
             if (FARM_MAX_MIN > 0 && Date.now() - loopStart >= FARM_MAX_MIN * 60000) {
                 console.log(`已刷满 ${FARM_MAX_MIN} 分钟（击杀 ${count} 次），主动收尾退出，避免撞 job 6 小时上限被判 failure`);
+                diag(`刷满 ${FARM_MAX_MIN} 分钟主动收尾`, 0);
                 break;
             }
 
@@ -813,8 +842,11 @@ async function run() {
 
     } catch (e) {
         console.error('错误:', e.message);
+        console.error('::error::farm 运行异常:', e.stack || e.message);
+        diag(`运行异常: ${e.message}`, 1);
     } finally {
-        await browser.close();
+        await browser.close().catch(() => {});
+        console.log(exitLine());
     }
 }
 
