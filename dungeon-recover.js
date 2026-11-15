@@ -117,7 +117,22 @@ async function clickByText(page, text, { exact = true, real = false } = {}) {
     return ok;
 }
 
-// 点一次 + 验证消失；合成事件没生效就补真实坐标点击。返回是否确实关掉
+// 用 Playwright 原生 locator 精确点一段文字。
+// 为什么需要：真机（2026-11-15）证明 uni 组件对 dispatchEvent 合成事件不感冒（点了 30→30），
+// 只有 Playwright 的真实鼠标点击才算数。撤退/关闭这类按钮统一先走这里，失败再退回合成事件。
+async function clickTextReal(page, text, { exact = true } = {}) {
+    try {
+        const loc = page.getByText(text, { exact }).first();
+        if ((await loc.count()) === 0) return false;
+        if (!(await loc.isVisible({ timeout: 1500 }).catch(() => false))) return false;
+        await loc.click({ force: true, timeout: 3500 });
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
+// 点一次 + 验证消失；真实点击优先，没生效再用合成事件补。返回是否确实关掉
 async function clickAndVerify(page, text, goneText, { tries = 3, wait = 1200 } = {}) {
     for (let i = 0; i < tries; i++) {
         await clickByText(page, text, { exact: true });
@@ -347,4 +362,518 @@ async function recoverDungeon(page, opts = {}) {
     return { inDungeon: true, kind, swept, claimed, exited: false };
 }
 
-module.exports = { recoverDungeon, closeSweepPopup, clickAndVerify, clickByText, visibleText, dismissPopups, readRewardToast, claimEvidence, claimEvidenceIn, remainTimes, sleep };
+// ============================ 血池为 0 的补给 ============================
+// 用户 2026-11-15 说明的机制（截图实证）：
+//   战斗面板长这样：「攻击 自动攻击 查看 撤退 / 病鸡体力：60/60 / 体力：2691/4197 -0 血池：0」
+//   血池 = 出刀的消耗池。**血池 0 时点「攻击」不掉血也不掉回合**，怪纹丝不动，
+//   旧代码会白点满 12 次「攻击」然后报「未见结算」，怪留在房间里 → 房间永远清不干净。
+//
+// 两条补给路径（用户明确分开的两条）：
+//   野区点怪（主城/野图）：撤退 → 首页「包裹」→「药水」→ 用「小体力宝」，没有小的才用「体力宝」
+//   副本里杀到一半：撤退 → 副本页左下「背包」→ 同样有「药水」→ 用完关掉背包，回去接着杀
+// 用哪个：**优先小体力宝，其次体力宝**（用户点名的优先级，不要反过来）。
+// ★ 只认这两个名字（用户 2026-11-15 再次强调「其他药不用管，只需要记住体力宝、小体力宝」）：
+//   药水页里还有 小体力豆 / 小攻击豆 / 万能药 / 魔能奶糖 / 三倍经验药水 等，一律不碰、绝不误点。
+//   「小体力豆」和「小体力宝」只差一个字，所以下面认名字一律用「去等级后缀后全等」，
+//   不用 includes —— 否则要大的时候会点到「小体力宝」那一行。
+
+const BLOOD_ITEMS = ['小体力宝', '体力宝'];
+
+// 读血池（面板里写作「血池: 0」或「血池：0」）。读不到返回 null
+function readBlood(t) {
+    const m = (t || '').match(/血池\s*[:：]\s*(\d+)/);
+    return m ? Number(m[1]) : null;
+}
+
+// 战斗面板：撤退 + 攻击/自动攻击 同时存在（主界面自己的状态栏没有「撤退」）
+function inFightPanel(t) {
+    return t.includes('撤退') && (t.includes('攻击') || t.includes('自动攻击'));
+}
+
+// 背包/包裹是否已打开：认页签组（装备/药水/道具/材料/宝箱）+ 行内动作（使用/详情/已装备）
+// 只看「使用」会误判：默认「全部」页签下列表全是装备，行里只有「详情」「已装备」，没有「使用」
+function bagOpened(t) {
+    const tabs = t.includes('药水') && (t.includes('道具') || t.includes('材料') || t.includes('宝箱') || t.includes('装备'));
+    const action = t.includes('使用') || t.includes('详情') || t.includes('已装备');
+    return tabs && action;
+}
+
+// 在「名称所在的那一行」里点某个按钮（'使用' / '详情'）。
+// 不能直接点 '使用'：列表里每一行都有「使用」，点第一个就会用错药（第一行是「小体力豆」）。
+//
+// ★ 2026-11-15 真机实证（coldwind0）：
+//   按钮是 `<uni-view class="btn use-btn"><uni-text><span>使用</span>…` 三层结构，
+//   **dispatchEvent 派发 pointerdown…click 全套，数量 30→30，一点反应都没有**；
+//   而 Playwright 的元素点击（内部鼠标真实事件）有效。
+//   另外这一行常常在视口外（实测 y=947，视口 800），自己算的坐标滚完就过期了，
+//   所以这里只用「打标记 → page.click(标记)」，把滚动和命中都交给 Playwright。
+async function clickBtnInRow(page, name, btnText = '使用') {
+    const pt = await page.evaluate(({ itemName, btnText }) => {
+        document.querySelectorAll('[data-heal-btn]').forEach((el) => el.removeAttribute('data-heal-btn'));
+        const vis = (el) => {
+            try {
+                const cs = getComputedStyle(el);
+                if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) === 0) return false;
+                const r = el.getBoundingClientRect();
+                return r.width > 0 && r.height > 0;
+            } catch (e) { return false; }
+        };
+        const label = (el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+        // 「体力宝」是「小体力宝」的子串，直接 includes 会在只剩大药时点错行，
+        // 所以先按「去掉（1级）/ 第1级 后全等」认名字，认不到再退回包含匹配。
+        const bare = (s) => s.replace(/[（(][^）)]*[)）]/g, '').replace(/第?\s*\d+\s*级/g, '').replace(/\s+/g, '').trim();
+        const nodes = Array.from(document.querySelectorAll('body *')).filter(vis);
+        const isNameLeaf = (el) => {
+            const t = label(el);
+            if (t.includes('使用') || t.includes('数量')) return false;
+            if (t.length > itemName.length + 14) return false;
+            return !Array.from(el.children).some((c) => vis(c) && label(c).includes(itemName));
+        };
+        let nameEls = nodes.filter((el) => isNameLeaf(el) && bare(label(el)) === itemName);
+        if (!nameEls.length) nameEls = nodes.filter((el) => isNameLeaf(el) && label(el).includes(itemName)
+            && bare(label(el)) !== '小' + itemName);   // 要「体力宝」时别把「小体力宝」认成它
+        for (const ne of nameEls) {
+            let row = ne;
+            for (let up = 0; up < 8 && row; up++) {
+                row = row.parentElement;
+                if (!row) break;
+                const rt = label(row);
+                if (!rt.includes(btnText)) continue;
+                if (!rt.includes(itemName)) continue;               // 必须和物品名同一行，否则会点到隔壁药的按钮
+                const r = row.getBoundingClientRect();
+                if (r.height <= 0 || r.height > 240) continue;      // 整页/整个列表不算一行
+                // 取最外层那个带 btn 类的按钮（uni-view.btn.use-btn），而不是里面没有事件的 span
+                const cands = Array.from(row.querySelectorAll('*')).filter((el) => vis(el) && label(el) === btnText);
+                if (!cands.length) continue;
+                const btnEl = cands.find((el) => /btn/i.test(String(el.className))) || cands[0];
+                btnEl.setAttribute('data-heal-btn', '1');
+                try { btnEl.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) { }
+                const ur = btnEl.getBoundingClientRect();
+                return { x: Math.round(ur.left + ur.width / 2), y: Math.round(ur.top + ur.height / 2), tag: btnEl.tagName, cls: String(btnEl.className).slice(0, 40) };
+            }
+        }
+        return null;
+    }, { itemName: name, btnText }).catch(() => null);
+    if (!pt) return null;
+    // Playwright 会自己把元素滚进视口并在元素坐标上发真实鼠标事件
+    const ok = await page.click('[data-heal-btn="1"]', { force: true, timeout: 5000 }).then(() => true).catch(() => false);
+    if (!ok) await page.mouse.click(pt.x, pt.y).catch(() => { });
+    await page.evaluate(() => {
+        const el = document.querySelector('[data-heal-btn="1"]');
+        if (el) el.removeAttribute('data-heal-btn');
+    }).catch(() => { });
+    return pt;
+}
+
+// ★ 只补一次真实点击（不要再叠加合成事件，否则「详情」会被点开又关掉）
+async function realClick(page, pt) {
+    if (!pt) return false;
+    const ok = await page.mouse.click(pt.x, pt.y).then(() => true).catch(() => false);
+    return ok;
+}
+
+// 兼容旧调用：点该行「使用」
+async function clickUseInRow(page, name) {
+    return !!(await clickBtnInRow(page, name, '使用'));
+}
+
+// 读某一行显示的数量（「数量：55」）。读不到返回 -1
+async function rowQuantity(page, name) {
+    return await page.evaluate((itemName) => {
+        const vis = (el) => {
+            try {
+                const cs = getComputedStyle(el);
+                if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) === 0) return false;
+                const r = el.getBoundingClientRect();
+                return r.width > 0 && r.height > 0;
+            } catch (e) { return false; }
+        };
+        const label = (el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+        const bare = (s) => s.replace(/[（(][^）)]*[)）]/g, '').replace(/第?\s*\d+\s*级/g, '').replace(/\s+/g, '').trim();
+        const nodes = Array.from(document.querySelectorAll('body *')).filter(vis);
+        const isNameLeaf = (el) => {
+            const t = label(el);
+            if (t.includes('使用') || t.includes('数量')) return false;
+            if (t.length > itemName.length + 14) return false;
+            return !Array.from(el.children).some((c) => vis(c) && label(c).includes(itemName));
+        };
+        let nameEls = nodes.filter((el) => isNameLeaf(el) && bare(label(el)) === itemName);
+        if (!nameEls.length) nameEls = nodes.filter((el) => isNameLeaf(el) && label(el).includes(itemName)
+            && bare(label(el)) !== '小' + itemName);   // 要「体力宝」时别把「小体力宝」认成它
+        for (const ne of nameEls) {
+            let row = ne;
+            for (let up = 0; up < 8 && row; up++) {
+                row = row.parentElement;
+                if (!row) break;
+                const rt = label(row);
+                if (!rt.includes('使用')) continue;
+                const r = row.getBoundingClientRect();
+                if (r.height <= 0 || r.height > 240) continue;
+                const m = rt.match(/数量\s*[：:]\s*(\d+)/);
+                if (m) return Number(m[1]);
+            }
+        }
+        return -1;
+    }, name).catch(() => -1);
+}
+
+// 关背包/包裹回游戏视图：先点「关闭」，再试左上返回坐标，再点同名按钮切换，最后 Escape
+async function closeBagPanel(page, { log = () => { } } = {}) {
+    for (let i = 0; i < 3; i++) {
+        let t = await visibleText(page);
+        if (!bagOpened(t)) return true;
+        if (!(await clickTextReal(page, '关闭'))) await clickByText(page, '关闭', { exact: true });
+        await sleep(900);
+        t = await visibleText(page);
+        if (!bagOpened(t)) return true;
+        // 左上角返回箭头（队伍面板就是 (19,20) 那个位置）
+        await page.mouse.click(19, 20).catch(() => { });
+        await sleep(1000);
+        t = await visibleText(page);
+        if (!bagOpened(t)) return true;
+        // 「包裹/背包」按钮再点一次：多数页面是开/关切换
+        for (const nm of ['包裹', '背包']) {
+            if (!t.includes(nm)) continue;
+            await clickByText(page, nm, { exact: true });
+            await sleep(1100);
+            t = await visibleText(page);
+            if (!bagOpened(t)) return true;
+        }
+        await page.keyboard.press('Escape').catch(() => { });
+        await sleep(900);
+    }
+    const left = await visibleText(page);
+    const ok = !bagOpened(left);
+    if (!ok) log(`背包关不掉，页面: ${left.replace(/\s+/g, ' ').substring(0, 120)}`);
+    return ok;
+}
+
+// 打开背包：副本里叫「背包」，主城/野区在首页叫「包裹」。两个都试，认「使用+详情」
+async function openBagPanel(page, { inDungeon = false, log = () => { } } = {}) {
+    let t = await visibleText(page);
+    if (bagOpened(t)) return true;
+    const order = inDungeon ? ['背包', '包裹'] : ['包裹', '背包'];
+    for (const name of order) {
+        if (!t.includes(name)) continue;
+        await clickByText(page, name, { exact: true });
+        await sleep(1200);
+        t = await visibleText(page);
+        if (bagOpened(t)) { log(`已打开「${name}」`); return true; }
+        // 有些页面「背包/包裹」是带角标的链接，精确匹配不到时放宽一次
+        await clickByText(page, name, { exact: false });
+        await sleep(1200);
+        t = await visibleText(page);
+        if (bagOpened(t)) { log(`已打开「${name}」(模糊)`); return true; }
+    }
+    log(`打不开背包，页面: ${t.replace(/\s+/g, ' ').substring(0, 120)}`);
+    return false;
+}
+
+// 切到「药水」页签（默认页签通常是装备，不切过去看不到体力宝）
+// 认不出来就顺手试一下「道具」页签：只要列表里能读到体力宝就算成功，不靠页签名硬猜
+async function gotoPotionTab(page, { log = () => { } } = {}) {
+    let t = await visibleText(page);
+    if (t.includes('体力宝')) return true;
+    for (const tab of ['药水', '道具']) {
+        if (!t.includes(tab)) continue;
+        for (let i = 0; i < 2; i++) {
+            await clickByText(page, tab, { exact: true });
+            await sleep(1000);
+            t = await visibleText(page);
+            if (t.includes('体力宝')) { log(`已切到「${tab}」`); return true; }
+        }
+    }
+    log(`未切到药水页签，页面: ${t.replace(/\s+/g, ' ').substring(0, 120)}`);
+    return false;
+}
+
+// ==================== 列表「使用」/「详情」两条路径（2026-11-15 用户截图实证） ====================
+// 包裹 → 药水 每一行都有两个按钮：绿色「使用」、蓝色「详情」，**两个都能点**（用户确认）。
+//   直接点「使用」：吃掉自定义数量默认值（1 个），列表数量不一定即时刷新；
+//   点「详情」弹出「物品详情」：
+//     名称：小体力宝   数量：68   使用等级：1级
+//     说明：装有恢复体力的奶瓶，内含30000体力，多次使用不会叠加，当体力低于50%时自动恢复体力
+//     快速使用：1个 | 3个 | 5个 | 10个 | 50个
+//     自定义数量：[ 1 ]  使用
+// 所以：**先点该行的「使用」（少一步、最贴近手动操作），点完数量没减少才走「详情」→「快速使用N个」兜底**。
+// 弹窗没有「关闭」按钮，收起靠 Escape 或点遮罩。
+
+// 定位弹窗本体：页面上唯一含「快速使用」、且高度小于整屏的容器（取最外层那个）
+async function detailPopupRect(page) {
+    return await page.evaluate(() => {
+        const vis = (el) => {
+            try {
+                const cs = getComputedStyle(el);
+                if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) === 0) return false;
+                const r = el.getBoundingClientRect();
+                return r.width > 0 && r.height > 0;
+            } catch (e) { return false; }
+        };
+        const label = (el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+        const cand = Array.from(document.querySelectorAll('body *'))
+            .filter((el) => vis(el) && label(el).includes('快速使用'))
+            .map((el) => ({ el, r: el.getBoundingClientRect() }))
+            .filter((x) => x.r.height < window.innerHeight * 0.94);
+        if (!cand.length) return null;
+        cand.sort((a, b) => b.r.height - a.r.height);
+        const r = cand[0].r;
+        return { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) };
+    }).catch(() => null);
+}
+
+async function detailPopupOpen(page) {
+    const t = await visibleText(page);
+    return t.includes('物品详情') && t.includes('快速使用');
+}
+
+// 弹窗里显示的数量（「数量：68」）。读不到返回 -1
+async function popupQuantity(page) {
+    return await page.evaluate(() => {
+        const vis = (el) => {
+            try {
+                const cs = getComputedStyle(el);
+                if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) === 0) return false;
+                const r = el.getBoundingClientRect();
+                return r.width > 0 && r.height > 0;
+            } catch (e) { return false; }
+        };
+        const label = (el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+        const cand = Array.from(document.querySelectorAll('body *'))
+            .filter((el) => vis(el) && label(el).includes('快速使用'))
+            .map((el) => ({ el, r: el.getBoundingClientRect() }))
+            .filter((x) => x.r.height < window.innerHeight * 0.94);
+        if (!cand.length) return -1;
+        cand.sort((a, b) => b.r.height - a.r.height);
+        const m = label(cand[0].el).match(/数量\s*[:：]\s*(\d+)/);
+        return m ? Number(m[1]) : -1;
+    }).catch(() => -1);
+}
+
+// 在弹窗内部点一段文字（「1个」/「使用」），限定在弹窗容器里，不会点到背后列表的按钮。
+// 同样用「打标记 → page.click(标记)」真实点击（uni 组件不认 dispatchEvent）。
+async function clickInDetailPopup(page, text) {
+    const pt = await page.evaluate((text) => {
+        document.querySelectorAll('[data-heal-pop]').forEach((el) => el.removeAttribute('data-heal-pop'));
+        const vis = (el) => {
+            try {
+                const cs = getComputedStyle(el);
+                if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) === 0) return false;
+                const r = el.getBoundingClientRect();
+                return r.width > 0 && r.height > 0;
+            } catch (e) { return false; }
+        };
+        const label = (el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+        const bare = (s) => s.replace(/\s+/g, '').trim();
+        const cand = Array.from(document.querySelectorAll('body *'))
+            .filter((el) => vis(el) && label(el).includes('快速使用'))
+            .map((el) => ({ el, r: el.getBoundingClientRect() }))
+            .filter((x) => x.r.height < window.innerHeight * 0.94);
+        if (!cand.length) return null;
+        cand.sort((a, b) => b.r.height - a.r.height);
+        const root = cand[0].el;
+        const want = bare(text);
+        const hits = Array.from(root.querySelectorAll('*'))
+            .filter((el) => vis(el) && bare(label(el)) === want);
+        const leaf = hits.find((el) => !Array.from(el.children).some((c) => vis(c) && bare(label(c)) === want)) || hits[0];
+        if (!leaf) return null;
+        // 优先带 btn 类的外层（真正挂事件的那一层）
+        let target = leaf;
+        for (let up = 0; up < 4 && target.parentElement; up++) {
+            if (/btn/i.test(String(target.className))) break;
+            target = target.parentElement;
+        }
+        if (!/btn/i.test(String(target.className))) target = leaf;
+        target.setAttribute('data-heal-pop', '1');
+        try { target.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) { }
+        const r = target.getBoundingClientRect();
+        return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    }, text).catch(() => null);
+    if (!pt) return null;
+    const ok = await page.click('[data-heal-pop="1"]', { force: true, timeout: 4000 }).then(() => true).catch(() => false);
+    if (!ok) await page.mouse.click(pt.x, pt.y).catch(() => { });
+    await page.evaluate(() => {
+        const el = document.querySelector('[data-heal-pop="1"]');
+        if (el) el.removeAttribute('data-heal-pop');
+    }).catch(() => { });
+    return pt;
+}
+
+// 关掉「物品详情」：没有关闭按钮，先 Escape，再点弹窗外的遮罩
+async function closeDetailPopup(page, { log = () => { } } = {}) {
+    for (let i = 0; i < 3; i++) {
+        if (!(await detailPopupOpen(page))) return true;
+        await page.keyboard.press('Escape').catch(() => { });
+        await sleep(700);
+        if (!(await detailPopupOpen(page))) return true;
+        const r = await detailPopupRect(page);
+        const vp = page.viewportSize() || { width: 640, height: 1100 };
+        if (r) {
+            const y = r.y > 50 ? r.y - 25 : Math.min(vp.height - 8, r.y + r.h + 25);
+            await page.mouse.click(Math.round(vp.width / 2), Math.round(y)).catch(() => { });
+            await sleep(800);
+        }
+    }
+    const ok = !(await detailPopupOpen(page));
+    if (!ok) log('「物品详情」弹窗关不掉');
+    return ok;
+}
+
+// 先合成事件点一次 → 验证 → 没生效才补真实鼠标点击（绝不叠加，否则「详情」会被点开又关掉）
+// 点一次并验证。clicker 内部已经是**真实点击**了，所以这里默认不再补点 ——
+// 消耗类操作（使用药水 / 快速使用）点第二次就是多吃一份，绝不能盲目重试。
+// retry 只给「打开弹窗」这种可逆操作用。
+async function clickOnceAndCheck(page, clicker, verify, { waits = [1100, 900, 900], retry = false } = {}) {
+    const pt = await clicker();
+    if (!pt) return false;
+    for (const w of waits) {
+        await sleep(w);
+        if (await verify()) return true;
+    }
+    if (!retry) return false;
+    const pt2 = await clicker();
+    if (!pt2) return false;
+    for (const w of [1000, 1000]) {
+        await sleep(w);
+        if (await verify()) return true;
+    }
+    return false;
+}
+
+// 列表数量常常只是本地缓存不刷新：关包重开再读一次真实值。返回 -2 = 重开失败
+async function rereadBagQuantity(page, name, { inDungeon = false, log = () => { } } = {}) {
+    await closeBagPanel(page, { log });
+    await sleep(700);
+    if (!(await openBagPanel(page, { inDungeon, log }))) return -2;
+    await gotoPotionTab(page, { log });
+    return await rowQuantity(page, name);
+}
+
+// 用一次体力宝：优先小体力宝，没有再体力宝。返回 {ok, item, left}
+// ★ 2026-11-15 真机实证（coldwind0，弹窗 DOM 已抓全）：
+//   1) 列表行那个绿色「使用」**不是直接吃药**，它是打开「物品详情」弹窗（和「详情」同一个弹窗）；
+//   2) 真正吃药的按钮在弹窗里：`uni-text.quick-btn`「1个/3个/5个/10个/50个」，
+//      以及 `uni-view.confirm-use-btn`「使用」（配 `uni-input.num-input` 自定义数量）；
+//   3) 点完「1个」**弹窗会自动关闭**，列表数量立刻从 28 → 27。
+//   —— 这就是之前一直判「点不动」的真因：我盯着「弹窗里的数量」，而弹窗已经没了，读到 -1。
+// ★ 一次只吃一个（用户 2026-11-15）：体力宝效果是覆盖不是叠加，吃第二个会覆盖前一个的血池，
+//   剩余量不会变多。所以永远只点「1个」，上层也不许循环补。
+async function useStaminaItem(page, { log = () => { }, inDungeon = false } = {}) {
+    for (const name of BLOOD_ITEMS) {
+        const left = await rowQuantity(page, name);
+        if (left === 0) continue;                       // 这一档没了 → 换下一档
+        if (left < 0) continue;                         // 页面上没有这个条目
+        log(`用「${name}」（剩 ${left} 个）...`);
+
+        // ---- 1) 打开使用弹窗：点该行「使用」，弹不出来再点「详情」 ----
+        let opened = false;
+        const ptUse = await clickBtnInRow(page, name, '使用');
+        if (ptUse) {
+            for (let i = 0; i < 3; i++) {
+                await sleep(900);
+                if (await detailPopupOpen(page)) { opened = true; break; }
+                // 有的物品点了「使用」是真直接吃（不弹窗）→ 数量掉一个就算成
+                const q = await rowQuantity(page, name);
+                if (q >= 0 && q < left) {
+                    log(`「${name}」直接吃掉 1 个（列表剩 ${q}）`);
+                    return { ok: true, item: name, left: q };
+                }
+            }
+        }
+        if (!opened) {
+            log(`「${name}」点「使用」没弹出使用弹窗，改点「详情」`);
+            const ptD = await clickBtnInRow(page, name, '详情');
+            if (ptD) {
+                for (let i = 0; i < 3; i++) {
+                    await sleep(900);
+                    if (await detailPopupOpen(page)) { opened = true; break; }
+                }
+            }
+        }
+        if (!opened) {
+            log(`「${name}」的使用弹窗打不开，跳过这一档`);
+            continue;
+        }
+
+        // ---- 2) 弹窗里点「快速使用1个」（只点这一次，绝不重试，避免吃两粒）----
+        const beforeP = await popupQuantity(page);
+        await clickInDetailPopup(page, '1个');
+        for (let i = 0; i < 4; i++) {
+            await sleep(1100);
+            if (!(await detailPopupOpen(page))) break;      // 弹窗关了（正常情况）
+            const p = await popupQuantity(page);
+            if (p >= 0 && beforeP >= 0 && p < beforeP) break;
+        }
+        if (await detailPopupOpen(page)) await closeDetailPopup(page, { log });
+
+        // ---- 3) 以列表数量为准（弹窗点完会自动关，弹窗里的数字读不到） ----
+        const after = await rowQuantity(page, name);
+        if (after >= 0 && after < left) {
+            log(`「${name}」用掉 1 个（列表 ${left} → ${after}）`);
+            return { ok: true, item: name, left: after };
+        }
+        log(`「${name}」点了「1个」但列表数量没变（${left} → ${after}），换下一档`);
+    }
+    return { ok: false, item: '', left: -1 };
+}
+
+// 血池为 0 时的完整补给流程。返回 { ok, used, item, blood, reason }
+//   opts.inDungeon：在副本里（点「背包」），否则走首页「包裹」
+//   opts.force    ：调用方已经自己判过血池 0（且已经把战斗面板撤掉、读不到血池）时置 true，
+//                   跳过开头的血池判据直接补药。否则会误报 no-blood-read。
+// ★ 只补 1 个（用户 2026-11-15）：体力宝效果是覆盖不是叠加，吃第二个会把前一个的血池覆盖掉，
+//   剩余量不会变多，纯属浪费。所以这里没有 maxUse 循环 —— 补完还打不动就是别的原因，不是药不够。
+async function healBlood(page, opts = {}) {
+    const log = opts.log || (() => { });
+    const tag = opts.tag || '补血池';
+    let t = await visibleText(page);
+    const blood = readBlood(t);
+    if (!opts.force) {
+        if (blood === null) return { ok: false, used: 0, item: '', blood: null, reason: 'no-blood-read' };
+        if (blood > 0) return { ok: true, used: 0, item: '', blood, reason: 'already-ok' };
+    }
+
+    // 1) 在战斗面板里先撤退（副本内撤退是「离开战斗」，人还在副本房间里）
+    if (inFightPanel(t)) {
+        log(`[${tag}] 血池 0，先点「撤退」离开战斗`);
+        if (!(await clickTextReal(page, '撤退'))) await clickByText(page, '撤退', { exact: true });
+        await sleep(1200);
+        t = await visibleText(page);
+        if (inFightPanel(t)) {
+            log(`[${tag}] 「撤退」没生效，按 Escape 兜底`);
+            await page.keyboard.press('Escape').catch(() => { });
+            await sleep(800);
+            t = await visibleText(page);
+        }
+    }
+
+    // 2) 打开背包 → 药水页签
+    if (!(await openBagPanel(page, { inDungeon: opts.inDungeon, log }))) {
+        return { ok: false, used: 0, item: '', blood, reason: 'no-bag' };
+    }
+    if (!(await gotoPotionTab(page, { log }))) {
+        await closeBagPanel(page, { log });
+        return { ok: false, used: 0, item: '', blood, reason: 'no-potion-tab' };
+    }
+
+    // 3) 用体力宝（优先小的），只吃一个
+    const r = await useStaminaItem(page, { log, inDungeon: opts.inDungeon });
+    await closeBagPanel(page, { log });
+    if (!r.ok) {
+        log(`[${tag}] 背包里没有可用的体力宝（小体力宝/体力宝），或点了没吃进去`);
+        return { ok: false, used: 0, item: '', blood, reason: 'no-item' };
+    }
+    const nb = readBlood(await visibleText(page));
+    if (nb !== null && nb > 0) log(`[${tag}] 血池 ${blood === null ? '?' : blood} → ${nb}`);
+    log(`[${tag}] 已用 1 个「${r.item}」（覆盖式恢复，不能叠加），回到战斗继续`);
+    return { ok: true, used: 1, item: r.item, blood: nb === null ? blood : nb, reason: 'healed' };
+}
+
+module.exports = {
+    recoverDungeon, closeSweepPopup, clickAndVerify, clickByText, clickTextReal, visibleText, dismissPopups,
+    readRewardToast, claimEvidence, claimEvidenceIn, remainTimes, sleep,
+    readBlood, inFightPanel, healBlood,
+    openBagPanel, closeBagPanel, gotoPotionTab, useStaminaItem,
+    // 药水页细分步骤（探针用）
+    clickBtnInRow, clickUseInRow, realClick, clickOnceAndCheck, rowQuantity, rereadBagQuantity,
+    detailPopupRect, detailPopupOpen, popupQuantity, clickInDetailPopup, closeDetailPopup,
+};
