@@ -337,10 +337,15 @@ async function atHub(page) {
 }
 
 // 打一只怪：选怪后反复出刀直到出现结算（一刀可能杀不死），最后关结算
+// 血池为 0（用户 2026-11-15）：面板「体力：x/y -0 血池：0」时点攻击无效，会白点 12 刀后
+// 记「未见结算」，怪留房间里 → 三线永远少怪。处理：撤退 → 背包 → 药水 → 体力宝（优先小的）→ 接着打。
+let BLOOD_DEAD = false;   // 体力宝用光/补药失败后不再反复开背包
+
 async function fightOne(page, name) {
     if (!(await clickMonster(page, name))) return false;
     await sleep(300);
     let blades = 0;
+    let heals = 0;
     for (let a = 0; a < 12; a++) {
         const txt = await getPageText(page);
         if (txt.includes('关闭')) {
@@ -350,6 +355,27 @@ async function fightOne(page, name) {
             return true;
         }
         if (txt.includes('攻击')) {
+            // 血池 0 的判据（2026-11-15 真机实测）：血池 0 时还能出几刀，不是立刻打不动。
+            // 先打满 3 刀仍未出结算、血池又是 0 → 才补药（只补 1 个，体力宝覆盖不叠加）。
+            if (blades >= 3 && drain.readBlood(txt) === 0) {
+                if (BLOOD_DEAD || heals >= 1) {
+                    console.log(`  [血池] ${name}: 血池 0${BLOOD_DEAD ? '（药已用光）' : '（补过 1 个仍为 0）'}，放弃这只`);
+                    // 补过 1 个还是 0 → 不是药不够，别再逐只怪开背包吃第二次药
+                    BLOOD_DEAD = true;
+                    break;
+                }
+                const h = await drain.healBlood(page, { tag: `补血池·${name}`, inDungeon: true, log: console.log });
+                if (!h.ok) {
+                    BLOOD_DEAD = true;
+                    console.log(`::warning::${name} 血池 0 且补药失败（${h.reason}）→ 本波不再尝试补药`);
+                    break;
+                }
+                heals++;
+                blades = 0;
+                if (!(await clickMonster(page, name))) { console.log(`  [血池] ${name}: 补药后点不回这只怪`); break; }
+                await sleep(500);
+                continue;
+            }
             await page.locator('text=攻击').first().click({ force: true, timeout: 500 }).catch(() => {});
             blades++;
             await sleep(300);

@@ -819,10 +819,17 @@ async function monsterDrops(page, name) {
 }
 
 // 与指定怪打一场：点怪 → 攻击到结算 → 关闭；返回结算文本（含掉落信息）或 null
+// 血池为 0（用户 2026-11-15）：野区点怪后面板「体力：x/y -0 血池：0」，点攻击不掉血，
+// 旧代码白点 12 刀后返回 null → 外层以为任务没怪。处理：撤退 → 首页「包裹」→「药水」→
+// 体力宝（优先小体力宝）→ 关包裹 → 重新点怪接着打。
+let BLOOD_DEAD = false;   // 药已用光/补药失败后不再反复开包裹
+
 async function fightMonster(page, name) {
     if (!(await clickMonster(page, name))) return null;
     await sleep(500);
     let resultTxt = '';
+    let heals = 0;
+    let blades = 0;
     for (let a = 0; a < 12; a++) {
         const txt = await getPageText(page);
         if (txt.includes('关闭')) {
@@ -835,7 +842,30 @@ async function fightMonster(page, name) {
             return resultTxt || `战斗:${name}`;
         }
         if (txt.includes('攻击')) {
+            // 血池 0 的判据（2026-11-15 真机实测）：血池显示 0 时场上还能出几刀，不是立刻打不动，
+            // 一进面板就撤退补药会白吃药。所以先打满 3 刀，仍在战斗面板、血池又是 0 → 才认定打不动。
+            // 只补 1 个：体力宝是「覆盖」不是「叠加」，补第二个不会让血池变多。
+            if (blades >= 3 && drain.readBlood(txt) === 0) {
+                if (BLOOD_DEAD || heals >= 1) {
+                    console.log(`  [血池] ${name}: 血池 0${BLOOD_DEAD ? '（药已用光）' : '（补过 1 个仍为 0）'}，放弃这只`);
+                    // 补过 1 个还是 0 → 不是药不够，别再逐只怪开包裹吃第二次药
+                    BLOOD_DEAD = true;
+                    break;
+                }
+                const h = await drain.healBlood(page, { tag: `补血池·${name}`, inDungeon: false, log: console.log });
+                if (!h.ok) {
+                    BLOOD_DEAD = true;
+                    console.log(`::warning::${name} 血池 0 且补药失败（${h.reason}）→ 本波不再尝试补药`);
+                    break;
+                }
+                heals++;
+                blades = 0;
+                if (!(await clickMonster(page, name))) { console.log(`  [血池] ${name}: 补药后点不回这只怪`); break; }
+                await sleep(500);
+                continue;
+            }
             await page.locator('text=攻击').first().click({ force: true, timeout: 500 }).catch(() => {});
+            blades++;
             await sleep(300);
             continue;
         }
