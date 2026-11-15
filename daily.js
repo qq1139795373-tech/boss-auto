@@ -270,6 +270,32 @@ function atCity(txt, dest) {
 let SAIL_FAIL = '';
 function sailFailReason() { return SAIL_FAIL; }
 
+// 城市行坐标点击。★ 不能再用全文匹配：11-15 探针实证 coldwind2 亚特兰蒂斯，
+// `getByText('亚特兰蒂斯').first()` 命中的是 <UNI-APP> 根节点（整页 textContent 都含这三个字），
+// 点根节点 = 点空白，既不选城也不弹「出航确认」→ 3 轮空转 → 判「到不了城市」。
+// 页头那句「前往亚特兰蒂斯岛可交」同样会抢先命中。
+// 城市行的确定性特征 = 文本含目标名 **且** 带「海里」，取面积最小的那个（行本身，不是祖先容器）。
+async function clickCityRow(page, dest) {
+    const p = await page.evaluate((d) => {
+        let best = null;
+        for (const el of document.querySelectorAll('body *')) {
+            const s = (el.textContent || '').trim();
+            if (!s.includes(d) || !/海里/.test(s)) continue;
+            const r = el.getBoundingClientRect();
+            if (!r.width || !r.height) continue;
+            // 被滚动区裁到视口外的行点下去会打偏，留给外层滚动逻辑处理
+            if (r.y < 0 || r.y > window.innerHeight - 5) continue;
+            const area = r.width * r.height;
+            if (best && best.area <= area) continue;
+            best = { area, x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+        }
+        return best;
+    }, dest).catch(() => null);
+    if (!p) return false;
+    await page.mouse.click(p.x, p.y);
+    return true;
+}
+
 // 起航判定：航行中/剩余距离/停止自动航行 任一出现即算离港（只认「停止自动航行」会误判，见 fish.js）
 async function waitSailing(page, sec) {
     for (let i = 0; i < sec; i++) {
@@ -300,6 +326,8 @@ async function sailTo(page, dest) {
     const regions = region ? [region] : ALL_REGIONS;
     let picked = false;
     for (let round = 1; round <= 3 && !picked; round++) {
+        // 白屏时出航面板根本弹不出来（11-15 coldwind2 亚特兰蒂斯 3 轮全空，最后判「到不了城市」）
+        await recoverBlank(page, '出航');
         // 重开出航面板
         await page.mouse.click(10, 10);
         await page.keyboard.press('Escape');
@@ -344,8 +372,9 @@ async function sailTo(page, dest) {
             if (!rp) console.log(`海域标签「${r}」没点到`);
             await sleep(1000);
             for (let s = 0; s < 5; s++) {
-                // 第2轮起用合成事件点击，绕过遮罩对坐标点击的拦截（farm.js 同款）
-                const ok = round === 1 ? await clickText(page, dest, 2000) : await clickLeaf(page, dest);
+                // 先按城市行坐标点（唯一能真正弹出「出航确认」的方式，见 clickCityRow 注释），点不到再用全文匹配兜底
+                const ok = (await clickCityRow(page, dest))
+                    || (round === 1 ? await clickText(page, dest, 2000) : await clickLeaf(page, dest));
                 if (ok) {
                     // 高峰期确认框慢半拍，最多8秒轮询（farm.js 实证：单次1.5秒查询会误判）
                     for (let c = 0; c < 8; c++) {
@@ -1098,12 +1127,21 @@ async function runTask(page, task) {
     const cap = task.type === 'mat' ? task.n * 8 + 8 : task.n * 3 + 3;
     let kills = 0;
     let hopNo = 0; // 本层找不到目标怪时换相邻房间的次数（怪常驻，不靠刷新）
+    let blankRetry = 0; // 白屏自愈次数，防死循环
     while (kills < cap) {
         // 注意：这里**不再**用「页面出现任务已完成」直接收工。
         // toast 会滞留（且上一条任务的成功提示可能还在），是 10-27 boss2 劫匪 0 杀收工、
         // boss4 盐矿 2 杀收工的直接原因。完成与否只认「每杀一只查详情进度」和「列表行标签」。
         const result = await pickAndFight(page, task);
         if (!result) {
+            // 白屏时点什么都点不到，换房 8 次纯属空转（11-15 coldwind2 神秘人就这样废掉，快照是加载壳）
+            // → 先自愈，恢复后原地重打，不消耗换房次数
+            if (blankRetry < 2 && await recoverBlank(page, task.name)) {
+                blankRetry++;
+                hopNo = 0;
+                await sleep(1000);
+                continue;
+            }
             // 野区的怪是**固定常驻、可无限打**的（用户 10-26 纠正：不是随机刷新、不会消失；
             // 只有副本才是杀一只少一只）→ 站在原地反复点「刷新」没有意义（反而会让页面短暂空白，
             // 被误判成"无怪"）→ 直接换相邻房间找目标怪，同片野区的房间来回轮换，走 8 次还没有就放弃。
@@ -1354,10 +1392,97 @@ async function onMainPage(page) {
     return t.includes('当前城市') || /你看到：/.test(t);
 }
 
+// ---- 页面白屏自愈 ----------------------------------------------------------
+// 2026-11-15 coldwind2 实证：同一次运行里「神秘人」换房 8 次全无目标怪（快照是
+// `<strong>Please enable JavaScript to continue.</strong>`）、紧接着「火岩结晶」出航面板 3 轮打不开 →
+// 传送兜底也「未检测到到达」→ 两项全废。两条症状同一个原因：**SPA 没渲染**，页面只剩加载壳。
+// 之前所有兜底（换房 / 重开出航面板 / 点返回）都建立在「页面能用」这个前提上，白屏时全是空转。
+// 所以专门加一层：认出白屏 → reload（会话在 localStorage，通常自动回主界面）→ 不回就重登。
+let BLANK_TOTAL = 0;   // 总共 reload 过几次（防一个坏页面无线打转）
+let BLANK_STREAK = 0;  // 连续救不回来的次数
+const BLANK_MAX = Number(process.env.DAILY_BLANK_MAX || 15);
+
+async function isBlankPage(page) {
+    // 加载壳 / 极短正文都可能只是瞬时状态（uni-app 路由切换时 body 会短暂只剩壳）。
+    // 11-15 补跑实证：一上来就 reload 会把 3 次额度在正常操作里烧光，真白屏时反而没救了。
+    // 统一复采一次（间隔 2 秒），两次都是空壳才判白屏。
+    const probe = async () => {
+        const t = await getPageText(page);
+        // ★ 必须先判锚点：`<strong>Please enable JavaScript...</strong>` 在**渲染正常**的页面里也常驻
+        // （11-15 探针 dump 实证，主界面文本开头就有它）。先判它会把每个正常页面都当成白屏，
+        // 补跑第一版就是这么把 3 次额度在正常操作里烧光的。
+        if (t.includes('当前城市') || t.includes('你看到')) return 'ok';
+        if (t.includes('Please enable JavaScript')) return 'blank';
+        return t.replace(/\s+/g, '').length < 20 ? 'blank' : 'ok';
+    };
+    if (await probe() === 'ok') return false;
+    await sleep(2000);
+    return await probe() === 'blank';
+}
+
+// reload 后可能掉回登录页，补一遍登录（同 run() 里的流程，抽出来复用）
+async function relogin(page) {
+    for (let i = 1; i <= 3; i++) {
+        const inputs = await page.$$('input');
+        if (inputs.length >= 2) {
+            await inputs[0].fill(ACCOUNT).catch(() => {});
+            await inputs[1].fill(PASSWORD).catch(() => {});
+            await page.getByText('登录').first().click().catch(() => {});
+            await sleep(3000);
+        }
+        for (let k = 0; k < 6; k++) {
+            await clickText(page, '进入游戏', 2000);
+            await sleep(3000);
+            const t = await getPageText(page);
+            if (t.includes('当前城市') || t.includes('你看到')) {
+                console.log('白屏恢复：重新登录成功');
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+async function recoverBlank(page, where = '') {
+    if (BLANK_TOTAL >= BLANK_MAX) return false;
+    // 页面正常 = 上一轮白屏已经过去了 → 连续失败计数清零（额度看总量，不看单次）
+    if (!(await isBlankPage(page))) { BLANK_STREAK = 0; return false; }
+    if (BLANK_STREAK >= 3) return false;   // 连续 3 次救不回来就别再耗时间
+    BLANK_TOTAL++;
+    console.log(`[白屏恢复] ${where ? where + ' ' : ''}页面未渲染（只剩加载壳），reload 重试（累计 ${BLANK_TOTAL}/${BLANK_MAX}，连续失败 ${BLANK_STREAK}/3）`);
+    for (let att = 1; att <= 2; att++) {
+        try {
+            await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+        } catch (e) {
+            console.log(`[白屏恢复] reload 第${att}次失败:`, (e.message || '').split('\n')[0]);
+        }
+        let backToLogin = false;
+        for (let i = 0; i < 12; i++) {
+            await sleep(2500);
+            const t = await getPageText(page);
+            if (t.includes('当前城市') || t.includes('你看到')) {
+                console.log('[白屏恢复] 已恢复');
+                BLANK_STREAK = 0;
+                return true;
+            }
+            if (!t.includes('Please enable JavaScript') && t.includes('登录')) { backToLogin = true; break; }
+        }
+        if (backToLogin && await relogin(page)) {
+            BLANK_STREAK = 0;
+            return true;
+        }
+    }
+    BLANK_STREAK++;
+    console.log(`[白屏恢复] 2 次 reload 仍未恢复（连续失败 ${BLANK_STREAK}/3）`);
+    return false;
+}
+
 // 硬复位到主界面：任何前置步骤（商城/任务页/副本/玩法弹窗）留下的页面都会让后面整条链塌掉。
 // 2026-10-29 coldwind8 就是停在商城页里一直往下跑。这里逐轮尝试，失败就如实报错退出，
 // 不再「假装没事继续跑」——那样只会产出一堆看不懂的假失败。
 async function ensureMainPage(page, maxTry = 4) {
+    // 白屏优先于一切：页面没渲染时点「返回」/Escape 都是打在空壳上，点 4 轮也不会好
+    if (await recoverBlank(page, '复位')) return true;
     for (let i = 1; i <= maxTry; i++) {
         const t = await getPageText(page);
         if (t.includes('当前城市') || /你看到：/.test(t) || t.includes('你看到')) return true;
