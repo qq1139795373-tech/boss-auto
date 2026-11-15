@@ -750,7 +750,7 @@ async function run() {
         const loopStart = Date.now();
         let lastLogAt = Date.now();
         let lastCountAt = Date.now();
-        let bloodGiveUpUntil = 0;   // 体力宝用光/补药失败后的冷却（避免每 20 只反复开包裹）
+        let bloodDead = false;   // 补药失败（药没了）才停手；农场一刀一怪不耗血池，不需要冷却
         let kickedAt = 0;
         let kickLogAt = 0;
         console.log('进入打怪循环（进度每60秒汇报一次）');
@@ -803,19 +803,18 @@ async function run() {
                 // 血池为 0 抽查（用户 2026-11-15）：面板「体力：x/y -0 血池：0」时不该再出刀
                 // （怪攻击力高的会反手把人砍死），旧代码却照样点攻击、照样 count++ → 白刷几小时看不出来。
                 // 农场是 50ms 一刀的快节奏，不能每刀都读页面 → 每 20 只抽查一次血池，出刀前先看。
-                // 处理：撤退 → 首页「包裹」→ 药水 → 体力宝（优先小的，只吃 1 个）→ 回来接着打。
-                if (count % 20 === 0 && Date.now() > bloodGiveUpUntil) {
+                // 农场一刀一怪，杀怪本身不消耗血池，所以补完直接接着刷、不需要冷却；只有「补药失败
+                //（药没了）」才停手，避免每 20 只白开一次包裹。
+                if (count % 20 === 0 && !bloodDead) {
                     const blood = drain.readBlood(await getPageText(page));
                     if (blood === 0) {
                         console.log(`[血池] 0（已刷 ${count} 只），撤退补药...`);
                         const h = await drain.healBlood(page, { tag: '补血池·农场', inDungeon: false, log: console.log });
-                        // 无论成败都歇 10 分钟再抽查：体力宝本来就只吃 1 个（覆盖不叠加），
-                        // 连着补没有任何收益，还会把药吃光。
-                        bloodGiveUpUntil = Date.now() + 10 * 60 * 1000;
                         if (h.ok) {
-                            console.log(`[血池] 补药成功（${h.item}×${h.used}），继续刷怪；10 分钟后再抽查`);
+                            console.log(`[血池] 补药成功（${h.item}×${h.used}），继续刷怪`);
                         } else {
-                            console.log(`::warning::[血池] 补药失败（${h.reason}），10 分钟内不再尝试，刷怪可能空转`);
+                            bloodDead = true;
+                            console.log(`::warning::[血池] 补药失败（${h.reason}），本波不再尝试补药，刷怪可能空转`);
                         }
                         continue;   // 补完药要重新点这只怪，这一只不计数
                     }
