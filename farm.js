@@ -800,36 +800,30 @@ async function run() {
                 await clickText(page, '经验妖灵');
                 await sleep(50);
 
+                // 血池为 0 抽查（用户 2026-11-15）：面板「体力：x/y -0 血池：0」时不该再出刀
+                // （怪攻击力高的会反手把人砍死），旧代码却照样点攻击、照样 count++ → 白刷几小时看不出来。
+                // 农场是 50ms 一刀的快节奏，不能每刀都读页面 → 每 20 只抽查一次血池，出刀前先看。
+                // 处理：撤退 → 首页「包裹」→ 药水 → 体力宝（优先小的，只吃 1 个）→ 回来接着打。
+                if (count % 20 === 0 && Date.now() > bloodGiveUpUntil) {
+                    const blood = drain.readBlood(await getPageText(page));
+                    if (blood === 0) {
+                        console.log(`[血池] 0（已刷 ${count} 只），撤退补药...`);
+                        const h = await drain.healBlood(page, { tag: '补血池·农场', inDungeon: false, log: console.log });
+                        // 无论成败都歇 10 分钟再抽查：体力宝本来就只吃 1 个（覆盖不叠加），
+                        // 连着补没有任何收益，还会把药吃光。
+                        bloodGiveUpUntil = Date.now() + 10 * 60 * 1000;
+                        if (h.ok) {
+                            console.log(`[血池] 补药成功（${h.item}×${h.used}），继续刷怪；10 分钟后再抽查`);
+                        } else {
+                            console.log(`::warning::[血池] 补药失败（${h.reason}），10 分钟内不再尝试，刷怪可能空转`);
+                        }
+                        continue;   // 补完药要重新点这只怪，这一只不计数
+                    }
+                }
+
                 // 一击必杀：直接点攻击，不循环
                 await page.locator('text=攻击').first().click({ force: true, timeout: 500 }).catch(() => {});
                 await sleep(50);
-
-                // 血池为 0 抽查（用户 2026-11-15）：面板「体力：x/y -0 血池：0」时点攻击不出结算，
-                // 但旧代码无论有没有结算都 count++ → 会白刷几小时还看不出来。
-                // 农场是 50ms 一刀的快节奏，不能每刀都读页面 → 每 20 只抽查一次「这一刀到底有没有结算」，
-                // 只有「没结算 + 血池为 0」才认定空转（血池 0 时仍能出几刀，单看血池会白吃药）。
-                // 处理：撤退 → 首页「包裹」→ 药水 → 体力宝（优先小的，只吃 1 个）→ 回来接着打。
-                if (count % 20 === 0 && Date.now() > bloodGiveUpUntil && !global.__bloodShot) {
-                    const after = await getPageText(page);
-                    if (!after.includes('关闭')) {
-                        global.__bloodShot = true;   // 只截一次，别把 runner 塞满
-                        await page.screenshot({ path: 'farm-noblood.png' }).catch(() => {});
-                        const blood = drain.readBlood(after);
-                        console.log(`[血池] 抽查：这一刀没出结算（血池 ${blood === null ? '未识别' : blood}），已刷 ${count} 只`);
-                        if (blood === 0) {
-                            const h = await drain.healBlood(page, { tag: '补血池·农场', inDungeon: false, log: console.log });
-                            // 无论成败都歇 10 分钟再抽查：体力宝本来就只吃 1 个（覆盖不叠加），
-                            // 连着补没有任何收益，还会把药吃光。
-                            bloodGiveUpUntil = Date.now() + 10 * 60 * 1000;
-                            if (h.ok) {
-                                console.log(`[血池] 补药成功（${h.item}×${h.used}），继续刷怪；10 分钟后再抽查`);
-                            } else {
-                                console.log(`::warning::[血池] 补药失败（${h.reason}），10 分钟内不再尝试，刷怪可能空转`);
-                            }
-                            continue;   // 补完药要重新点这只怪，这一只不计数
-                        }
-                    }
-                }
 
                 // 直接点关闭
                 await page.locator('text=关闭').first().click({ force: true, timeout: 500 }).catch(() => {});
