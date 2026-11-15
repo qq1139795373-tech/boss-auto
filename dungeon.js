@@ -23,6 +23,14 @@ const ARMS = [
     { dir: '东', entrance: '铁盐岔路', label: '东线' },
     { dir: '南', entrance: '赤晶入口', label: '南线' },
 ];
+// 全清基准：4 方向 × 8 层 × 3 只 = 96（zhsh/副本/炼器窟/炼器窟.txt：
+// 「每个方向为 3*8=24 个怪物，一共 4 个方向」；同资料另外强调「每种怪不止 8 只，
+// 副本条件只需要每种 8 只，但我需要每个怪物都刷干净」）。
+// 只用于「数量对账」诊断与补扫判断，**绝不作为领奖门槛**（2026-11-15：
+// 副本限时 60 分钟，领奖是大头，宁可少杀也必须领到）。
+const DUNGEON_EXPECT = 96;
+// 剩余多少分钟才允许回扫补怪（4 线手动清约 6~8 分钟 + 留给领奖）
+const RESCAN_MIN_LEFT = 15;
 
 async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -269,6 +277,7 @@ async function backToHub(page) {
 // 清空当前房间的怪，返回击杀数
 async function clearRoom(page, tag) {
     let kills = 0;
+    let emptyReads = 0;
     for (let attempt = 0; attempt < 15; attempt++) {
         const txt = await getPageText(page);
         const seg = viewSeg(txt);
@@ -278,7 +287,18 @@ async function clearRoom(page, tag) {
             continue;
         }
         const mobs = monstersIn(seg);
-        if (!mobs.length) return kills;
+        if (!mobs.length) {
+            // 「本层真的没怪」和「怪还没渲染出来」必须分开。
+            // kidd.js 2026-10-29 实证：基德东线首读 0 只就当空房 → 只记 8 间/24 杀（总 48/51）。
+            // 炼器窟每层固定 3 只，正常路径第一读就有怪，所以全清时零额外开销；
+            // 只有真的读不到（页面还没渲染）才会在这里多等，最多 3 次 ≈4.5 秒。
+            emptyReads++;
+            if (emptyReads >= 3) return kills;
+            console.log(`[${tag}] 房间没读到怪，等渲染（第${emptyReads}/3次）...`);
+            await sleep(1500);
+            continue;
+        }
+        emptyReads = 0;
         const before = seg.split(mobs[0]).length - 1;
         await fightOne(page, mobs[0]);
         const after = viewSeg(await getPageText(page));
@@ -292,8 +312,58 @@ async function clearRoom(page, tag) {
     throw new Error(`[${tag}] 房间怪物清理失败（15次尝试）`);
 }
 
-// 扫荡：进入副本后页头「回到起点」左侧若有「扫荡」，一键扫完4线（免手动清怪）
-// 扫荡收获弹窗（含“扫荡成功”toast）→ 知道了；成功返回 true，无入口/失败返回 false 走原4线流程
+// 走一条支路：从枢纽沿该方向一路深入（每方向 8 层 × 3 只），走到没有同方向出口为止，再回枢纽。
+// 返回 { code, kills, rooms, back }
+//   code: 'ok' | 'notHub'(不在枢纽) | 'noTime'(剩余不足5分钟) | 'noExit'(枢纽无该方向出口)
+// 抽成函数是为了「数量对账」时能原地把 4 线再跑一遍补怪（2026-11-15）。
+async function runArm(page, arm, tagPrefix = '') {
+    const tag = `${tagPrefix}${arm.label}`;
+    if (!(await atHub(page))) return { code: 'notHub', kills: 0, rooms: 0, back: false };
+    const left = await remainMin(page);
+    if (left !== null && left < 5) return { code: 'noTime', kills: 0, rooms: 0, back: false, left };
+    const started = await exitLabel(page, arm.dir);
+    if (!started) return { code: 'noExit', kills: 0, rooms: 0, back: false };
+    console.log(`[${tag}] 进入，入口: ${started}`);
+    await clickExit(page, arm.dir);
+    await sleep(1500);
+
+    let armKills = 0;
+    let rooms = 0;
+    for (rooms = 0; rooms < 30; rooms++) {
+        const seg = viewSeg(await getPageText(page));
+        const present = monstersIn(seg);
+        const roomKills = await clearRoom(page, tag);
+        armKills += roomKills;
+        if (present.length) {
+            console.log(`[${tag}] 第${rooms + 1}间: ${present.join('/')} ×${roomKills}`);
+        }
+        // 炼器窟是「每方向一条直线」，继续沿同一方向深入即可（不需要 visited 回溯）
+        const deep = await exitLabel(page, arm.dir);
+        if (!deep) {
+            console.log(`[${tag}] 到达尽头（${rooms + 1}间，击杀${armKills}）`);
+            break;
+        }
+        await clickExit(page, arm.dir);
+        await sleep(1500);
+    }
+    if (rooms >= 30) console.log(`[${tag}] 房间数达到上限30，强制返回`);
+
+    // 打完回起点再往北走回枢纽广场（比原路走快）
+    const back = await backToHub(page);
+    if (back) {
+        console.log(`[${tag}] 已回到枢纽广场，本线${armKills}杀，剩余${await remainMin(page)}分钟`);
+    } else {
+        console.log(`[${tag}] 返回枢纽失败`);
+        await page.screenshot({ path: `dungeon-back-fail-${tag}.png` }).catch(() => {});
+    }
+    return { code: 'ok', kills: armKills, rooms: rooms + 1, back };
+}
+
+// 扫荡：进入副本后页头「回到起点」左侧若有「扫荡」，一键扫完4线（免手动清怪）。
+// 返回 { ok, why, popupStuck }
+//   ok=true  → 扫荡成功。**系统保证：扫荡成功 = 4 线怪物全部刷完**（2026-11-15 用户确认），
+//              所以不必再校验副本条件，也绝不能因为弹窗关不掉就回头走 4 线（白跑 8 层×4 线）。
+//   ok=false → 根本没扫荡成（无入口/点击失败/无结果）→ 走原 4 线手动流程。
 async function trySweep(page) {
     // 副本页是异步渲染的：刚进本时「扫荡」链接可能还没出来，先轮询等一会儿（最多约6秒）
     let t0 = await getPageText(page);
@@ -310,14 +380,14 @@ async function trySweep(page) {
         const seg = i >= 0 ? t0.slice(i, i + 100).replace(/\s+/g, ' ') : '(页面无副本条件行)';
         console.log(`未见扫荡入口，走手动清怪流程 | ${seg} | 回到起点=${t0.includes('回到起点')} 退出副本=${t0.includes('退出副本')} 领取奖励=${t0.includes('领取奖励')} 文本长=${t0.length}`);
         await page.screenshot({ path: 'dungeon-no-sweep.png' }).catch(() => {});
-        return false;
+        return { ok: false, why: 'no-entry' };
     }
     console.log('发现扫荡入口，点击扫荡...');
     let ok = await clickLeaf(page, '扫荡');
     if (!ok) ok = await jsClick(page, '扫荡');
     if (!ok) {
         console.log('扫荡入口点击失败');
-        return false;
+        return { ok: false, why: 'click-failed' };
     }
     let txt = '';
     for (let w = 0; w < 8; w++) {
@@ -327,21 +397,22 @@ async function trySweep(page) {
     }
     if (!txt.includes('扫荡收获') && !txt.includes('扫荡成功')) {
         console.log('未出现扫荡结果，页面:', txt.substring(0, 150).replace(/\s+/g, ' '));
-        return false;
+        return { ok: false, why: 'no-result' };
     }
-    // 「扫荡收获」弹窗只有一个「知道了」（2026-10-28 用户截图确认），
-    // 点完必须回头验证它真的消失了：它盖在「领取奖励」上面，
-    // 没关掉就去点领奖，会变成两层弹窗叠在一起只关掉最上面一层（boss(0) 就是这么废的）。
+    // 走到这里 = 页面出现了「扫荡收获」/「扫荡成功」→ 扫荡已经生效、4 线怪已全清。
+    // 「扫荡收获」弹窗只有一个「知道了」（2026-10-28 用户截图确认），它盖在「领取奖励」上面，
+    // 点完必须回头验证真的消失了（2026-10-27 boss(0) 就是被它盖住、奖励被下一个步骤扔掉）。
+    // 但「关不掉」只是 UI 问题，**不能倒推扫荡失败**，否则会白跑 4 线还可能耗尽时间。
     const closed = await drain.closeSweepPopup(page, { log: console.log });
     if (!closed) {
-        console.log('「扫荡收获」弹窗关不掉，「领取奖励」会被它盖住');
+        console.log('「扫荡收获」弹窗关不掉 → 扫荡本身已成功（怪已全清），领奖前会再关一次，不走刷怪');
         await page.screenshot({ path: 'dungeon-sweep-popup-stuck.png' }).catch(() => {});
-        return false;
+        return { ok: true, popupStuck: true };
     }
     console.log('已关闭「扫荡收获」，可以领奖了');
     await sleep(1500);
     console.log('扫荡成功（剩余', await remainMin(page), '分钟），跳过4线清怪');
-    return true;
+    return { ok: true, popupStuck: false };
 }
 
 async function run() {
@@ -536,9 +607,18 @@ async function run() {
         let totalKills = 0;
         const armResults = [];
 
-        // 扫荡优先：进本后页头（「回到起点」左侧）有「扫荡」就一键完成，免走4线
-        const swept = NO_CLAIM ? false : await trySweep(page);
+        // 扫荡优先：进本后页头（「回到起点」左侧）有「扫荡」就一键完成，免走4线。
+        // ★ 判断依据：扫荡成功 = 系统保证 4 线怪已全清 → 直接去领奖，绝不回头刷怪；
+        //   只有「没有扫荡入口 / 点击失败 / 没出现扫荡结果」才算失败，才走 4 线手动流程。
+        const sw = NO_CLAIM ? { ok: false, why: 'no-claim' } : await trySweep(page);
+        const swept = sw.ok;
+        if (!swept && !NO_CLAIM) console.log(`扫荡未成功（${sw.why || 'unknown'}）→ 走 4 线手动清怪`);
         if (swept) {
+            if (sw.popupStuck) {
+                // 扫荡已成功但「扫荡收获」没关掉：领奖前再补关一次，别让它盖住「领取奖励」
+                const closed2 = await drain.closeSweepPopup(page, { log: console.log });
+                console.log(closed2 ? '补关「扫荡收获」成功，可以直接领奖' : '补关仍失败，领奖可能被弹窗挡住');
+            }
             armResults.push('扫荡');
         } else {
         // 回到枢纽广场：不在枢纽就先回到起点，再往北走（矿洞入口→前厅→枢纽广场）
@@ -551,61 +631,69 @@ async function run() {
         console.log('到达枢纽广场，剩余', await remainMin(page), '分钟');
 
         for (const arm of ARMS) {
-            if (!(await atHub(page))) {
+            const r = await runArm(page, arm);
+            if (r.code === 'notHub') {
                 console.log('不在枢纽广场，中止');
                 break;
             }
-            const left = await remainMin(page);
-            if (left !== null && left < 5) {
-                console.log(`剩余${left}分钟，不足5分钟，不再开新线`);
+            if (r.code === 'noTime') {
+                console.log(`剩余${r.left}分钟，不足5分钟，不再开新线`);
                 break;
             }
-            const started = await exitLabel(page, arm.dir);
-            if (!started) {
+            if (r.code === 'noExit') {
                 console.log(`[${arm.label}] 枢纽处无${arm.dir}向出口，跳过`);
                 armResults.push(`${arm.label}: 无入口`);
                 continue;
             }
-            console.log(`[${arm.label}] 进入，入口: ${started}`);
-            await clickExit(page, arm.dir);
-            await sleep(1500);
-
-            let armKills = 0;
-            let rooms = 0;
-            for (rooms = 0; rooms < 30; rooms++) {
-                const seg = viewSeg(await getPageText(page));
-                const present = monstersIn(seg);
-                const roomKills = await clearRoom(page, arm.label);
-                armKills += roomKills;
-                if (present.length) {
-                    console.log(`[${arm.label}] 第${rooms + 1}间: ${present.join('/')} ×${roomKills}`);
-                }
-                const deep = await exitLabel(page, arm.dir);
-                if (!deep) {
-                    console.log(`[${arm.label}] 到达尽头（${rooms + 1}间，击杀${armKills}）`);
-                    break;
-                }
-                await clickExit(page, arm.dir);
-                await sleep(1500);
-            }
-            if (rooms >= 30) console.log(`[${arm.label}] 房间数达到上限30，强制返回`);
-            totalKills += armKills;
-            armResults.push(`${arm.label}: ${armKills}杀/${rooms + 1}间`);
-
-            // 打完回起点再往北走回枢纽广场（比原路走快）
-            if (await backToHub(page)) {
-                console.log(`[${arm.label}] 已回到枢纽广场，累计${totalKills}杀，剩余${await remainMin(page)}分钟`);
-            } else {
+            totalKills += r.kills;
+            armResults.push(`${arm.label}: ${r.kills}杀/${r.rooms}间`);
+            console.log(`[${arm.label}] 已回到枢纽广场，累计${totalKills}杀，剩余${await remainMin(page)}分钟`);
+            if (!r.back) {
                 console.log(`[${arm.label}] 返回枢纽失败，中止`);
-                await page.screenshot({ path: `dungeon-back-fail-${arm.label}.png` }).catch(() => {});
                 break;
             }
         }
 
+        // ---- 数量对账（★ 只做诊断与补怪，绝不阻断领奖）----
+        // 基线 96 = 4 方向 × 8 层 × 3 只（见文件头 DUNGEON_EXPECT 注释）。
+        // 与基德同一原则：时间够就回扫补怪，时间不够就带着缺口直接领奖，只打 ::warning::。
+        let totalAll = totalKills;
+        if (!swept && !NO_CLAIM && totalAll < DUNGEON_EXPECT) {
+            const left = await remainMin(page);
+            const gap = DUNGEON_EXPECT - totalAll;
+            const canRescan = left === null || left >= RESCAN_MIN_LEFT;
+            if (canRescan) {
+                console.log(`⚠ 对账 ${totalAll}/${DUNGEON_EXPECT}，差 ${gap} 只 → 回扫一遍补怪（剩余${left}分钟）`);
+                let recov = 0;
+                for (const arm of ARMS) {
+                    const r = await runArm(page, arm, '补扫·');
+                    if (r.code !== 'ok') { console.log(`[补扫] 中止（${r.code}）`); break; }
+                    recov += r.kills;
+                    if (!r.back) break;
+                }
+                if (recov) {
+                    totalKills += recov;
+                    armResults.push(`补扫: ${recov}杀`);
+                    console.log(`回扫补回 ${recov} 只，累计 ${totalKills}/${DUNGEON_EXPECT}`);
+                } else {
+                    console.log('回扫一圈没补到怪（可能怪确实没刷出来）');
+                }
+                totalAll = totalKills;
+            } else {
+                console.log(`⚠ 对账 ${totalAll}/${DUNGEON_EXPECT}，差 ${gap} 只，剩余仅${left}分钟（<${RESCAN_MIN_LEFT}）→ 不回扫，直接领奖`);
+            }
+        }
+        if (swept) console.log('已扫荡，跳过数量对账');
+        else if (totalAll >= DUNGEON_EXPECT) console.log(`✔ 对账 ${totalAll}/${DUNGEON_EXPECT} 全清`);
+        else console.log(`::warning::炼器窟对账 ${totalAll}/${DUNGEON_EXPECT}，缺 ${DUNGEON_EXPECT - totalAll} 只（不阻断，照常领奖）`);
+
         console.log('各线结果:', armResults.join(' | '), '| 总击杀:', totalKills, '| 剩余', await remainMin(page), '分钟');
         }
 
-        const allArmsDone = swept || (armResults.length === 4 && !armResults.some(r => r.includes('无入口')));
+        // 4 线是否都跑完：按 ARMS 的线名精确计数，不依赖 armResults.length
+        // （补扫会往 armResults 追加「补扫: X杀」，用 length===4 会被顶成 false 而拒绝领奖）
+        const armOk = ARMS.filter(a => armResults.some(r => r.startsWith(`${a.label}: `) && r.includes('杀/'))).length;
+        const allArmsDone = swept || armOk === ARMS.length;
 
         // 领取奖励（只在4线全部走完后）
         pageText = await getPageText(page);
