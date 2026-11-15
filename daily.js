@@ -829,7 +829,6 @@ async function fightMonster(page, name) {
     await sleep(500);
     let resultTxt = '';
     let heals = 0;
-    let blades = 0;
     for (let a = 0; a < 12; a++) {
         const txt = await getPageText(page);
         if (txt.includes('关闭')) {
@@ -842,10 +841,10 @@ async function fightMonster(page, name) {
             return resultTxt || `战斗:${name}`;
         }
         if (txt.includes('攻击')) {
-            // 血池 0 的判据（2026-11-15 真机实测）：血池显示 0 时场上还能出几刀，不是立刻打不动，
-            // 一进面板就撤退补药会白吃药。所以先打满 3 刀，仍在战斗面板、血池又是 0 → 才认定打不动。
+            // 血池 0 立刻补药，不许先试几刀（2026-11-15 用户纠正）：有些怪攻击力很高，
+            // 等打满 3 刀人已经被砍死、副本直接判失败。血池 0 = 这一刀就不该出。
             // 只补 1 个：体力宝是「覆盖」不是「叠加」，补第二个不会让血池变多。
-            if (blades >= 3 && drain.readBlood(txt) === 0) {
+            if (drain.readBlood(txt) === 0) {
                 if (BLOOD_DEAD || heals >= 1) {
                     console.log(`  [血池] ${name}: 血池 0${BLOOD_DEAD ? '（药已用光）' : '（补过 1 个仍为 0）'}，放弃这只`);
                     // 补过 1 个还是 0 → 不是药不够，别再逐只怪开包裹吃第二次药
@@ -859,13 +858,11 @@ async function fightMonster(page, name) {
                     break;
                 }
                 heals++;
-                blades = 0;
                 if (!(await clickMonster(page, name))) { console.log(`  [血池] ${name}: 补药后点不回这只怪`); break; }
                 await sleep(500);
                 continue;
             }
             await page.locator('text=攻击').first().click({ force: true, timeout: 500 }).catch(() => {});
-            blades++;
             await sleep(300);
             continue;
         }

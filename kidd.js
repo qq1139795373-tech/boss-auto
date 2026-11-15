@@ -355,9 +355,9 @@ async function fightOne(page, name) {
             return true;
         }
         if (txt.includes('攻击')) {
-            // 血池 0 的判据（2026-11-15 真机实测）：血池 0 时还能出几刀，不是立刻打不动。
-            // 先打满 3 刀仍未出结算、血池又是 0 → 才补药（只补 1 个，体力宝覆盖不叠加）。
-            if (blades >= 3 && drain.readBlood(txt) === 0) {
+            // 血池 0 立刻补药，不许先试几刀（2026-11-15 用户纠正）：有些怪攻击力很高，
+            // 等打满 3 刀人已经被砍死、副本判失败。只补 1 个（体力宝覆盖不叠加）。
+            if (drain.readBlood(txt) === 0) {
                 if (BLOOD_DEAD || heals >= 1) {
                     console.log(`  [血池] ${name}: 血池 0${BLOOD_DEAD ? '（药已用光）' : '（补过 1 个仍为 0）'}，放弃这只`);
                     // 补过 1 个还是 0 → 不是药不够，别再逐只怪开背包吃第二次药
