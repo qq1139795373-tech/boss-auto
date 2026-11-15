@@ -29,6 +29,12 @@ const ARMS = [
     { dir: '东', label: '东线' },
     { dir: '北', label: '北线' },
 ];
+// 全清基准：17 间 × 3 只 = 51（走廊9 + 西9 + 东27 + 北6，用户地图逐间核对过）。
+// 只用于「数量对账」诊断与补扫判断，**绝不作为领奖门槛**（2026-11-15 用户明确要求：
+// 副本限时 60 分钟，领奖是大头，宁可少杀也必须领到）。
+const KIDD_EXPECT = 51;
+// 剩余多少分钟才允许回扫补怪（跑一遍三线约 3~4 分钟 + 留给领奖）
+const RESCAN_MIN_LEFT = 8;
 
 async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -470,6 +476,60 @@ async function clearRoom(page, tag) {
     throw new Error(`[${tag}] 房间怪物清理失败（15次尝试）`);
 }
 
+// 跑一条支路：从枢纽进本线，沿途清怪直到走到尽头（没有未访问的出口），再回枢纽。
+// 返回 { code, kills, rooms, back }
+//   code: 'ok' | 'notHub'(不在枢纽) | 'noTime'(剩余不足5分钟) | 'noExit'(枢纽无该方向出口)
+// 抽成函数是为了「数量对账」时能原地把三线再跑一遍补怪（2026-11-15）。
+async function runArm(page, arm, tagPrefix = '') {
+    const tag = `${tagPrefix}${arm.label}`;
+    if (!(await atHub(page))) return { code: 'notHub', kills: 0, rooms: 0, back: false };
+    const left = await remainMin(page);
+    if (left !== null && left < 5) return { code: 'noTime', kills: 0, rooms: 0, back: false, left };
+    const started = await exitLabel(page, arm.dir);
+    if (!started) return { code: 'noExit', kills: 0, rooms: 0, back: false };
+    console.log(`[${tag}] 进入，出口: ${started}`);
+
+    // visited 只记已实际走过的房间；入口线5房+本线第一房预置，防止往回拐
+    // （首跑教训：第一房没预置导致在囚道选中「东：奴隶仓」走回头路，漏了奴隶仓深处）
+    const firstRoom = started.slice(1).replace(/[：:]/, '').trim();
+    const visited = new Set([...ENTRY_PATH, firstRoom]);
+    await clickExit(page, arm.dir);
+    await sleep(1500);
+
+    let armKills = 0;
+    let rooms = 0;
+    for (rooms = 0; rooms < 30; rooms++) {
+        const seg = viewSeg(await getPageText(page));
+        const present = monstersIn(seg);
+        const roomKills = await clearRoom(page, tag);
+        armKills += roomKills;
+        if (present.length) {
+            console.log(`[${tag}] 第${rooms + 1}间: ${present.join('/')} ×${roomKills}`);
+        }
+        const exits = await allExits(page);
+        const next = exits.find(e => !visited.has(e.target));
+        if (!next) {
+            console.log(`[${tag}] 到达尽头（${rooms + 1}间，击杀${armKills}）`);
+            break;
+        }
+        visited.add(next.target);
+        console.log(`[${tag}] 第${rooms + 1}间 → ${next.dir}：${next.target}`);
+        await clickExit(page, next.dir);
+        await sleep(1500);
+    }
+    if (rooms >= 30) console.log(`[${tag}] 房间数达到上限30，强制返回`);
+
+    // 回枢纽：尽头处「回到起点」→秘藏入口→一路往北
+    const back = await backToHub(page);
+    if (back) {
+        console.log(`[${tag}] 已回到枢纽广场，本线${armKills}杀，剩余${await remainMin(page)}分钟`);
+    } else {
+        console.log(`[${tag}] 返回枢纽失败`);
+        await page.screenshot({ path: `kidd-back-fail-${tag}.png` }).catch(() => {});
+    }
+    return { code: 'ok', kills: armKills, rooms: rooms + 1, back };
+}
+
 // 扫荡：进入副本后页头「回到起点」左侧若有「扫荡」，一键扫完（按钮逻辑同炼器窟）
 async function trySweep(page) {
     let t0 = await getPageText(page);
@@ -732,63 +792,61 @@ async function run() {
         console.log('到达枢纽广场，剩余', await remainMin(page), '分钟');
 
         for (const arm of ARMS) {
-            if (!(await atHub(page))) {
+            const r = await runArm(page, arm);
+            if (r.code === 'notHub') {
                 console.log('不在枢纽广场，中止');
                 break;
             }
-            const left = await remainMin(page);
-            if (left !== null && left < 5) {
-                console.log(`剩余${left}分钟，不足5分钟，不再开新线`);
+            if (r.code === 'noTime') {
+                console.log(`剩余${r.left}分钟，不足5分钟，不再开新线`);
                 break;
             }
-            const started = await exitLabel(page, arm.dir);
-            if (!started) {
+            if (r.code === 'noExit') {
                 console.log(`[${arm.label}] 枢纽处无${arm.dir}向出口，跳过`);
                 armResults.push(`${arm.label}: 无入口`);
                 continue;
             }
-            console.log(`[${arm.label}] 进入，出口: ${started}`);
-            // visited 只记已实际走过的房间；入口线5房+本线第一房预置，防止往回拐
-            // （首跑教训：第一房没预置导致在囚道选中「东：奴隶仓」走回头路，漏了奴隶仓深处）
-            const firstRoom = started.slice(1).replace(/[：:]/, '').trim();
-            const visited = new Set([...ENTRY_PATH, firstRoom]);
-            await clickExit(page, arm.dir);
-            await sleep(1500);
-
-            let armKills = 0;
-            let rooms = 0;
-            for (rooms = 0; rooms < 30; rooms++) {
-                const seg = viewSeg(await getPageText(page));
-                const present = monstersIn(seg);
-                const roomKills = await clearRoom(page, arm.label);
-                armKills += roomKills;
-                if (present.length) {
-                    console.log(`[${arm.label}] 第${rooms + 1}间: ${present.join('/')} ×${roomKills}`);
-                }
-                const exits = await allExits(page);
-                const next = exits.find(e => !visited.has(e.target));
-                if (!next) {
-                    console.log(`[${arm.label}] 到达尽头（${rooms + 1}间，击杀${armKills}）`);
-                    break;
-                }
-                visited.add(next.target);
-                console.log(`[${arm.label}] 第${rooms + 1}间 → ${next.dir}：${next.target}`);
-                await clickExit(page, next.dir);
-                await sleep(1500);
-            }
-            if (rooms >= 30) console.log(`[${arm.label}] 房间数达到上限30，强制返回`);
-            totalKills += armKills;
-            armResults.push(`${arm.label}: ${armKills}杀/${rooms + 1}间`);
-
-            // 回枢纽：尽头处「回到起点」→秘藏入口→一路往北
-            if (await backToHub(page)) {
-                console.log(`[${arm.label}] 已回到枢纽广场，累计${totalKills}杀，剩余${await remainMin(page)}分钟`);
-            } else {
+            totalKills += r.kills;
+            armResults.push(`${arm.label}: ${r.kills}杀/${r.rooms}间`);
+            console.log(`[${arm.label}] 已回到枢纽广场，累计${totalKills}杀，剩余${await remainMin(page)}分钟`);
+            if (!r.back) {
                 console.log(`[${arm.label}] 返回枢纽失败，中止`);
-                await page.screenshot({ path: `kidd-back-fail-${arm.label}.png` }).catch(() => {});
                 break;
             }
         }
+
+        // ---- 数量对账（★ 只做诊断与补怪，绝不阻断领奖）----
+        // 用户要求（2026-11-15）：副本限时 60 分钟，领奖是大头，宁可少杀也必须领到。
+        // 所以这里的策略是：时间够就回扫一遍补怪；时间不够就带着缺口直接领奖，只打 ::warning::。
+        let totalAll = corridorKills + totalKills;
+        if (!swept && !NO_CLAIM && totalAll < KIDD_EXPECT) {
+            const left = await remainMin(page);
+            const gap = KIDD_EXPECT - totalAll;
+            const canRescan = left === null || left >= RESCAN_MIN_LEFT;
+            if (canRescan) {
+                console.log(`⚠ 对账 ${totalAll}/${KIDD_EXPECT}，差 ${gap} 只 → 回扫一遍补怪（剩余${left}分钟）`);
+                let recov = 0;
+                for (const arm of ARMS) {
+                    const r = await runArm(page, arm, '补扫·');
+                    if (r.code !== 'ok') { console.log(`[补扫] 中止（${r.code}）`); break; }
+                    recov += r.kills;
+                    if (!r.back) break;
+                }
+                if (recov) {
+                    totalKills += recov;
+                    armResults.push(`补扫: ${recov}杀`);
+                    console.log(`回扫补回 ${recov} 只，累计 ${corridorKills + totalKills}/${KIDD_EXPECT}`);
+                } else {
+                    console.log('回扫一圈没补到怪（怪可能确实没刷出来）');
+                }
+                totalAll = corridorKills + totalKills;
+            } else {
+                console.log(`⚠ 对账 ${totalAll}/${KIDD_EXPECT}，差 ${gap} 只，剩余仅${left}分钟（<${RESCAN_MIN_LEFT}）→ 不回扫，直接领奖`);
+            }
+        }
+        if (swept) console.log('已扫荡，跳过数量对账');
+        else if (totalAll >= KIDD_EXPECT) console.log(`✔ 对账 ${totalAll}/${KIDD_EXPECT} 全清`);
+        else console.log(`::warning::基德对账 ${totalAll}/${KIDD_EXPECT}，缺 ${KIDD_EXPECT - totalAll} 只（不阻断，照常领奖）`);
 
         console.log('各线结果:', armResults.join(' | '),
             `| 总击杀: ${corridorKills + totalKills}（走廊${corridorKills} + 三线${totalKills}）`,
