@@ -465,9 +465,16 @@ async function northToHubClearing(page) {
 }
 
 // 清空当前房间的怪，返回击杀数
+// ★ 不抛异常（2026-11-16 教训）：11-16 00:00 北线兽栏口一只「基德狂兽」连打 15 轮 ×12 刀都读不到结算，
+//   旧代码在这里 `throw` → 一路冒泡出 run() → 后面的「对账 / 领取奖励」整段被跳过，
+//   36 杀早已满足条件（基德手下:20）却没领奖，剩 58 分钟白白浪费。领奖是大头，绝对不能因为
+//   「某一只怪打不死」就把整个副本的奖励丢掉。改为：同一只怪连续打 3 次不死 → 本轮跳过它，
+//   继续清同房间其它怪；15 次仍清不完 → 告警并带着缺口返回，由上层照常对账 + 领奖。
 async function clearRoom(page, tag) {
     let kills = 0;
     let emptyReads = 0;
+    const stuckHits = new Map();     // 怪名 → 连续打不死的次数
+    const skip = new Set();          // 本轮直接跳过的怪名
     for (let attempt = 0; attempt < 15; attempt++) {
         const txt = await getPageText(page);
         const seg = viewSeg(txt);
@@ -476,7 +483,7 @@ async function clearRoom(page, tag) {
             await sleep(1000);
             continue;
         }
-        const mobs = monstersIn(seg);
+        const mobs = monstersIn(seg).filter((m) => !skip.has(m));
         if (!mobs.length) {
             // 「真空房间」和「怪还没渲染出来」必须分开。
             // 2026-10-29 实证：东线「西库尽头」进房后第一次读就是 0 只怪，旧代码 `return kills`
@@ -493,13 +500,23 @@ async function clearRoom(page, tag) {
         await fightOne(page, mobs[0]);
         const after = viewSeg(await getPageText(page));
         const nowCount = after.split(mobs[0]).length - 1;
-        kills += Math.max(0, before - nowCount);
-        if (before - nowCount === 0 && attempt > 10) {
-            await page.screenshot({ path: `dungeon-stuck-${tag}.png` }).catch(() => {});
+        const got = Math.max(0, before - nowCount);
+        kills += got;
+        if (got === 0) {
+            const n = (stuckHits.get(mobs[0]) || 0) + 1;
+            stuckHits.set(mobs[0], n);
+            if (n >= 3) {
+                skip.add(mobs[0]);
+                console.log(`::warning::[${tag}] 「${mobs[0]}」连续 ${n} 次打不死（每轮 12 刀无结算）→ 本轮跳过它，继续清其它怪`);
+                await page.screenshot({ path: `dungeon-stuck-${tag}.png` }).catch(() => {});
+            }
+        } else {
+            stuckHits.delete(mobs[0]);
         }
     }
     await page.screenshot({ path: `dungeon-room-stuck-${tag}.png` }).catch(() => {});
-    throw new Error(`[${tag}] 房间怪物清理失败（15次尝试）`);
+    console.log(`::warning::[${tag}] 房间 15 次未清完（跳过 ${skip.size ? [...skip].join('/') : '无'}）→ 带回缺口继续，不中断副本`);
+    return kills;
 }
 
 // 跑一条支路：从枢纽进本线，沿途清怪直到走到尽头（没有未访问的出口），再回枢纽。
@@ -817,28 +834,35 @@ async function run() {
         if (corridorKills) armResults.push(`走廊: ${corridorKills}杀`);
         console.log('到达枢纽广场，剩余', await remainMin(page), '分钟');
 
-        for (const arm of ARMS) {
-            const r = await runArm(page, arm);
-            if (r.code === 'notHub') {
-                console.log('不在枢纽广场，中止');
-                break;
+        // 三线遍历全程兜住异常（2026-11-16）：任何一线出问题都只告警，不中断后续对账与领奖。
+        try {
+            for (const arm of ARMS) {
+                const r = await runArm(page, arm);
+                if (r.code === 'notHub') {
+                    console.log('不在枢纽广场，中止');
+                    break;
+                }
+                if (r.code === 'noTime') {
+                    console.log(`剩余${r.left}分钟，不足5分钟，不再开新线`);
+                    break;
+                }
+                if (r.code === 'noExit') {
+                    console.log(`[${arm.label}] 枢纽处无${arm.dir}向出口，跳过`);
+                    armResults.push(`${arm.label}: 无入口`);
+                    continue;
+                }
+                totalKills += r.kills;
+                armResults.push(`${arm.label}: ${r.kills}杀/${r.rooms}间`);
+                console.log(`[${arm.label}] 已回到枢纽广场，累计${totalKills}杀，剩余${await remainMin(page)}分钟`);
+                if (!r.back) {
+                    console.log(`[${arm.label}] 返回枢纽失败，中止`);
+                    break;
+                }
             }
-            if (r.code === 'noTime') {
-                console.log(`剩余${r.left}分钟，不足5分钟，不再开新线`);
-                break;
-            }
-            if (r.code === 'noExit') {
-                console.log(`[${arm.label}] 枢纽处无${arm.dir}向出口，跳过`);
-                armResults.push(`${arm.label}: 无入口`);
-                continue;
-            }
-            totalKills += r.kills;
-            armResults.push(`${arm.label}: ${r.kills}杀/${r.rooms}间`);
-            console.log(`[${arm.label}] 已回到枢纽广场，累计${totalKills}杀，剩余${await remainMin(page)}分钟`);
-            if (!r.back) {
-                console.log(`[${arm.label}] 返回枢纽失败，中止`);
-                break;
-            }
+        } catch (e) {
+            console.log(`::warning::三线遍历异常（${e.message}）→ 不中断，继续对账与领奖`);
+            armResults.push(`异常: ${e.message}`);
+            await page.screenshot({ path: 'kidd-arm-error.png' }).catch(() => {});
         }
 
         // ---- 数量对账（★ 只做诊断与补怪，绝不阻断领奖）----
@@ -852,11 +876,15 @@ async function run() {
             if (canRescan) {
                 console.log(`⚠ 对账 ${totalAll}/${KIDD_EXPECT}，差 ${gap} 只 → 回扫一遍补怪（剩余${left}分钟）`);
                 let recov = 0;
-                for (const arm of ARMS) {
-                    const r = await runArm(page, arm, '补扫·');
-                    if (r.code !== 'ok') { console.log(`[补扫] 中止（${r.code}）`); break; }
-                    recov += r.kills;
-                    if (!r.back) break;
+                try {
+                    for (const arm of ARMS) {
+                        const r = await runArm(page, arm, '补扫·');
+                        if (r.code !== 'ok') { console.log(`[补扫] 中止（${r.code}）`); break; }
+                        recov += r.kills;
+                        if (!r.back) break;
+                    }
+                } catch (e) {
+                    console.log(`::warning::回扫异常（${e.message}）→ 不阻断领奖，带着已有击杀数去领奖`);
                 }
                 if (recov) {
                     totalKills += recov;
@@ -882,15 +910,20 @@ async function run() {
         const armsOk = armResults.filter(r => r.includes('杀/')).length;
         const allArmsDone = swept || (armsOk === 3);
 
-        // 领取奖励（只在三线全部走完后）
+        // 领取奖励（★ 领奖优先：不设「三线全走完」门槛）
+        // 2026-11-16 用户追问「领奖优先，就算没有全部杀完也该领奖，为什么没领」——
+        // 这里原来写的是 `allArmsDone && 页面有领取奖励`，等于「少杀一条线就不领」，
+        // 跟用户的要求正好相反。现在只认一件事：页面上有没有「领取奖励」这个入口。
+        // 杀多少只、走完几条线，只作为日志证据，绝不作为领奖条件。
         pageText = await getPageText(page);
+        if (!allArmsDone && !NO_CLAIM) console.log(`::warning::三线只完成 ${armsOk}/3 → 按「领奖优先」照常领奖`);
         if (NO_CLAIM) {
             const ci = pageText.indexOf('副本条件');
             const cj = pageText.indexOf('回到起点', ci);
             console.log('NO_CLAIM 模式：不领奖、不退出，留副本内待人工查验');
             console.log('条件行:', ci >= 0 ? pageText.substring(ci, cj > ci ? cj : ci + 120) : '(未见)');
             await page.screenshot({ path: 'kidd-no-claim.png' }).catch(() => {});
-        } else if (allArmsDone && pageText.includes('领取奖励')) {
+        } else if (pageText.includes('领取奖励')) {
             // 领奖循环：一层层关弹窗，直到「领取奖励」消失或已离开副本页。
             // 只点一次「确定」在弹窗叠层时会半途而废（炼器窟 boss(0) 实证）。
             let got = false;
@@ -921,15 +954,38 @@ async function run() {
                 console.log('领奖失败：「领取奖励」仍在，页面:', pageText.substring(0, 300).replace(/\s+/g, ' '));
                 await page.screenshot({ path: 'kidd-claim-fail.png' }).catch(() => {});
             }
-        } else if (!allArmsDone) {
-            console.log('未完成全部3线，不领奖');
         } else {
-            console.log('未看到领取奖励入口，页面:', pageText.substring(0, 300));
+            console.log('::warning::未看到领取奖励入口 → 领不到（页面/条件未满足），页面:', pageText.substring(0, 300));
             await page.screenshot({ path: 'kidd-claim-fail.png' }).catch(() => {});
         }
 
     } catch (e) {
         console.error('错误:', e.message);
+        // ★ 异常兜底领奖（2026-11-16）：走到这里说明前面某步异常退出了，但人很可能还在副本里、
+        // 条件也已经满足（11-16 就是 36 杀 > 基德手下:20 却没领）。领奖是大头 →
+        // 异常路径也要尽力领一次，绝不把奖励丢掉。这里只做「页面有入口就点」，不猜任何条件。
+        if (!NO_CLAIM) {
+            try {
+                let t = await getPageText(page);
+                if (t.includes('领取奖励')) {
+                    console.log('异常兜底：页面仍有「领取奖励」→ 尽力领一次');
+                    for (let round = 1; round <= 3; round++) {
+                        t = await getPageText(page);
+                        if (!t.includes('领取奖励')) break;
+                        if (!(await drain.clickByText(page, '领取奖励'))) { console.log('异常兜底：「领取奖励」点不到'); break; }
+                        await sleep(1500);
+                        await drain.dismissPopups(page, { log: console.log });
+                        await sleep(1500);
+                    }
+                    t = await getPageText(page);
+                    console.log(t.includes('领取奖励') ? '::warning::兜底领奖后「领取奖励」仍在' : '异常兜底领奖完成（入口已消失或已退出副本）');
+                } else {
+                    console.log('异常兜底：页面没有「领取奖励」入口（可能已领过或不在副本页）');
+                }
+            } catch (e2) {
+                console.log('::warning::异常兜底领奖也没走通：' + e2.message);
+            }
+        }
         await page.screenshot({ path: 'kidd-error.png' }).catch(() => {});
     } finally {
         await browser.close();
