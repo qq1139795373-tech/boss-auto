@@ -114,10 +114,24 @@ function atArena(txt) {
     return txt.includes('今日匹配') && txt.includes('开始匹配');
 }
 
+// 开场提示「竞技场耳环已失效，请重新配置阵容 + 确定」会盖在「开始匹配」上。
+// 10-30 大号实证：这层弹窗没关，点开始匹配完全没反应 → 每次 45 秒等不到战斗结果、
+// 整轮 0 场。进竞技场先把它点掉。
+async function settleArenaTip(page) {
+    const t = await getPageText(page);
+    if (!t.includes('请重新配置阵容')) return false;
+    console.log('竞技场提示「耳环已失效，请重新配置阵容」→ 点确定关掉');
+    await clickExact(page, '确定', 2500);
+    await sleep(1500);
+    const after = await getPageText(page);
+    console.log(`  关闭后：仍在竞技场=${atArena(after)} 提示还在=${after.includes('请重新配置阵容')}`);
+    return true;
+}
+
 async function openArena(page) {
     for (let i = 0; i < 8; i++) {
         let t = await getPageText(page);
-        if (atArena(t)) return true;
+        if (atArena(t)) { await settleArenaTip(page); return true; }
         let ok = await clickLeaf(page, '竞技场');
         if (!ok) ok = await clickText(page, '竞技场', 3000);
         if (!ok) {
@@ -128,7 +142,7 @@ async function openArena(page) {
         }
         await sleep(2000);
         t = await getPageText(page);
-        if (atArena(t)) return true;
+        if (atArena(t)) { await settleArenaTip(page); return true; }
     }
     console.log('打开竞技场失败:', (await getPageText(page)).substring(0, 200));
     await page.screenshot({ path: 'arena-open-fail.png' }).catch(() => {});
@@ -146,6 +160,9 @@ async function waitResult(page) {
         }
         await sleep(500);
     }
+    // 超时时把页面文本打出来：不打印就只能看到「未出结果」，分不清是没人匹配还是页面卡住
+    const t = await getPageText(page);
+    console.log(`匹配 ${Math.round((Date.now() - start) / 1000)} 秒无结果，页面: ${t.replace(/\s+/g, ' ').substring(0, 220)}`);
     return { timeout: true };
 }
 
@@ -274,8 +291,17 @@ async function run() {
         let matched = 0;
         let wins = 0;
         let fails = 0;
+        let reentered = false;   // 连续超时后「退出重进竞技场」只做一次，避免死循环
 
-        while (count !== null && count < 10) {
+        // ★ 场次配额（2026-11-16）：旧版拿「页面上的今日匹配 N/10」当循环开关，
+        //   coldwind0 打 2 场、coldwind1 打 3 场后，关掉结算弹窗那一刻计数没刷新 →
+        //   脚本判「计数读不到」直接 stop，把「读不到」当成「打满了」，白丢 7~8 场。
+        //   现在：配额在进场时算一次，循环按「本轮已打场数」推进；计数只做展示，
+        //   读不到就按 +1 估计并打 ::warning::，绝不因此中断。
+        const quota = (count === null) ? 10 : Math.max(0, 10 - count);
+        console.log(`本轮计划 ${quota} 场（今日已 ${count === null ? '未知' : count + '/10'}）`);
+
+        while (matched < quota) {
             let clicked = await clickLeaf(page, '开始匹配');
             if (!clicked) clicked = await clickText(page, '开始匹配', 3000);
             if (!clicked && (await getPageText(page)).includes('开始匹配')) {
@@ -311,9 +337,25 @@ async function run() {
             }
             if (res.timeout) {
                 fails++;
-                console.log(`第${count + 1}次匹配未出结果，重试 (${fails}/3)`);
+                console.log(`第${matched + 1}次匹配未出结果，重试 (${fails}/3)`);
                 await page.screenshot({ path: 'arena-timeout.png' }).catch(() => {});
-                if (fails >= 3) break;
+                if (fails >= 3) {
+                    // 旧版在这里直接 break，整轮 0 场、exit=0 静默失败（10-30 大号实证：
+                    // 45 秒 × 3 次都等不到「战斗结果」→ 本轮0场 胜0负0，白跑 168 秒）。
+                    // 竞技场卡住时退出重进一次能恢复，重进后仍不出结果才收工。
+                    if (reentered) { console.log('重进竞技场后仍匹配不出结果，停止'); break; }
+                    console.log('连续3次匹配无结果 → 退出重进竞技场再试');
+                    await page.goBack().catch(() => {});
+                    await sleep(2000);
+                    if (!(await openArena(page))) {
+                        console.log('重进竞技场失败，停止');
+                        await page.screenshot({ path: 'arena-reenter-fail.png' }).catch(() => {});
+                        break;
+                    }
+                    reentered = true;
+                    fails = 0;
+                    await sleep(2000);
+                }
                 continue;
             }
             if (res.win) wins++;
@@ -325,17 +367,13 @@ async function run() {
                 count = parseToday(await getPageText(page));
                 if (count === null || count === prev) await sleep(1000);
             }
-            if (count === null || count === prev) {
-                console.log('关闭后未刷新今日匹配计数，重新进入竞技场...');
-                await page.goBack().catch(() => {});
-                await sleep(2000);
-                if (await openArena(page)) count = parseToday(await getPageText(page));
-                if (count === null || count === prev) {
-                    console.log('计数仍无法读取，停止');
-                    break;
-                }
-            }
             matched++;
+            // 计数只是展示值：读不到/没刷新 → 按上一值 +1 估计，继续打，不中断本轮
+            if (count === null || count === prev) {
+                count = (prev === null || prev === undefined) ? matched : prev + 1;
+                console.log(`::warning::结算后读不到今日匹配计数 → 按场次推进，记为 ${count}/10（继续）`);
+            }
+            fails = 0;   // 有进展就清零：旧版 fails 只累计不复位，10 场里偶发 3 次超时也会断整轮
             console.log(`匹配完成 ${count}/10 (${res.win ? '胜' : '负'})`);
             await sleep(1500);
         }

@@ -547,6 +547,13 @@ async function openDailyList(page) {
         if (/每日[·・][\u4e00-\u9fa5]/.test(txt)) return txt; // 已展开
         const onTaskPage = txt.includes('活动任务') || txt.includes('跑商任务');
         if (!onTaskPage) {
+            // 白屏变体（2026-11-16 coldwind2）：任务页只渲染出「任务」两个字，没有「活动任务/跑商任务」
+            // 分节。旧代码在这里继续点 6 次「任务」，纯空转 46 秒后放弃 → 交给外层 reload 重试更快。
+            const bare = txt.replace(/Please enable JavaScript to continue\./g, '').replace(/\s+/g, '');
+            if (bare.includes('任务') && bare.length < 40) {
+                console.log(`[每日任务] 任务页只剩标题没渲染（${bare}）→ 交回外层 reload 重试`);
+                return txt;
+            }
             if (!(await clickExact(page, '任务', 2000))) await clickLeaf(page, '任务');
             await sleep(2000);
             continue;
@@ -1712,9 +1719,23 @@ async function run() {
         }
 
         // 1. 解析每日任务
-        const tasks = await parseDailyTasks(page);
+        // ★ 2026-11-16 coldwind2 事故：任务页只渲染出「任务」标题 → 解析为空 → 旧代码直接
+        // 「没有可解析的每日任务，退出」，46 秒结束、exit=0、run 显示绿灯，等于整天任务白丢还没人知道。
+        // 现在：解析为空 → reload 重试 3 轮；仍为空 → ::error:: + exitCode=1 让 run 变红。
+        let tasks = [];
+        for (let att = 1; att <= 3; att++) {
+            tasks = await parseDailyTasks(page);
+            if (tasks.length) break;
+            console.log(`::warning::每日任务解析为空（第 ${att}/3 次，任务页可能没渲染）→ reload 重试`);
+            await page.screenshot({ path: `daily-parse-empty-${att}.png` }).catch(() => {});
+            try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }); } catch (e) { }
+            await sleep(4000);
+            if (!(await ensureMainPage(page))) { console.log(`[每日任务] 第 ${att} 次 reload 后没回到主界面，再等一轮`); await sleep(2000); }
+        }
         if (!tasks.length) {
-            console.log('没有可解析的每日任务，退出');
+            console.log('::error::没有可解析的每日任务（任务页连续 3 次未渲染）→ 今天这号的任务没做，标红让 run 失败');
+            await page.screenshot({ path: 'daily-parse-fail.png' }).catch(() => {});
+            process.exitCode = 1;
             await browser.close();
             return;
         }
