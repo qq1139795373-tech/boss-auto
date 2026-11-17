@@ -127,6 +127,36 @@ async function clickLoginButton(page) {
     }
 }
 
+// 点「进入游戏」：与 clickLoginButton 同一个坑 —— getByText('进入游戏',{exact:false}).first()
+// 可能命中包着按钮的外层容器，点击落在容器中心而不是按钮上，于是每轮都「点了但没反应」。
+// 2026-11-17 coldwind2 18:00 波实证：登录成功后进入游戏连试 10 轮、每轮 37.5 秒全部空转，
+// 370 秒后放弃，同一账号 1 分钟后 mail.js 却能进 —— 不是账号问题，是点击没落到按钮上。
+// 改为「叶子节点真实坐标 → 合成事件 → force click」三级降级。
+async function clickEnterGame(page) {
+    const pos = await page.evaluate(() => {
+        const all = [...document.querySelectorAll('body *')].filter(el => {
+            const s = (el.textContent || '').trim();
+            const r = el.getBoundingClientRect();
+            return el.children.length === 0 && r.width > 0 && r.height > 0 && s === '进入游戏';
+        });
+        if (!all.length) return null;
+        // 选角页的按钮通常后渲染，取最后一个叶子节点
+        const r = all[all.length - 1].getBoundingClientRect();
+        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+    }).catch(() => null);
+    if (pos) {
+        await page.mouse.click(pos.x, pos.y).catch(() => {});
+        return `坐标(${pos.x},${pos.y})`;
+    }
+    if (await clickLeaf(page, '进入游戏', true).catch(() => false)) return '合成事件';
+    try {
+        await page.getByText('进入游戏', { exact: false }).first().click({ force: true, timeout: 5000 });
+        return 'force';
+    } catch {
+        return null;
+    }
+}
+
 // 判断是否已经进到游戏里（主界面/城内地图都能读到这些词）
 async function inGameText(page) {
     const t = await getPageText(page);
@@ -994,22 +1024,52 @@ async function run() {
             return;
         }
 
-        for (let i = 0; i < 10; i++) {
-            await clickText(page, '进入游戏');
-            await sleep(5000);
-            let pageText = await getPageText(page);
-            if (pageText.includes('选择角色') || pageText.includes('Lv.')) {
-                console.log('在选角界面，点击进入游戏选角色...');
-                await clickText(page, '进入游戏');
+        // 进入游戏：最多 3 轮，每轮内最多 3 次点击；一轮全失败就刷新页面重走登录。
+        // 原来是在同一个页面状态里死磕 10 轮 —— 状态卡住时刷新才有用（11-17 coldwind2 实证）。
+        let entered = false;
+        for (let round = 0; round < 3 && !entered; round++) {
+            if (round > 0) {
+                await page.screenshot({ path: `login-stuck-round${round}.png` }).catch(() => {});
+                const btns = await page.evaluate(() => [...document.querySelectorAll('body *')]
+                    .filter(el => el.children.length === 0 && (el.textContent || '').trim() &&
+                        el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0)
+                    .map(el => (el.textContent || '').trim()).slice(0, 40).join(' | ')).catch(() => '');
+                console.log(`第${round}轮未进入游戏，页面可见文案: ${String(btns).slice(0, 400)}`);
+                console.log(`重新打开页面并重走登录（第${round + 1}轮）...`);
+                await gotoGame(page);
+                await page.waitForTimeout(3000);
+                for (let a = 0; a < 3; a++) {
+                    const inputs = await page.$$('input');
+                    if (inputs.length >= 2) {
+                        await inputs[0].fill(ACCOUNT);
+                        await inputs[1].fill(PASSWORD);
+                        await clickLoginButton(page);
+                        await sleep(4000);
+                    }
+                    const t2 = await getPageText(page);
+                    if (t2.includes('进入游戏') || t2.includes('你看到') || t2.includes('当前城市')) break;
+                }
+            }
+            for (let i = 0; i < 3; i++) {
+                const how = await clickEnterGame(page);
+                if (!how) console.log('没点到「进入游戏」按钮');
                 await sleep(5000);
-                pageText = await getPageText(page);
+                let pageText = await getPageText(page);
+                if (pageText.includes('选择角色') || pageText.includes('Lv.')) {
+                    console.log(`在选角界面，点击进入游戏选角色...${how ? `(点击方式:${how})` : ''}`);
+                    await sleep(1200);
+                    await clickEnterGame(page);
+                    await sleep(5000);
+                    pageText = await getPageText(page);
+                }
+                if (pageText.includes('你看到') || pageText.includes('当前城市')) {
+                    console.log('进入游戏成功');
+                    entered = true;
+                    break;
+                }
+                console.log('进入游戏未成功，重试...');
+                await sleep(2000);
             }
-            if (pageText.includes('你看到') || pageText.includes('当前城市')) {
-                console.log('进入游戏成功');
-                break;
-            }
-            console.log('进入游戏未成功，重试...');
-            await sleep(2000);
         }
 
         await sleep(5000);
