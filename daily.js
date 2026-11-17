@@ -1025,10 +1025,19 @@ async function runTask(page, task) {
         // 每条浪费 30-60 秒（10-27 实证 boss2 偷盐贼·铁皮人、boss4 流浪犬·鸦片贩子各 2 条）。
         // 先查列表行标签：已经可提交就直接提交，已经完成就直接算完成。
         const tag0 = await listRowTag(page, task.rowNo, task.name).catch(() => null);
-        if (tag0 === '已完成' || tag0 === '可提交') {
-            console.log(`[${task.name}] 详情里没有寻路按钮，列表状态「${tag0}」→ 直接提交`);
-            const ok0 = tag0 === '已完成' ? true : await tryClaim(page, task);
-            return ok0 ? 'done' : 'full-但未提交成功';
+        if (tag0 === '已完成') return 'done';
+        if (tag0 === '可提交') {
+            // 列表标「可提交」不等于详情真有提交按钮。11-17 大号山匪实证：
+            // 列表写「可提交」、进度 0/8，进去后「寻路」和「提交」两个按钮都不存在，
+            // 旧逻辑在这里直接判 full-但未提交成功，导致每日任务 9/10 白丢一条。
+            // 只有确实存在「提交」按钮才按可提交处理；否则说明标签不可信，继续往下走完整寻路重试。
+            const pos0 = await submitBtnPos(page);
+            if (pos0) {
+                console.log(`[${task.name}] 详情里没有寻路按钮，有提交按钮且列表状态「可提交」→ 直接提交`);
+                const ok0 = await tryClaim(page, task);
+                return ok0 ? 'done' : 'full-但未提交成功';
+            }
+            console.log(`[${task.name}] 列表标「可提交」但详情既无寻路也无提交按钮 → 标签不可信，继续尝试寻路`);
         }
         console.log(`[${task.name}] 坐标点击没点到寻路（列表状态「${tag0 || '?'}」），改用合成事件重试...`);
         let clicked = await clickLeaf(page, '寻路');
@@ -1060,6 +1069,12 @@ async function runTask(page, task) {
         }
         if (!clicked) {
             console.log(`[${task.name}] 找不到寻路按钮（已试坐标点击/合成事件/重开详情/回城）`);
+            // 把详情里实际存在的按钮文案打出来：下次不用再猜按钮叫什么（11-17 山匪这类）
+            const btns = await page.evaluate(() => [...document.querySelectorAll('body *')]
+                .filter(el => el.children.length === 0 && (el.textContent || '').trim() &&
+                    el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0)
+                .map(el => (el.textContent || '').trim()).slice(0, 40).join(' | ')).catch(() => '');
+            console.log(`[${task.name}] 当前可见文案: ${String(btns).slice(0, 300)}`);
             await page.screenshot({ path: `daily-xunlu-fail-${task.name}.png` }).catch(() => {});
             await clickExact(page, '取消', 1500);
             return 'fail';

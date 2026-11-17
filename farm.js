@@ -77,6 +77,80 @@ async function clickText(page, text, timeout = 5000) {
     return false;
 }
 
+// 点在「叶子文本节点」上（不点包着按钮的外层容器）
+async function clickLeaf(page, text, exactOnly = true) {
+    return await page.evaluate(({ t, ex }) => {
+        const all = [...document.querySelectorAll('body *')].filter(el => {
+            const s = (el.textContent || '').trim();
+            const r = el.getBoundingClientRect();
+            if (el.children.length !== 0 || r.width <= 0 || r.height <= 0) return false;
+            return ex ? s === t : s.includes(t);
+        });
+        if (!all.length) return false;
+        all.sort((a, b) => a.textContent.trim().length - b.textContent.trim().length);
+        const el = all[0];
+        const opts = { bubbles: true, cancelable: true, view: window };
+        for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click']) {
+            el.dispatchEvent(new MouseEvent(type, opts));
+        }
+        return true;
+    }, { t: text, ex: exactOnly });
+}
+
+// 点「进入游戏」：getByText('进入游戏',{exact:false}).first() 会命中包着按钮的外层容器，
+// 点击落在容器中心而不是按钮上 → 每轮都「点了但没反应」，冷2 18:00 波曾连试 10 轮、
+// 每轮 37.5 秒全空转。改为「叶子节点真实坐标 → 合成事件 → force click」三级降级。
+async function clickEnterGame(page) {
+    const pos = await page.evaluate(() => {
+        const all = [...document.querySelectorAll('body *')].filter(el => {
+            const s = (el.textContent || '').trim();
+            const r = el.getBoundingClientRect();
+            return el.children.length === 0 && r.width > 0 && r.height > 0 && s === '进入游戏';
+        });
+        if (!all.length) return null;
+        // 选角页的按钮通常后渲染，取最后一个叶子节点
+        const r = all[all.length - 1].getBoundingClientRect();
+        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+    }).catch(() => null);
+    if (pos) {
+        await page.mouse.click(pos.x, pos.y).catch(() => {});
+        return `坐标(${pos.x},${pos.y})`;
+    }
+    if (await clickLeaf(page, '进入游戏', true).catch(() => false)) return '合成事件';
+    try {
+        await page.getByText('进入游戏', { exact: false }).first().click({ force: true, timeout: 5000 });
+        return 'force';
+    } catch {
+        return null;
+    }
+}
+
+// 点「登录」：登录页常驻的 uni-toast 遮罩会拦住 Playwright 的 actionability 检查，
+// 旧写法等满 30 秒抛错 → 整个任务跳 catch 静默成功退出（2026-11-10 coldwind1 事故）。
+async function clickLoginButton(page) {
+    const pos = await page.evaluate(() => {
+        const all = [...document.querySelectorAll('body *')].filter(el => {
+            const s = (el.textContent || '').trim();
+            const r = el.getBoundingClientRect();
+            return el.children.length === 0 && r.width > 0 && r.height > 0 && s === '登录';
+        });
+        if (!all.length) return null;
+        const r = all[0].getBoundingClientRect();
+        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+    }).catch(() => null);
+    if (pos) {
+        await page.mouse.click(pos.x, pos.y).catch(() => {});
+        return `坐标(${pos.x},${pos.y})`;
+    }
+    if (await clickLeaf(page, '登录', true).catch(() => false)) return '合成事件';
+    try {
+        await page.getByText('登录', { exact: false }).first().click({ force: true, timeout: 5000 });
+        return 'force';
+    } catch {
+        return null;
+    }
+}
+
 async function getPageText(page) {
     // 只拼可见节点：textContent('body') 会把 display:none 的残留弹窗读进来（幽灵文案）
     return await drain.visibleText(page);
@@ -376,7 +450,7 @@ async function teleportToDest(page) {
         if (inputs.length >= 2) {
             await inputs[0].fill(ACCOUNT);
             await inputs[1].fill(PASSWORD);
-            await page.getByText('登录').first().click();
+            console.log('传送兜底: 点登录 →', (await clickLoginButton(page)) || '未找到按钮');
             await sleep(3000);
         } else {
             // 会话仍有效时登录页会自动跳回游戏，无需重新填账号
@@ -384,7 +458,8 @@ async function teleportToDest(page) {
         }
         await closePopup(page);
         await sleep(1000);
-        await clickText(page, '进入游戏');
+        const how = await clickEnterGame(page);
+        console.log('传送兜底: 点进入游戏 →', how || '未找到按钮');
         await sleep(3000);
         console.log('传送兜底: 重新登录完成');
 
@@ -452,14 +527,15 @@ async function relogin(page) {
     if (inputs.length >= 2) {
         await inputs[0].fill(ACCOUNT).catch(() => {});
         await inputs[1].fill(PASSWORD).catch(() => {});
-        await page.getByText('登录').first().click().catch(() => {});
+        console.log('自救: 点登录 →', (await clickLoginButton(page)) || '未找到按钮');
         await sleep(3000);
     } else {
         console.log('自救: 会话有效，页面已自动进入游戏');
     }
     await closePopup(page);
     await sleep(1000);
-    await clickText(page, '进入游戏');
+    const howEnter = await clickEnterGame(page);
+    console.log('自救: 点进入游戏 →', howEnter || '未找到按钮');
     await sleep(3000);
     await closePopup(page);
     console.log('自救: 重新登录完成');
@@ -571,7 +647,7 @@ async function run() {
                 await inputs[0].fill(ACCOUNT);
                 await inputs[1].fill(PASSWORD);
             }
-            await page.getByText('登录').first().click();
+            console.log(`点登录 → ${(await clickLoginButton(page)) || '未找到按钮'}`);
             await sleep(3000);
             console.log(`登录尝试${attempt + 1}`);
 
@@ -591,13 +667,14 @@ async function run() {
 
         // 点击进入游戏（带重试）
         for (let i = 0; i < 10; i++) {
-            await clickText(page, '进入游戏');
+            const how = await clickEnterGame(page);
+            console.log(`进入游戏第${i + 1}轮 → ${how || '未找到按钮'}`);
             await sleep(5000);
             let pageText = await getPageText(page);
             // 如果是选角界面（有"选择角色"或Lv.），需要再点一次进入游戏
             if (pageText.includes('选择角色') || pageText.includes('Lv.')) {
                 console.log('在选角界面，点击进入游戏选角色...');
-                await clickText(page, '进入游戏');
+                await clickEnterGame(page);
                 await sleep(5000);
                 pageText = await getPageText(page);
             }
