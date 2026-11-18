@@ -998,6 +998,19 @@ async function runTaskByWalk(page, task, hint) {
     return ok ? 'done' : 'full-但未提交成功';
 }
 
+// 详情打不开 / 详情里刷不出「提交」按钮 时的统一恢复动作：关详情 → 回主界面 → 回城 → 重开任务列表。
+// 根因（2026-11-18 cw1 实证）：人在野区时这两个面板状态都不对——任务详情点不开、
+// 已满进度的任务也刷不出「提交」；脚本在野区里重试多少次都没用，回城后一次就过。
+async function recoverByReturnToCity(page) {
+    await clickExact(page, '取消', 1500).catch(() => { });
+    await backToMain(page);
+    const ok = await backToCity(page);
+    console.log(`回城刷新: ${ok ? '已回城（页面出现「出航」）' : '未确认回到城内'}`);
+    await sleep(1500);
+    await openDailyList(page);
+    return ok;
+}
+
 // 执行一条任务：导路 → 杀怪直到进度满（每杀1只查一次详情），带3倍保险上限
 // 返回: 'done' | 'cap' | 'fail'
 async function runTask(page, task) {
@@ -1013,8 +1026,21 @@ async function runTask(page, task) {
         opened = (await getPageText(page)).includes('任务进度');
     }
     if (!opened) {
-        console.log(`[${task.name}] 点不开任务详情`);
-        return 'fail';
+        // ★ 2026-11-18 cw1 实证：人在野区（威尼斯·矿山、威尼斯·沙滩）时任务详情面板点不开，
+        //   旧逻辑在这里直接判 fail 跳过 → 海贼 0/8、病鸡第二档 0/3 白丢一天。
+        //   野区不是「做不了」，是「详情页打不开」：回城刷新后同一条任务一次就过。
+        console.log(`[${task.name}] 点不开任务详情（多为人在野区）→ 回城刷新后重试`);
+        await recoverByReturnToCity(page);
+        for (let r = 0; r < 3 && !opened; r++) {
+            await clickRow(page, task.rowNo, task.name);
+            await sleep(1500);
+            opened = (await getPageText(page)).includes('任务进度');
+        }
+        if (!opened) {
+            console.log(`[${task.name}] 回城重试后仍点不开任务详情`);
+            return 'fail';
+        }
+        console.log(`[${task.name}] 回城后详情已打开，继续寻路`);
     }
     // 寻路按钮在野区也能点（10-26 用户指出 + 真机复验：野区点寻路能正常弹提示/导航），
     // 所以「找不到寻路按钮」不是位置问题，而是详情页状态/坐标点击打偏 → 先合成事件再点，最后才回城兜底
@@ -1297,6 +1323,15 @@ async function tryClaim(page, task) {
         if (!pos) {
             const tag = await listRowTag(page, task.rowNo, task.name);
             console.log(`[${task.name}] 详情里没有提交按钮，列表状态: ${tag}`);
+            if (tag === '已完成') return true;
+            // ★ 2026-11-18 cw1 实证：人在野区时，列表标「可提交」但详情里刷不出「提交」按钮。
+            //   旧逻辑在这里直接返回 false，记成「full-但未提交成功」→ 病鸡那条白丢。
+            //   回城刷新后重开详情，按钮就出来了，不需要放弃这条任务。
+            if (att === 1) {
+                console.log(`[${task.name}] 列表「${tag}」但详情无提交按钮（多为人在野区）→ 回城刷新后重新提交`);
+                await recoverByReturnToCity(page);
+                continue;
+            }
             return tag === '已完成';
         }
         await clickLeaf(page, '提交'); // 实测提交按钮真机点击无响应，只吃合成事件（探针实证）
