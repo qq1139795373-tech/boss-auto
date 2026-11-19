@@ -550,9 +550,21 @@ async function readBagItems(page, names) {
         if (opened) {
             try { await drain.closeBagPanel(page, { log: () => { } }); } catch (e) { }
             await sleep(800);
-            // 关不掉就 Escape 兜底，绝不让包裹挡着后面的出航/进入副本
-            if ((await getPageText(page)).includes('使用')) await page.keyboard.press('Escape').catch(() => { });
-            await sleep(600);
+            const bagStillOpen = (s) => /包裹[\s\S]{0,40}(装备[\s\S]{0,10}药水|材料[\s\S]{0,10}宝石)/.test((s || '').replace(/\s+/g, ''));
+            // ★ 网格视图里没有「使用」按钮（只有数字角标），所以判据不能再用 includes('使用')
+            //   —— 23:15 冷8 实测就是这么漏的：包裹一直开着，后面到不了副本入口页。
+            let still = await getPageText(page);
+            if (bagStillOpen(still)) {
+                await page.keyboard.press('Escape').catch(() => { });
+                await sleep(900);
+                still = await getPageText(page);
+                if (bagStillOpen(still)) {
+                    await page.mouse.click(14, 26).catch(() => { });   // 左上返回箭头
+                    await sleep(1000);
+                    still = await getPageText(page);
+                }
+            }
+            if (bagStillOpen(still)) console.log('::warning::包裹没关掉，后续流程可能受影响');
         }
     }
     return out;
