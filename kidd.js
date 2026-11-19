@@ -423,12 +423,48 @@ async function clickLeaf(page, text) {
 }
 
 // ==================== 背包读数（领奖对账用） ====================
-// 只在城里可用：首页底部「包裹」→ 页签 → 逐行找「数量：N」。
+// 只在城里可用：首页底部「包裹」→ 页签 → 找物品数量。
 // 返回 { 物品名: 数量 }；**读不到就是 null**（数量 0 时背包里没有这一条，null 按 0 算）。
-// 2026-11-19 踩过的两个坑都在这里堵掉：
+// 2026-11-19 踩过的三个坑都在这里堵掉：
 //   ① 点完页签立刻读 → 读到的是上一个页签的内容（0→0 假读数）→ 必须等页面文本真的变了；
-//   ② 材料页几十种物品是虚拟滚动 → 只读一屏会漏 → 最多滚 9 屏。
+//   ② ★ 滚轮发在 page 上根本不滚这个列表（读到的永远是第一屏 748 字）→ 必须找到真正的
+//      滚动容器改 scrollTop，容器不吃就鼠标移到容器中央再 wheel；
+//   ③ ★ 目标物品在材料页**最下方**（23:07 用户截图：藏宝图碎片 243 / 浴火之蝶 123 都在底部）
+//      → 用「网格」视图（一屏 12~16 格）代替列表，滚动次数少一半以上。
 const evTo = (ms) => new Promise((_, rej) => setTimeout(() => rej(new Error('evaluate-timeout')), ms));
+
+// 让包裹列表真的滚动。
+// ★ 2026-11-19 23:10 冷8 实测（四种方式逐一试过，文本长度 327 字是否变化为判据）：
+//   · page.mouse.wheel（body 上 / 容器中央）→ 不动，一直 327 字；
+//   · 鼠标按下拖动（down→move→up）→ 不动；
+//   · PageDown / End → 不动；
+//   · **CDP 触摸滑动（touchStart → touchMove×12 → touchEnd）→ 一次到底**：
+//     327 → 457 字，页尾出现「已加载全部数据」，藏宝图碎片 / 浴火之蝶 都读到了。
+//   游戏是移动端 H5，列表吃 touch 事件不吃 wheel，所以这里必须走 CDP。
+async function scrollBagList(page, cdp) {
+    const vp = page.viewportSize() || { width: 1080, height: 608 };
+    const x = Math.round(vp.width / 2);
+    const yFrom = Math.round(vp.height * 0.82);
+    const yTo = Math.round(vp.height * 0.28);
+    if (cdp) {
+        try {
+            await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y: yFrom }] });
+            for (let i = 1; i <= 12; i++) {
+                const y = Math.round(yFrom + (yTo - yFrom) * i / 12);
+                await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x, y }] });
+                await sleep(25);
+            }
+            await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+            await sleep(1200);
+            return;
+        } catch (e) {
+            console.log(`触摸滑动失败（${e.message}）→ 退回 wheel`);
+        }
+    }
+    await page.mouse.move(x, yFrom).catch(() => { });
+    await page.mouse.wheel(0, 520).catch(() => { });
+    await sleep(1000);
+}
 
 async function readBagItems(page, names) {
     const out = {};
@@ -449,6 +485,8 @@ async function readBagItems(page, names) {
     try {
         let t = await getPageText(page);
         if (!t.includes('当前城市')) return out;           // 只在城里能开包裹
+        let cdp = null;
+        try { cdp = await page.context().newCDPSession(page); } catch (e) { console.log('CDP 会话建不起来，滚动只剩 wheel 兜底'); }
         await page.mouse.wheel(0, 600).catch(() => { });
         await sleep(900);
         let bag = await rectOf('包裹');
@@ -460,8 +498,12 @@ async function readBagItems(page, names) {
         if (!t.includes('包裹')) return out;
         opened = true;
 
+        // ① 先切「网格」视图（23:07 用户指引）：一屏 12~16 格，比列表少滚一半以上
+        const gridBtn = await rectOf('网格');
+        if (gridBtn) { await Promise.race([page.mouse.click(gridBtn.x, gridBtn.y), evTo(8000)]).catch(() => { }); await sleep(1200); }
+
         const pending = new Set(names);
-        // 材料页优先：藏宝图碎片在「材料」页签
+        // 材料页优先：藏宝图碎片/浴火之蝶都在「材料」页签（23:07 用户截图实证，位置在页尾）
         for (const tab of ['材料', '道具', '宝箱', '其他']) {
             if (!pending.size) break;
             const p = await rectOf(tab);
@@ -469,8 +511,8 @@ async function readBagItems(page, names) {
             const before = flat(t);
             await Promise.race([page.mouse.click(p.x, p.y), evTo(8000)]).catch(() => { });
             for (let i = 0; i < 12; i++) { await sleep(400); t = await getPageText(page); if (flat(t) !== before) break; }
-            for (let scroll = 0; scroll < 9 && pending.size; scroll++) {
-                if (scroll) { await page.mouse.wheel(0, 520).catch(() => { }); await sleep(1100); }
+            for (let screen = 0; screen < 14 && pending.size; screen++) {
+                if (screen) await scrollBagList(page, cdp);
                 const found = await Promise.race([page.evaluate((nms) => {
                     const res = {};
                     for (const nm of nms) {
@@ -482,9 +524,12 @@ async function readBagItems(page, names) {
                         });
                         for (const h of hits) {
                             let node = h;
-                            for (let up = 0; up < 6 && node; up++) {
+                            for (let up = 0; up < 7 && node; up++) {
+                                // 列表视图是「数量：243」；网格视图是单独的数字角标 → 两种都认
                                 const m = (node.textContent || '').match(/数量\s*[:：]\s*(\d+)/);
                                 if (m) { res[nm] = Number(m[1]); break; }
+                                const numLeaf = [...node.querySelectorAll('*')].find((e) => !e.children.length && /^\d{1,6}$/.test((e.textContent || '').trim()));
+                                if (numLeaf && up >= 1) { res[nm] = Number(numLeaf.textContent.trim()); break; }
                                 node = node.parentElement;
                             }
                             if (res[nm] >= 0) break;
@@ -495,6 +540,8 @@ async function readBagItems(page, names) {
                 for (const nm of Object.keys(found || {})) {
                     if (found[nm] >= 0 && pending.has(nm)) { out[nm] = found[nm]; pending.delete(nm); }
                 }
+                // 到底了就提前收工（省时间，也避免在底部空滚）
+                if (screen > 0 && /已加载全部数据/.test(await getPageText(page))) break;
             }
         }
     } catch (e) {
