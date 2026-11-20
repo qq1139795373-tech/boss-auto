@@ -2,6 +2,10 @@ const { chromium } = require('playwright');
 // 扫荡/领奖弹窗处理 + 只读可见节点的页面文本
 const drain = require('./dungeon-recover.js');
 const { visibleText } = drain;
+// 背包读数（领奖对账）与同账号互斥锁：与海盗王 / 奔月两份脚本共用同一份实现，
+// 避免同一套逻辑各写一遍、修一处漏两处（11-19 三份实现已经分叉过一次）。
+const { createBagReader, evTo } = require('./bag-read.js');
+const acct = require('./acct-lock.js');
 
 const ACCOUNT = process.env.GAME_ACCOUNT;
 const PASSWORD = process.env.GAME_PASSWORD;
@@ -89,7 +93,9 @@ async function clickText(page, text, timeout = 5000) {
 // 只拼可见节点。原实现 textContent('body') 不排除 display:none，
 // 残留弹窗节点会一直留在 DOM 里 → 读出幽灵文案，把「没成」判成「成了」（2026-10-28 同源问题）。
 async function getPageText(page) {
-    return await visibleText(page);
+    // ★ 与另外两个副本脚本统一：page.evaluate 不受 setDefaultTimeout 约束，渲染进程一忙就无限等
+    //   （11-19 22:25 卡死 4 分钟实证）→ 一律套硬超时，超时抛错由上层兜底，绝不再静默挂死。
+    return await Promise.race([visibleText(page), evTo(12000)]);
 }
 
 async function remainMin(page) {
@@ -423,152 +429,9 @@ async function clickLeaf(page, text) {
 }
 
 // ==================== 背包读数（领奖对账用） ====================
-// 只在城里可用：首页底部「包裹」→ 页签 → 找物品数量。
-// 返回 { 物品名: 数量 }；**读不到就是 null**（数量 0 时背包里没有这一条，null 按 0 算）。
-// 2026-11-19 踩过的三个坑都在这里堵掉：
-//   ① 点完页签立刻读 → 读到的是上一个页签的内容（0→0 假读数）→ 必须等页面文本真的变了；
-//   ② ★ 滚轮发在 page 上根本不滚这个列表（读到的永远是第一屏 748 字）→ 必须找到真正的
-//      滚动容器改 scrollTop，容器不吃就鼠标移到容器中央再 wheel；
-//   ③ ★ 目标物品在材料页**最下方**（23:07 用户截图：藏宝图碎片 243 / 浴火之蝶 123 都在底部）
-//      → 用「网格」视图（一屏 12~16 格）代替列表，滚动次数少一半以上。
-const evTo = (ms) => new Promise((_, rej) => setTimeout(() => rej(new Error('evaluate-timeout')), ms));
-
-// 让包裹列表真的滚动。
-// ★ 2026-11-19 23:10 冷8 实测（四种方式逐一试过，文本长度 327 字是否变化为判据）：
-//   · page.mouse.wheel（body 上 / 容器中央）→ 不动，一直 327 字；
-//   · 鼠标按下拖动（down→move→up）→ 不动；
-//   · PageDown / End → 不动；
-//   · **CDP 触摸滑动（touchStart → touchMove×12 → touchEnd）→ 一次到底**：
-//     327 → 457 字，页尾出现「已加载全部数据」，藏宝图碎片 / 浴火之蝶 都读到了。
-//   游戏是移动端 H5，列表吃 touch 事件不吃 wheel，所以这里必须走 CDP。
-async function scrollBagList(page, cdp) {
-    const vp = page.viewportSize() || { width: 1080, height: 608 };
-    const x = Math.round(vp.width / 2);
-    const yFrom = Math.round(vp.height * 0.82);
-    const yTo = Math.round(vp.height * 0.28);
-    if (cdp) {
-        try {
-            await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y: yFrom }] });
-            for (let i = 1; i <= 12; i++) {
-                const y = Math.round(yFrom + (yTo - yFrom) * i / 12);
-                await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x, y }] });
-                await sleep(25);
-            }
-            await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-            await sleep(1200);
-            return;
-        } catch (e) {
-            console.log(`触摸滑动失败（${e.message}）→ 退回 wheel`);
-        }
-    }
-    await page.mouse.move(x, yFrom).catch(() => { });
-    await page.mouse.wheel(0, 520).catch(() => { });
-    await sleep(1000);
-}
-
-async function readBagItems(page, names) {
-    const out = {};
-    for (const n of names) out[n] = null;
-    let opened = false;
-    const flat = (s) => (s || '').replace(/\s+/g, '');
-    const rectOf = (n) => Promise.race([page.evaluate((nm) => {
-        for (const el of document.querySelectorAll('body *')) {
-            if (el.children.length) continue;
-            if ((el.textContent || '').trim() !== nm) continue;
-            const r = el.getBoundingClientRect();
-            if (!r.width || !r.height) continue;
-            return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
-        }
-        return null;
-    }, n), evTo(8000)]).catch(() => null);
-
-    try {
-        let t = await getPageText(page);
-        if (!t.includes('当前城市')) return out;           // 只在城里能开包裹
-        let cdp = null;
-        try { cdp = await page.context().newCDPSession(page); } catch (e) { console.log('CDP 会话建不起来，滚动只剩 wheel 兜底'); }
-        await page.mouse.wheel(0, 600).catch(() => { });
-        await sleep(900);
-        let bag = await rectOf('包裹');
-        if (!bag) { await page.mouse.wheel(0, 420).catch(() => { }); await sleep(1200); bag = await rectOf('包裹'); }   // 底部导航常在视口外
-        if (!bag) return out;
-        await Promise.race([page.mouse.click(bag.x, bag.y), evTo(8000)]).catch(() => { });
-        await sleep(2500);
-        t = await getPageText(page);
-        if (!t.includes('包裹')) return out;
-        opened = true;
-
-        // ① 先切「网格」视图（23:07 用户指引）：一屏 12~16 格，比列表少滚一半以上
-        const gridBtn = await rectOf('网格');
-        if (gridBtn) { await Promise.race([page.mouse.click(gridBtn.x, gridBtn.y), evTo(8000)]).catch(() => { }); await sleep(1200); }
-
-        const pending = new Set(names);
-        // 材料页优先：藏宝图碎片/浴火之蝶都在「材料」页签（23:07 用户截图实证，位置在页尾）
-        for (const tab of ['材料', '道具', '宝箱', '其他']) {
-            if (!pending.size) break;
-            const p = await rectOf(tab);
-            if (!p) continue;
-            const before = flat(t);
-            await Promise.race([page.mouse.click(p.x, p.y), evTo(8000)]).catch(() => { });
-            for (let i = 0; i < 12; i++) { await sleep(400); t = await getPageText(page); if (flat(t) !== before) break; }
-            for (let screen = 0; screen < 14 && pending.size; screen++) {
-                if (screen) await scrollBagList(page, cdp);
-                const found = await Promise.race([page.evaluate((nms) => {
-                    const res = {};
-                    for (const nm of nms) {
-                        res[nm] = -1;
-                        const hits = [...document.querySelectorAll('body *')].filter((el) => {
-                            if (el.children.length) return false;
-                            const s = (el.textContent || '').trim();
-                            return s.includes(nm) && s.length <= 30 && !/^(材料|道具|宝箱|其他|装备|药水|宝石|附魔卡|宠物)$/.test(s);
-                        });
-                        for (const h of hits) {
-                            let node = h;
-                            for (let up = 0; up < 7 && node; up++) {
-                                // 列表视图是「数量：243」；网格视图是单独的数字角标 → 两种都认
-                                const m = (node.textContent || '').match(/数量\s*[:：]\s*(\d+)/);
-                                if (m) { res[nm] = Number(m[1]); break; }
-                                const numLeaf = [...node.querySelectorAll('*')].find((e) => !e.children.length && /^\d{1,6}$/.test((e.textContent || '').trim()));
-                                if (numLeaf && up >= 1) { res[nm] = Number(numLeaf.textContent.trim()); break; }
-                                node = node.parentElement;
-                            }
-                            if (res[nm] >= 0) break;
-                        }
-                    }
-                    return res;
-                }, [...pending]), evTo(8000)]).catch(() => ({}));
-                for (const nm of Object.keys(found || {})) {
-                    if (found[nm] >= 0 && pending.has(nm)) { out[nm] = found[nm]; pending.delete(nm); }
-                }
-                // 到底了就提前收工（省时间，也避免在底部空滚）
-                if (screen > 0 && /已加载全部数据/.test(await getPageText(page))) break;
-            }
-        }
-    } catch (e) {
-        console.log(`背包读数异常（${e.message}）→ 该项按未读到处理`);
-    } finally {
-        if (opened) {
-            try { await drain.closeBagPanel(page, { log: () => { } }); } catch (e) { }
-            await sleep(800);
-            const bagStillOpen = (s) => /包裹[\s\S]{0,40}(装备[\s\S]{0,10}药水|材料[\s\S]{0,10}宝石)/.test((s || '').replace(/\s+/g, ''));
-            // ★ 网格视图里没有「使用」按钮（只有数字角标），所以判据不能再用 includes('使用')
-            //   —— 23:15 冷8 实测就是这么漏的：包裹一直开着，后面到不了副本入口页。
-            let still = await getPageText(page);
-            if (bagStillOpen(still)) {
-                await page.keyboard.press('Escape').catch(() => { });
-                await sleep(900);
-                still = await getPageText(page);
-                if (bagStillOpen(still)) {
-                    await page.mouse.click(14, 26).catch(() => { });   // 左上返回箭头
-                    await sleep(1000);
-                    still = await getPageText(page);
-                }
-            }
-            if (bagStillOpen(still)) console.log('::warning::包裹没关掉，后续流程可能受影响');
-        }
-    }
-    return out;
-}
+// 实现统一在 ./bag-read.js（与海盗王、奔月两份脚本共用同一份，杜绝三处各修一遍又漏两处）。
+const bag = createBagReader({ getPageText, log: console.log });
+const readBagItems = bag.readBagItems;
 
 // 打完一条线回枢纽：回到起点→秘藏入口→一路往北→枢纽广场
 async function backToHub(page) {
@@ -638,6 +501,15 @@ async function clearRoom(page, tag) {
         const txt = await getPageText(page);
         const seg = viewSeg(txt);
         if (!seg) {
+            // ★ 2026-11-20 冷6 实证（20:56）：补药时打开的包裹浮层如果没关掉，会整页盖住副本视图，
+            //   页面文本只剩「包裹 装备 药水 道具…」，「你看到」区块彻底消失 →
+            //   每一间都读不到怪，15 次尝试全空转，整趟副本作废（今天冷6 就是这么废的）。
+            //   兜底：认出包裹浮层就先关掉再重读，不把「读不到」当成「房间没怪」。
+            if (bag.bagStillOpen(txt)) {
+                console.log(`[${tag}] 页面被包裹浮层盖住 → 先关包裹再读`);
+                await bag.closeBag(page);
+                continue;
+            }
             console.log(`[${tag}] 找不到“你看到”区块，页面:`, txt.substring(0, 120));
             await sleep(1000);
             continue;
@@ -780,6 +652,14 @@ async function trySweep(page) {
 }
 
 async function run() {
+    // 参数闸门：缺账号/密码直接说清楚，别让它表现成「登录失败」再去猜
+    if (!ACCOUNT || !PASSWORD) {
+        console.log('::error::缺少 GAME_ACCOUNT / GAME_PASSWORD（基德在北海-阿姆斯特丹，需要先登录对应账号）');
+        process.exit(1);
+    }
+    // 同账号互斥：这个号正被别的脚本（任务流程/海盗王/奔月/探针）跑着就不登，
+    // 两个会话同时在线会互相顶号下线。
+    acct.guard(ACCOUNT, { tag: 'kidd.js' });
     let bagBefore = null;          // 领奖对账基线（进本前背包数量），null = 没读到
     const browser = await chromium.launch({ headless: true });
     const context = await browser.newContext();

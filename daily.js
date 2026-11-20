@@ -236,6 +236,65 @@ async function hasRegionBar(page) {
     return await page.evaluate(() => !!document.querySelector('.region-bar')).catch(() => false);
 }
 
+// 点「出航」把出航面板打开（打开成功的标志是出现 .region-bar）。
+// ★ 2026-11-20 实证（冷0/冷1 从长安出发去马六甲，22 分钟内连续两号）：
+//   `getByText('出航', {exact:false}).first()` 命中的不是真按钮，`click({force:true})` 返回成功
+//   但面板根本没弹 → 三轮「出航面板没打开」→ 判「到不了马六甲」，整趟海盗王跑不了。
+//   同一页面改用「叶子全等文本 + 坐标 mouse.click」一次就弹出 6 个海域 chip（probe-sail.js 实测）。
+//   所以先坐标点叶子，再退回文本点击；返回 true 只表示「点过了」，开没开由上层 hasRegionBar 判。
+async function clickSailBtn(page) {
+    const readHit = () => page.evaluate(() => {
+        const cands = [...document.querySelectorAll('body *')].filter((el) => {
+            if (el.children.length) return false;
+            if ((el.textContent || '').trim() !== '出航') return false;
+            const r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+        });
+        // ★ 2026-11-20 22:12 实证（冷0 三次全失败）：页面顶部公告/导航栏里也有一个「出航」叶子，
+        //   它的面积比主视图（「你看到：传送 出航 钓鱼老人」那行）里的按钮更小 →
+        //   旧逻辑「取面积最小」选中了 (55,16) 那个不可点的，点完 region-bar 始终 false。
+        //   真实按钮在主视图，y 明显更靠下 → 先排除顶部 60px 区域，再取面积最小。
+        const main = cands.filter((el) => el.getBoundingClientRect().y > 60);
+        const pool = main.length ? main : cands;
+        const area = (el) => { const r = el.getBoundingClientRect(); return r.width * r.height; };
+        pool.sort((a, b) => area(a) - area(b));
+        const r = pool[0].getBoundingClientRect();
+        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2), total: cands.length, main: main.length };
+    }).catch(() => null);
+
+    let hit = await readHit();
+    // 半渲染（文本里有「你看到：」，但 DOM 里主视图那行还没渲染出可点节点）→ 等，别急着点顶部那个假的
+    for (let i = 0; i < 3 && (!hit || hit.main === 0); i++) {
+        console.log(`  [出航] 主视图还没渲染出「出航」按钮，等 2.5s 重读（第 ${i + 1}/3 次）`);
+        await sleep(2500);
+        hit = await readHit();
+    }
+    // 一直半渲染 → reload 让 SPA 重画一次（会话在 localStorage，通常自动回主界面），再不行才放弃
+    if (!hit || hit.main === 0) {
+        console.log('  [出航] 页面仍只渲染了壳 → reload 重画');
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => { });
+        await sleep(4000);
+        let t = await getPageText(page);
+        if (!t.includes('当前城市') && !/你看到：/.test(t)) {
+            console.log('  [出航] reload 后不在主界面，尝试重登');
+            await relogin(page);
+        }
+        await sleep(1500);
+        hit = await readHit();
+    }
+    if (hit) {
+        await page.mouse.click(hit.x, hit.y).catch(() => { });
+        await sleep(1800);
+        const ok = await hasRegionBar(page);
+        console.log(`  [出航] 坐标点 (${hit.x},${hit.y})（候选 ${hit.total} 个，主视图 ${hit.main} 个）→ region-bar=${ok}`);
+        if (ok) return true;
+    } else {
+        console.log('  [出航] 页面上找不到「出航」叶子文本');
+    }
+    if (await clickText(page, '出航', 2000)) { await sleep(1500); return true; }
+    return false;
+}
+
 async function closeTaskDetail(page) {
     for (let i = 0; i < 3; i++) {
         const t = await getPageText(page);
@@ -332,13 +391,13 @@ async function sailTo(page, dest) {
         await page.mouse.click(10, 10);
         await page.keyboard.press('Escape');
         await sleep(500);
-        let step = await clickText(page, '出航', 2000);
+        let step = await clickSailBtn(page);
         if (!step) {
             await clickText(page, '城内地图');
             await sleep(2000);
             await clickText(page, '码头');
             await sleep(3000);
-            await clickText(page, '出航');
+            await clickSailBtn(page);
         }
         await sleep(2000);
         // 面板没打开（最常见原因：任务详情弹窗盖着）→ 关弹窗再开一次，
@@ -349,12 +408,12 @@ async function sailTo(page, dest) {
             await page.mouse.click(10, 10);
             await page.keyboard.press('Escape');
             await sleep(600);
-            if (!(await clickText(page, '出航', 2000))) {
+            if (!(await clickSailBtn(page))) {
                 await clickText(page, '城内地图');
                 await sleep(2000);
                 await clickText(page, '码头');
                 await sleep(3000);
-                await clickText(page, '出航');
+                await clickSailBtn(page);
             }
             await sleep(2000);
             if (!(await hasRegionBar(page))) console.log(`第${round}轮：出航面板仍打不开`);
