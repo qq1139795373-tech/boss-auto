@@ -1,6 +1,8 @@
 const { chromium } = require('playwright');
 // 副本内自恢复（先扫荡/领奖再退本）
 const drain = require('./dungeon-recover.js');
+// 体力宝补给（威尼斯商店，钓鱼前顺路检查；用户 2026-11-20）
+const { createStaminaSupply } = require('./stamina-supply.js');
 
 const ACCOUNT = process.env.GAME_ACCOUNT;
 const PASSWORD = process.env.GAME_PASSWORD;
@@ -1454,6 +1456,30 @@ async function run() {
             return;
         }
         console.log('到达威尼斯码头');
+
+        // 体力宝补给（用户 2026-11-20）：
+        //   「每天 0:00 的任务在威尼斯钓鱼的时候可以顺便检查背包，小体力宝及体力宝总数是否为 10 个，
+        //     不足就按照我截图的位置去购买补足到 10 个，因为买小体力宝城市和钓鱼城市都在威尼斯，不绕路」
+        // 失败只告警，绝不拦钓鱼（钓鱼是主任务）。
+        try {
+            const supply = createStaminaSupply({ log: console.log });
+            const sr = await supply.ensureStaminaStock(page);
+            console.log(`[补给] 结果：补给前=${sr.totalBefore} 补给后=${sr.totalAfter} 购买=${sr.bought} ok=${sr.ok}${sr.reason ? ' reason=' + sr.reason : ''}`);
+            if (!sr.ok && sr.reason !== 'enough') {
+                console.log(`::warning::钓鱼前体力宝补给未完成（${sr.reason}），继续钓鱼`);
+            }
+        } catch (e) {
+            console.log(`::warning::体力宝补给异常（${e.message}），继续钓鱼`);
+        }
+        // 补给会把页面带到商店/城内；回不到码头就重载（后面买饵必须站在码头）
+        if (!(await ensureDock(page))) {
+            console.log('补给后未回码头，重载兜底');
+            await page.reload().catch(() => { });
+            await sleep(4000);
+            await waitGameReady(page, 60000, '补给后回码头');
+            await ensureDock(page);
+        }
+
         // 先查包裹鱼饵库存：≥100直接出航钓，<100在鱼老板处补到100
         const stock = await getBaitStock(page);
         if (!(await ensureDock(page))) {
