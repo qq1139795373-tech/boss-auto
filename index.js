@@ -92,6 +92,30 @@ async function clickExact(page, text, timeout = 3000) {
     }
 }
 
+// uni-toast 的常驻遮罩（data-duration=100000000，永不自动消失）会吃掉指针事件：
+// 11-20 11:50 波 boss(1) 只打到 7/10、boss(4) 0/10，报错原文
+// `locator.click: Timeout 30000ms exceeded` + `<div class="uni-mask"> from <uni-toast> … intercepts pointer events`。
+// 处理顺序：正常点击（8s，不再白等 30s）→ 清遮罩节点再点 → 合成事件穿透（复用 jsClick）。
+async function clearMasks(page) {
+    return await page.evaluate(() => {
+        let n = 0;
+        for (const el of document.querySelectorAll('.uni-mask, uni-toast')) { el.remove(); n++; }
+        return n;
+    }).catch(() => 0);
+}
+
+async function clickChallenge(page) {
+    const btn = page.locator('text=发起挑战').first();
+    if (!(await btn.isVisible({ timeout: 5000 }).catch(() => false))) return false;
+    if (await btn.click({ timeout: 8000 }).then(() => true).catch(() => false)) return true;
+    const n = await clearMasks(page);
+    console.log(`「发起挑战」被遮罩拦截 → 已清 ${n} 个遮罩节点，重试`);
+    if (await btn.click({ timeout: 8000 }).then(() => true).catch(() => false)) return true;
+    const ok = await jsClick(page, '发起挑战');
+    if (ok) console.log('「发起挑战」改用合成事件点击（穿透遮罩）');
+    return ok;
+}
+
 // 无地图提示：没这张图的号点城市只会弹「暂无地图，查看失败」，不会出现出航确认框
 let SAIL_FAIL = '';
 function sailFailReason() { return SAIL_FAIL; }
@@ -570,9 +594,7 @@ async function run() {
                 break;
             }
 
-            const challengeBtn = page.locator('text=发起挑战').first();
-            if (await challengeBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
-                await challengeBtn.click();
+            if (await clickChallenge(page)) {
                 await sleep(1000);
 
                 pageText = await getPageText(page);
