@@ -310,6 +310,7 @@ function createStaminaSupply({ log = console.log } = {}) {
             const total = before ? before.total : 0;
             if (total >= target) {
                 log(`  [补给] 体力宝共 ${total} 个 ≥ ${target}${targetSrc}，不购买`);
+                r.totalAfter = total;      // 没买，前后一致（别在日志里显示 null 让人以为没读到）
                 r.ok = true; r.reason = 'enough';
                 return r;
             }
