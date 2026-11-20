@@ -754,6 +754,30 @@ async function rereadBagQuantity(page, name, { inDungeon = false, log = () => { 
     return await rowQuantity(page, name);
 }
 
+// 列表视图才能用「点该行使用」这条路：列表每行有「数量：N + 使用 + 详情」，
+// 网格视图只有名字 + 角标数字，没有「使用」按钮、也没有「数量：」文本。
+// ★ 2026-11-20 冷0 实证：背包里明明有 25 个小体力宝（用户截图），脚本却判 no-item，
+//   日志停在「已切到「药水」」后两秒直接说「没有可用的体力宝」——
+//   因为 useStaminaItem 的 rowQuantity 依赖「数量：N」，网格视图下永远读成 -1。
+//   触发条件：11-19 读背包数量时脚本点过「网格」（读数快一半），游戏把视图模式记住了，
+//   之后每次打开包裹都是网格视图 → 补药路径全废。所以补药前必须先切回列表。
+async function ensureListView(page, { log = () => { } } = {}) {
+    let t = await visibleText(page);
+    const hasQty = () => /数量\s*[：:]\s*\d+/.test(t);
+    if (hasQty()) return true;
+    if (!t.includes('列表')) {
+        log(`包裹页看不到「列表」切换按钮，页面: ${t.replace(/\s+/g, ' ').substring(0, 120)}`);
+        return false;
+    }
+    log('包裹当前是网格视图（没有「数量：N」和「使用」按钮）→ 切回列表');
+    await clickByText(page, '列表', { exact: true });
+    await sleep(1800);
+    t = await visibleText(page);
+    if (hasQty()) { log('已切到列表视图'); return true; }
+    log(`切列表后仍读不到「数量：N」，页面: ${t.replace(/\s+/g, ' ').substring(0, 160)}`);
+    return false;
+}
+
 // 用一次体力宝：优先小体力宝，没有再体力宝。返回 {ok, item, left}
 // ★ 2026-11-15 真机实证（coldwind0，弹窗 DOM 已抓全）：
 //   1) 列表行那个绿色「使用」**不是直接吃药**，它是打开「物品详情」弹窗（和「详情」同一个弹窗）；
@@ -764,6 +788,8 @@ async function rereadBagQuantity(page, name, { inDungeon = false, log = () => { 
 // ★ 一次只吃一个（用户 2026-11-15）：体力宝效果是覆盖不是叠加，吃第二个会覆盖前一个的血池，
 //   剩余量不会变多。所以永远只点「1个」，上层也不许循环补。
 async function useStaminaItem(page, { log = () => { }, inDungeon = false } = {}) {
+    // 先确保是列表视图（网格视图读不到「数量：N」、也没有「使用」按钮 → 会误判 no-item）
+    await ensureListView(page, { log });
     for (const name of BLOOD_ITEMS) {
         const left = await rowQuantity(page, name);
         if (left === 0) continue;                       // 这一档没了 → 换下一档
@@ -820,6 +846,36 @@ async function useStaminaItem(page, { log = () => { }, inDungeon = false } = {})
         log(`「${name}」点了「1个」但列表数量没变（${left} → ${after}），换下一档`);
     }
     return { ok: false, item: '', left: -1 };
+}
+
+// ==================== 血池 0 的处置决策（三副本共用，纯函数可单测） ====================
+//
+// ★ 2026-11-20 用户要求：体力宝用光时不要提前放弃（冷0 今天海盗王 20 间 / 0 杀、无奖可领，白跑一趟），
+//   改成「硬打模式」——没钱买药就继续出刀，能杀几只杀几只；人被打死就复活一次，复活后立刻领奖。
+//   依据：11-15 真机实测「血池 0 仍能出刀」（冷0 (0,2) 房 2 秒击杀一只），
+//   之前每只怪都因为血池 0 直接 break → 怪留房间 → 三线少怪、51 刀打不满。
+//
+// 但只有「药水页确实没有体力宝」（no-item）才允许硬打；
+// no-bag / no-potion-tab / 读不到血池 属于界面或识别故障，硬打只会把 bug 藏起来 → 仍按放弃处理并告警。
+const BLOOD_GONE_REASONS = new Set(['no-item']);
+function bloodItemGone(reason) {
+    return BLOOD_GONE_REASONS.has(String(reason || '').trim());
+}
+
+// 决策表（输入全部来自调用方已经读到的页面状态）：
+//   blood        当前血池（null=读不到）
+//   hardMode     已经进入硬打模式（本趟不再开背包）
+//   healOk       本次补药是否成功（只有调用过 healBlood 才有意义）
+//   healedOnce   这一只怪已经补过 1 个药（体力宝覆盖不叠加，补第二个没用）
+//   healReason   healBlood 失败时的 reason
+// 返回：'fight' 直接出刀 / 'heal' 先补药再出刀 / 'hard' 转硬打模式并出刀 / 'giveup' 放弃这只怪
+function bloodAction({ blood, hardMode = false, healOk = false, healedOnce = false, healReason = '' } = {}) {
+    if (blood !== 0) return 'fight';          // 读不到或还有血池：不动，照常打
+    if (hardMode) return 'fight';             // 已确定没药：不再逐只开背包
+    if (healOk) return 'heal';                // 还有药：补了再打（最优路径）
+    if (healedOnce) return 'giveup';          // 补过仍 0 → 不是药不够的问题
+    if (bloodItemGone(healReason)) return 'hard';  // 药真的没了 → 硬打
+    return 'giveup';                          // 界面/识别故障 → 不动手，让上层告警
 }
 
 // 血池为 0 时的完整补给流程。返回 { ok, used, item, blood, reason }
@@ -880,7 +936,7 @@ async function healBlood(page, opts = {}) {
 module.exports = {
     recoverDungeon, closeSweepPopup, clickAndVerify, clickByText, clickTextReal, visibleText, dismissPopups,
     readRewardToast, claimEvidence, claimEvidenceIn, remainTimes, sleep,
-    readBlood, inFightPanel, healBlood,
+    readBlood, inFightPanel, healBlood, bloodAction, bloodItemGone, ensureListView,
     openBagPanel, closeBagPanel, gotoPotionTab, useStaminaItem,
     // 药水页细分步骤（探针用）
     clickBtnInRow, clickUseInRow, realClick, clickOnceAndCheck, rowQuantity, rereadBagQuantity,
