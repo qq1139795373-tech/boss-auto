@@ -855,8 +855,14 @@ async function useStaminaItem(page, { log = () => { }, inDungeon = false } = {})
 //   依据：11-15 真机实测「血池 0 仍能出刀」（冷0 (0,2) 房 2 秒击杀一只），
 //   之前每只怪都因为血池 0 直接 break → 怪留房间 → 三线少怪、51 刀打不满。
 //
-// 但只有「药水页确实没有体力宝」（no-item）才允许硬打；
-// no-bag / no-potion-tab / 读不到血池 属于界面或识别故障，硬打只会把 bug 藏起来 → 仍按放弃处理并告警。
+// ★ 2026-11-20 用户第二次纠正（当晚 22:45）：
+//   「没切到药水页这类界面故障也可以杀到死再领奖，你不能动不动就放弃，
+//     就算没读到请假设就没有药水了，去完成好吗」
+//   → 补药失败不再分辨原因：no-item / no-bag / no-potion-tab / 读不到血池，
+//     一律当作「没有体力宝」进入硬打模式，能杀几只杀几只；战死由 reviveOnce 复活一次后领奖。
+//     放弃 = 0 杀白跑一趟，比硬打差得多。原因只用来打日志（便于事后修界面 bug），不再影响决策。
+//
+// bloodItemGone 保留：只用于区分日志措辞（「药水页确实没有」vs「读不到，按没有处理」）。
 const BLOOD_GONE_REASONS = new Set(['no-item']);
 function bloodItemGone(reason) {
     return BLOOD_GONE_REASONS.has(String(reason || '').trim());
@@ -867,15 +873,15 @@ function bloodItemGone(reason) {
 //   hardMode     已经进入硬打模式（本趟不再开背包）
 //   healOk       本次补药是否成功（只有调用过 healBlood 才有意义）
 //   healedOnce   这一只怪已经补过 1 个药（体力宝覆盖不叠加，补第二个没用）
-//   healReason   healBlood 失败时的 reason
-// 返回：'fight' 直接出刀 / 'heal' 先补药再出刀 / 'hard' 转硬打模式并出刀 / 'giveup' 放弃这只怪
+//   healReason   healBlood 失败时的 reason（只影响日志，不影响决策）
+// 返回：'fight' 直接出刀 / 'heal' 先补药再出刀 / 'hard' 转硬打模式并出刀
+// （不再有 'giveup'：任何读不到药的情形都硬打，不提前放弃）
 function bloodAction({ blood, hardMode = false, healOk = false, healedOnce = false, healReason = '' } = {}) {
-    if (blood !== 0) return 'fight';          // 读不到或还有血池：不动，照常打
-    if (hardMode) return 'fight';             // 已确定没药：不再逐只开背包
-    if (healOk) return 'heal';                // 还有药：补了再打（最优路径）
-    if (healedOnce) return 'giveup';          // 补过仍 0 → 不是药不够的问题
-    if (bloodItemGone(healReason)) return 'hard';  // 药真的没了 → 硬打
-    return 'giveup';                          // 界面/识别故障 → 不动手，让上层告警
+    if (blood !== 0) return 'fight';      // 读不到或还有血池：不动，照常打
+    if (hardMode) return 'fight';         // 已确定没药：不再逐只开背包
+    if (healOk) return 'heal';            // 还有药：补了再打（最优路径）
+    if (healedOnce) return 'hard';        // 补过仍 0 / 补不成 → 再补也没用，硬打
+    return 'hard';                        // 没药 or 界面故障 → 一律按「没有体力宝」硬打
 }
 
 // 血池为 0 时的完整补给流程。返回 { ok, used, item, blood, reason }

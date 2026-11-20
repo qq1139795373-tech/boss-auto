@@ -384,7 +384,9 @@ async function fightOne(page, name) {
     await sleep(300);
     let blades = 0;
     let heals = 0;
-    for (let a = 0; a < (BLOOD_HARD ? 18 : 12); a++) {
+    // 上限统一 18 刀：普通模式一般 3~5 刀就结算，多余刀数不会白点（出结算就走「关闭」分支）；
+    // 硬打模式血池 0、怪更肉，12 刀可能不够打完（原来是 BLOOD_HARD?18:12，硬打发生在循环中途时上限不生效）
+    for (let a = 0; a < 18; a++) {
         const txt = await getPageText(page);
         if (txt.includes('复活')) {
             // 人被打死了：战斗面板会变成「复活」入口，这里立刻交回上层去复活+领奖，
@@ -399,39 +401,34 @@ async function fightOne(page, name) {
             return true;
         }
         if (txt.includes('攻击')) {
-            // 血池 0 的处置（2026-11-15 定策略，2026-11-20 补无药分支）：
+            // 血池 0 的处置（2026-11-15 定策略，2026-11-20 两轮修正）：
             //   ① 还有体力宝 → 撤退补药再打；
-            //   ② 体力宝真的用光（no-item）→ 转硬打，继续出刀（依据：11-15 真机实测血池 0 仍能出刀）；
-            //   ③ 补药因界面/识别故障失败 → 仍放弃这只，不拿硬打掩盖 bug。
+            //   ② 补不成——不管是「药水页真没药」还是「背包打不开/没切到药水页」这类界面故障
+            //      —— 一律当作没有药，转硬打继续出刀（用户 22:45：「就算没读到请假设就没有药水了」）；
+            //   ③ 战死由上层 reviveOnce 复活一次，复活后立刻领奖。绝不提前放弃这只怪。
             if (drain.readBlood(txt) === 0) {
                 const act = drain.bloodAction({
                     blood: 0, hardMode: BLOOD_HARD, healedOnce: BLOOD_DEAD || heals >= 1, healReason: '',
                 });
-                if (act === 'giveup') {
-                    console.log(`  [血池] ${name}: 血池 0${BLOOD_DEAD ? '（药已用光）' : '（补过 1 个仍为 0）'}，放弃这只`);
-                    BLOOD_DEAD = true;
-                    break;
-                }
                 if (act === 'heal') {
                     const h = await drain.healBlood(page, { tag: `补血池·${name}`, inDungeon: true, log: console.log });
-                    if (!h.ok) {
-                        if (drain.bloodItemGone(h.reason)) {
-                            BLOOD_HARD = true;
-                            console.log(`  [血池] ${name}: 体力宝已用光 → 转硬打模式（继续出刀，战死则复活一次领奖）`);
-                        } else {
-                            BLOOD_DEAD = true;
-                            console.log(`::warning::${name} 血池 0 且补药失败（${h.reason}）→ 本波不再尝试补药`);
-                            break;
-                        }
-                    } else {
+                    if (h.ok) {
                         heals++;
                         blades = 0;
                         if (!(await clickMonster(page, name))) { console.log(`  [血池] ${name}: 补药后点不回这只怪`); break; }
                         await sleep(500);
                         continue;
                     }
+                    // 补不到 → 按「没有体力宝」硬打（原因只用于日志）
+                    BLOOD_HARD = true;
+                    BLOOD_DEAD = true;   // 本波不再逐只开背包
+                    if (drain.bloodItemGone(h.reason)) {
+                        console.log(`  [血池] ${name}: 体力宝已用光 → 转硬打模式（继续出刀，战死则复活一次领奖）`);
+                    } else {
+                        console.log(`::warning::${name} 补药失败（${h.reason}）→ 按「没有体力宝」硬打，不放弃这只`);
+                    }
                 }
-                // act === 'fight'（硬打中）或刚转硬打 → 往下照常点攻击
+                // act === 'fight'（硬打中）或 'hard'（刚转硬打）→ 往下照常点攻击
             }
             await page.locator('text=攻击').first().click({ force: true, timeout: 500 }).catch(() => {});
             blades++;
