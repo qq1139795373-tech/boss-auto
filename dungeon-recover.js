@@ -392,10 +392,16 @@ function inFightPanel(t) {
 
 // 背包/包裹是否已打开：认页签组（装备/药水/道具/材料/宝箱）+ 行内动作（使用/详情/已装备）
 // 只看「使用」会误判：默认「全部」页签下列表全是装备，行里只有「详情」「已装备」，没有「使用」
+// 包裹是否开着。
+// ★ 2026-11-20 冷6 实证（20:56 日志）：包裹切到「网格」视图后**没有「使用/详情」按钮**（只有右下角数量角标），
+//   旧判据要求「页签组 + 使用/详情」→ 网格下永远判「没打开」，两个后果：
+//     ① healBlood 误报 no-bag（其实已经打开了）；
+//     ② closeBagPanel 判 !bagOpened 直接返回「已关」，其实包裹还盖在副本页上 →
+//        走廊每一间都读不到「你看到」区块，空转 15 次后整趟副本作废（冷6 今天就是这么废的）。
+//   改为只认页签组（与 bag-read.js 的 bagStillOpen 同一判据）：主界面/副本页不含「包裹 + 装备…药水」这组文字。
 function bagOpened(t) {
-    const tabs = t.includes('药水') && (t.includes('道具') || t.includes('材料') || t.includes('宝箱') || t.includes('装备'));
-    const action = t.includes('使用') || t.includes('详情') || t.includes('已装备');
-    return tabs && action;
+    const flat = (t || '').replace(/\s+/g, '');
+    return /包裹/.test(flat) && /(装备[\s\S]{0,10}药水|材料[\s\S]{0,10}宝石)/.test(flat);
 }
 
 // 在「名称所在的那一行」里点某个按钮（'使用' / '详情'）。
@@ -848,6 +854,9 @@ async function healBlood(page, opts = {}) {
 
     // 2) 打开背包 → 药水页签
     if (!(await openBagPanel(page, { inDungeon: opts.inDungeon, log }))) {
+        // ★ 认不出「已打开」不等于没打开（11-20 冷6：网格视图误判 no-bag，包裹就留在了副本页上）
+        //   → 无论判成功还是失败，退出前都按一次关包裹，绝不把浮层留给后面的走廊/房间读取。
+        await closeBagPanel(page, { log });
         return { ok: false, used: 0, item: '', blood, reason: 'no-bag' };
     }
     if (!(await gotoPotionTab(page, { log }))) {

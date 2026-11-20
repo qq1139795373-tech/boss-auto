@@ -2,6 +2,10 @@ const { chromium } = require('playwright');
 // 扫荡/领奖弹窗处理 + 只读可见节点的页面文本
 const drain = require('./dungeon-recover.js');
 const { visibleText } = drain;
+// 背包读数（领奖对账）与同账号互斥锁：与海盗王 / 奔月两份脚本共用同一份实现，
+// 避免同一套逻辑各写一遍、修一处漏两处（11-19 三份实现已经分叉过一次）。
+const { createBagReader, evTo } = require('./bag-read.js');
+const acct = require('./acct-lock.js');
 
 const ACCOUNT = process.env.GAME_ACCOUNT;
 const PASSWORD = process.env.GAME_PASSWORD;
@@ -35,6 +39,17 @@ const ARMS = [
 const KIDD_EXPECT = 51;
 // 剩余多少分钟才允许回扫补怪（跑一遍三线约 3~4 分钟 + 留给领奖）
 const RESCAN_MIN_LEFT = 8;
+
+// ★ 领奖到账判据（2026-11-19 用户明确：比「增量」，不是比固定数量）
+//   基德不掉宝箱，只给藏宝图碎片 15 个（11-19 22:44 领奖 toast 原文：
+//   `获得经验*1333332，铜币*50000，藏宝图碎片*15`，与副本详情页「通关奖励」一致）。
+//   ① 主判据 = 领奖明细 toast 里 `藏宝图碎片×N`，N ≥ 15 即到账（一次给 15/16/20 都认，
+//      **绝不写死「0→1」**）；
+//   ② 补充 = 进本前读背包基线、领奖后读一次比增量（≥ 期望值即到账）；
+//      但 11-19 23:00 实测：包裹九个页签里都没有「藏宝图碎片」（只有普通/高级藏宝图），
+//      碎片不进包裹 → 这条对基德基本用不上，只在别处给同名道具时才有意义。
+//   ③ 经验/铜贝读不到数量，只作 toast 文本证据，不参与数值对账。
+const KIDD_REWARDS = { '藏宝图碎片': 15 };
 
 async function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -78,7 +93,9 @@ async function clickText(page, text, timeout = 5000) {
 // 只拼可见节点。原实现 textContent('body') 不排除 display:none，
 // 残留弹窗节点会一直留在 DOM 里 → 读出幽灵文案，把「没成」判成「成了」（2026-10-28 同源问题）。
 async function getPageText(page) {
-    return await visibleText(page);
+    // ★ 与另外两个副本脚本统一：page.evaluate 不受 setDefaultTimeout 约束，渲染进程一忙就无限等
+    //   （11-19 22:25 卡死 4 分钟实证）→ 一律套硬超时，超时抛错由上层兜底，绝不再静默挂死。
+    return await Promise.race([visibleText(page), evTo(12000)]);
 }
 
 async function remainMin(page) {
@@ -411,6 +428,11 @@ async function clickLeaf(page, text) {
     }, text);
 }
 
+// ==================== 背包读数（领奖对账用） ====================
+// 实现统一在 ./bag-read.js（与海盗王、奔月两份脚本共用同一份，杜绝三处各修一遍又漏两处）。
+const bag = createBagReader({ getPageText, log: console.log });
+const readBagItems = bag.readBagItems;
+
 // 打完一条线回枢纽：回到起点→秘藏入口→一路往北→枢纽广场
 async function backToHub(page) {
     for (let i = 0; i < 8 && !(await atHub(page)); i++) {
@@ -479,6 +501,15 @@ async function clearRoom(page, tag) {
         const txt = await getPageText(page);
         const seg = viewSeg(txt);
         if (!seg) {
+            // ★ 2026-11-20 冷6 实证（20:56）：补药时打开的包裹浮层如果没关掉，会整页盖住副本视图，
+            //   页面文本只剩「包裹 装备 药水 道具…」，「你看到」区块彻底消失 →
+            //   每一间都读不到怪，15 次尝试全空转，整趟副本作废（今天冷6 就是这么废的）。
+            //   兜底：认出包裹浮层就先关掉再重读，不把「读不到」当成「房间没怪」。
+            if (bag.bagStillOpen(txt)) {
+                console.log(`[${tag}] 页面被包裹浮层盖住 → 先关包裹再读`);
+                await bag.closeBag(page);
+                continue;
+            }
             console.log(`[${tag}] 找不到“你看到”区块，页面:`, txt.substring(0, 120));
             await sleep(1000);
             continue;
@@ -621,6 +652,15 @@ async function trySweep(page) {
 }
 
 async function run() {
+    // 参数闸门：缺账号/密码直接说清楚，别让它表现成「登录失败」再去猜
+    if (!ACCOUNT || !PASSWORD) {
+        console.log('::error::缺少 GAME_ACCOUNT / GAME_PASSWORD（基德在北海-阿姆斯特丹，需要先登录对应账号）');
+        process.exit(1);
+    }
+    // 同账号互斥：这个号正被别的脚本（任务流程/海盗王/奔月/探针）跑着就不登，
+    // 两个会话同时在线会互相顶号下线。
+    acct.guard(ACCOUNT, { tag: 'kidd.js' });
+    let bagBefore = null;          // 领奖对账基线（进本前背包数量），null = 没读到
     const browser = await chromium.launch({ headless: true });
     const context = await browser.newContext();
     const page = await context.newPage();
@@ -731,6 +771,19 @@ async function run() {
                 await browser.close();
                 return;
             }
+        }
+
+        // ★ 领奖基线（11-19）：进本前在城里读一次背包，领奖后比**增量**。
+        //   续打（登录时已在副本里）读不到基线 → 只打印一行说明，降级用 toast 判据，不会误判。
+        if (!inDungeon && !NO_CLAIM) {
+            bagBefore = await readBagItems(page, Object.keys(KIDD_REWARDS));
+            const names0 = Object.keys(KIDD_REWARDS);
+            console.log('[基线] ' + names0.map((n) => `${n}=${bagBefore[n] === null ? '缺失(0)' : bagBefore[n]}`).join(' / '));
+            if (names0.every((n) => bagBefore[n] === null)) {
+                console.log('[基线] 包裹里没有该条目（基德碎片实测不进包裹，属正常）→ 以领奖明细原文为准');
+            }
+        } else if (inDungeon) {
+            console.log('[基线] 续打（已在副本内），读不到背包基线 → 本次只用领奖明细/次数判据');
         }
 
         if (!inDungeon) {
@@ -917,6 +970,7 @@ async function run() {
         // 杀多少只、走完几条线，只作为日志证据，绝不作为领奖条件。
         pageText = await getPageText(page);
         if (!allArmsDone && !NO_CLAIM) console.log(`::warning::三线只完成 ${armsOk}/3 → 按「领奖优先」照常领奖`);
+        let toastConfirmed = false;      // 领奖明细里已看到本副本奖励项（硬证据）
         if (NO_CLAIM) {
             const ci = pageText.indexOf('副本条件');
             const cj = pageText.indexOf('回到起点', ci);
@@ -924,6 +978,9 @@ async function run() {
             console.log('条件行:', ci >= 0 ? pageText.substring(ci, cj > ci ? cj : ci + 120) : '(未见)');
             await page.screenshot({ path: 'kidd-no-claim.png' }).catch(() => {});
         } else if (pageText.includes('领取奖励')) {
+            // ★ 领奖明细 toast 只活 1~2 秒，**必须在点「领取奖励」之前就挂轮询**（11-19 实证：
+            //   点完 sleep(1500) 再去读，toast 早消失了 → 只能拿「次数已用尽」这种弱证据）。
+            const toastP = drain.readRewardToast(page, 9000).catch(() => '');
             // 领奖循环：一层层关弹窗，直到「领取奖励」消失或已离开副本页。
             // 只点一次「确定」在弹窗叠层时会半途而废（炼器窟 boss(0) 实证）。
             let got = false;
@@ -941,6 +998,27 @@ async function run() {
                 await drain.dismissPopups(page, { log: console.log });
                 await sleep(1500);
             }
+            const toast = (await toastP) || '';
+            if (toast) {
+                console.log('领奖明细：' + toast);
+                // ★ 明细原文就是最硬的证据（11-19 22:44 实测原文：
+                //   `获得经验*1333332，铜币*50000，藏宝图碎片*15`）——直接按「物品名 ×数量」解析，
+                //   数量 ≥ 期望值即到账；一次给 15 / 16 / 20 都认，不写死「0→1」。
+                const gotItems = {};
+                for (const n of Object.keys(KIDD_REWARDS)) {
+                    const m = toast.replace(/\s+/g, '').match(new RegExp(n + '[×*x](\\d+)'));
+                    if (m) gotItems[n] = Number(m[1]);
+                }
+                const hit = Object.keys(gotItems).filter((n) => gotItems[n] >= KIDD_REWARDS[n]);
+                if (hit.length) {
+                    toastConfirmed = true;
+                    console.log('✔ 领奖到账（明细原文）: ' + hit.map((n) => `${n}×${gotItems[n]}（需 ${KIDD_REWARDS[n]}）`).join('，'));
+                } else if (Object.keys(gotItems).length) {
+                    console.log('::warning::明细里数量不足: ' + Object.keys(gotItems).map((n) => `${n}×${gotItems[n]}（需 ${KIDD_REWARDS[n]}）`).join('，'));
+                } else {
+                    console.log('（明细里没有本副本奖励项，可能只结算了经验/铜币）');
+                }
+            }
             pageText = await getPageText(page);
             if (got && !pageText.includes('副本条件')) {
                 // 领完退回入口页，再点副本就显示「次数为 0」= 今天这一次确实用掉了
@@ -957,6 +1035,32 @@ async function run() {
         } else {
             console.log('::warning::未看到领取奖励入口 → 领不到（页面/条件未满足），页面:', pageText.substring(0, 300));
             await page.screenshot({ path: 'kidd-claim-fail.png' }).catch(() => {});
+        }
+
+        // ★ 背包差值对账（补充证据，11-19 用户指定）：开打前基线 vs 领奖后，只看**增量**。
+        //   基线的 0 / 1 / 7 都无所谓；一次给 15 / 16 / 20 都算到账，**不写死「0→1」**。
+        //   ★ 实测（11-19 23:00 冷1 逐页签 dump）：包裹九个页签（装备/药水/道具/宝箱/材料/宝石/
+        //     附魔卡/宠物/其他）里**都没有「藏宝图碎片」**，只有「普通藏宝图 10 / 高级藏宝图 2」，
+        //     说明碎片不进包裹（大概率直接进藏宝图系统）。所以这条只作补充：
+        //     明细原文（toast）已确认到账时直接跳过；读不到也绝不推翻 toast 结论。
+        if (bagBefore && !NO_CLAIM && !toastConfirmed) {
+            const need = KIDD_REWARDS;
+            const names = Object.keys(need);
+            const after = await readBagItems(page, names);
+            const show = (v) => (v === null || v === undefined ? '缺失(0)' : v);
+            const num = (v) => (v === null || v === undefined ? 0 : v);   // 背包里没有该条目 = 数量 0
+            const delta = {};
+            for (const n of names) delta[n] = num(after[n]) - num(bagBefore[n]);
+            console.log('[对账] ' + names.map((n) => `${n} ${show(bagBefore[n])}→${show(after[n])}(${delta[n] >= 0 ? '+' : ''}${delta[n]})`).join(' / '));
+            const hit = names.filter((n) => delta[n] >= need[n]);
+            if (hit.length) {
+                console.log('✔ 领奖到账（背包增量）: ' + hit.map((n) => `${n} +${delta[n]}（需 +${need[n]}）`).join('，'));
+            } else if (names.every((n) => delta[n] === 0)) {
+                console.log('（背包里读不到「藏宝图碎片」—— 11-19 实测碎片不进包裹，此条对基德不可用，以明细原文为准）');
+            } else {
+                console.log('::warning::背包增量不足（' + names.map((n) => `${n} +${delta[n]}`).join('，')
+                    + '，需 ' + names.map((n) => `${n} +${need[n]}`).join('，') + '）');
+            }
         }
 
     } catch (e) {
