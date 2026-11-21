@@ -4,6 +4,8 @@ const { chromium } = require('playwright');
 const daily = require('./daily.js');
 // 扫荡/领奖弹窗处理（「扫荡收获」只有一个「知道了」，点完必须验证真的关掉）
 const drain = require('./dungeon-recover.js');
+// 背包读数/关包裹（与 kidd.js 共用同一套，避免两份实现分叉）
+const bagMod = require('./bag-read.js');
 
 const ACCOUNT = process.env.GAME_ACCOUNT;
 const PASSWORD = process.env.GAME_PASSWORD;
@@ -78,6 +80,9 @@ async function clickText(page, text, timeout = 5000) {
 async function getPageText(page) {
     return await drain.visibleText(page);
 }
+
+// 背包 reader（关包裹兜底用；getPageText 是函数声明，此处已可用）
+const bag = bagMod.createBagReader({ getPageText, log: console.log });
 
 // 精确提取副本剩余分钟数（正则从页面原文取，避免控制台乱码误读）
 async function remainMin(page) {
@@ -208,15 +213,42 @@ async function atHub(page) {
 // 血池为 0（用户 2026-11-15 说明）：面板上「体力：2691/4197 -0 血池：0」时点「攻击」
 // 既不结算也不掉怪血，旧代码会白点 12 刀然后记「未见结算」，怪留在房间里清不掉。
 // 处理：撤退 → 副本页左下「背包」→「药水」→ 体力宝（优先小体力宝）→ 关背包 → 重新点怪接着打。
-let BLOOD_DEAD = false;   // 体力宝用光/补药失败：本波不再反复开背包，避免每只怪白等十几秒
+// 2026-11-21 与 kidd.js 对齐：补不成药（含背包打不开/没切到药水页这类界面故障）不再放弃这只怪，
+// 一律按「没有体力宝」硬打；战死由 reviveOnce 复活一次后立刻去领奖。
+let BLOOD_DEAD = false;   // 体力宝用光/补药失败后不再逐只开背包
+let BLOOD_HARD = false;   // 硬打模式（本趟不再开背包）
+let STOP_WALK = false;    // 复活成功/失败后置位：主线、房间循环都要立刻收手去领奖
+
+// 复活一次（副本内只有 1 次机会）。判据与 kidd.js 完全一致。
+async function reviveOnce(page) {
+    console.log('  [复活] 点「复活」');
+    let ok = await clickLeaf(page, '复活');
+    if (!ok) ok = await clickText(page, '复活', 3000);
+    if (!ok) return { ok: false, why: 'no-revive-btn' };
+    await sleep(2600);
+    const t = await getPageText(page);
+    if (!t.includes('确认复活')) return { ok: false, why: 'no-dialog' };
+    if (!(await clickExact(page, '确定', 3000))) return { ok: false, why: 'no-ok' };
+    await sleep(3200);
+    const t2 = await getPageText(page);
+    if (t2.includes('道具不足')) return { ok: false, why: 'no-item' };
+    return { ok: true, why: '' };
+}
 
 async function fightOne(page, name) {
     if (!(await clickMonster(page, name))) return false;
     await sleep(300);
     let blades = 0;
     let heals = 0;
-    for (let a = 0; a < 12; a++) {
+    // 上限 18 刀：普通模式一般 3~5 刀就结算，多余刀数不会白点（出结算走「关闭」分支）；
+    // 硬打模式血池 0、怪更肉，12 刀可能不够打完（用户 11-21：不能自己拍刀数省时间）。
+    for (let a = 0; a < 18; a++) {
         const txt = await getPageText(page);
+        if (txt.includes('复活')) {
+            // 人被打死了：战斗面板变成「复活」入口，交回上层复活 + 领奖，不空点攻击
+            console.log(`  [战斗] ${name}: 人物战死`);
+            return 'dead';
+        }
         if (txt.includes('关闭')) {
             await page.locator('text=关闭').first().click({ force: true, timeout: 500 }).catch(() => {});
             await sleep(300);
@@ -224,26 +256,30 @@ async function fightOne(page, name) {
             return true;
         }
         if (txt.includes('攻击')) {
-            // 血池 0 立刻补药，不许先试几刀（2026-11-15 用户纠正）：有些怪攻击力很高，
-            // 等打满 3 刀人已经被砍死、副本判失败。只补 1 个（体力宝覆盖不叠加）。
+            // 血池 0 处置：有药→补药再打；补不成（含界面故障）→ 硬打；战死→复活一次后领奖
             if (drain.readBlood(txt) === 0) {
-                if (BLOOD_DEAD || heals >= 1) {
-                    console.log(`  [血池] ${name}: 血池 0${BLOOD_DEAD ? '（药已用光）' : '（补过 1 个仍为 0）'}，放弃这只`);
-                    // 补过 1 个还是 0 → 不是药不够，别再逐只怪开背包吃第二次药
+                const act = drain.bloodAction({
+                    blood: 0, hardMode: BLOOD_HARD, healedOnce: BLOOD_DEAD || heals >= 1, healReason: '',
+                });
+                if (act === 'heal') {
+                    const h = await drain.healBlood(page, { tag: `补血池·${name}`, inDungeon: true, log: console.log });
+                    if (h.ok) {
+                        heals++;
+                        blades = 0;
+                        if (!(await clickMonster(page, name))) { console.log(`  [血池] ${name}: 补药后点不回这只怪`); break; }
+                        await sleep(500);
+                        continue;
+                    }
+                    // 补不到 → 按「没有体力宝」硬打（原因只用于日志措辞）
+                    BLOOD_HARD = true;
                     BLOOD_DEAD = true;
-                    break;
+                    if (drain.bloodItemGone(h.reason)) {
+                        console.log(`  [血池] ${name}: 体力宝已用光 → 转硬打模式（继续出刀，战死则复活一次领奖）`);
+                    } else {
+                        console.log(`::warning::${name} 补药失败（${h.reason}）→ 按「没有体力宝」硬打，不放弃这只`);
+                    }
                 }
-                const h = await drain.healBlood(page, { tag: `补血池·${name}`, inDungeon: true, log: console.log });
-                if (!h.ok) {
-                    BLOOD_DEAD = true;
-                    console.log(`::warning::${name} 血池 0 且补药失败（${h.reason}）→ 本波不再尝试补药`);
-                    break;
-                }
-                heals++;
-                blades = 0;
-                if (!(await clickMonster(page, name))) { console.log(`  [血池] ${name}: 补药后点不回这只怪`); break; }
-                await sleep(500);
-                continue;
+                // act === 'fight'（硬打中）或 'hard'（刚转硬打）→ 往下照常点攻击
             }
             await page.locator('text=攻击').first().click({ force: true, timeout: 500 }).catch(() => {});
             blades++;
@@ -253,7 +289,7 @@ async function fightOne(page, name) {
         // 无弹窗无结算：可能还在过渡，稍等复看一次
         await sleep(300);
         const t2 = await getPageText(page);
-        if (!t2.includes('攻击') && !t2.includes('关闭')) break;
+        if (!t2.includes('攻击') && !t2.includes('关闭') && !t2.includes('复活')) break;
     }
     await page.locator('text=关闭').first().click({ force: true, timeout: 300 }).catch(() => {});
     if (blades) console.log(`  [战斗] ${name}: ${blades}刀(未见结算)`);
@@ -303,18 +339,41 @@ async function backToHub(page) {
 }
 
 // 清空当前房间的怪，返回击杀数
+// ★ 不抛异常（2026-11-21 与 kidd.js 对齐，教训来自 11-16 基德）：旧代码 15 次读不到怪就 `throw`，
+//   异常一路冒泡跳过「对账 / 领取奖励」整段 —— 明明已经打了 90+ 只，却把奖励丢掉。
+//   领奖是大头（用户 11-15/11-21 两次强调），所以改成：同一只怪连续 3 次打不死 → 本轮跳过它，
+//   继续清同房间其它怪；15 次仍清不完 → 告警并带着缺口返回，由上层照常对账 + 领奖。
 async function clearRoom(page, tag) {
     let kills = 0;
     let emptyReads = 0;
+    const stuckHits = new Map();     // 怪名 → 连续打不死的次数
+    const skip = new Set();          // 本轮直接跳过的怪名
     for (let attempt = 0; attempt < 15; attempt++) {
+        if (STOP_WALK) return kills;
         const txt = await getPageText(page);
+        // 死亡兜底：页面挂着「复活」时读不到「你看到」区块，旧代码会空转 15 次再抛异常。
+        // 这里先认出来 → 复活一次 → 停止走图去领奖。
+        if (txt.includes('复活')) {
+            console.log(`[${tag}] 页面挂着「复活」→ 人物已战死，先复活`);
+            const rv = await reviveOnce(page);
+            STOP_WALK = true;
+            if (rv.ok) console.log('  ✔ 复活成功 → 停止走图，立刻去领奖');
+            else console.log(`::error::复活失败（${rv.why}）→ 停止走图；` + (rv.why === 'no-item' ? '本副本已复活过一次，二次死亡领不到奖励' : ''));
+            return kills;
+        }
         const seg = viewSeg(txt);
         if (!seg) {
+            // 包裹浮层没关会整页盖住副本视图（2026-11-20 冷6 实证），先关再重读
+            if (bag.bagStillOpen(txt)) {
+                console.log(`[${tag}] 页面被包裹浮层盖住 → 先关包裹再读`);
+                await bag.closeBag(page);
+                continue;
+            }
             console.log(`[${tag}] 找不到“你看到”区块，页面:`, txt.substring(0, 120));
             await sleep(1000);
             continue;
         }
-        const mobs = monstersIn(seg);
+        const mobs = monstersIn(seg).filter((m) => !skip.has(m));
         if (!mobs.length) {
             // 「本层真的没怪」和「怪还没渲染出来」必须分开。
             // kidd.js 2026-10-29 实证：基德东线首读 0 只就当空房 → 只记 8 间/24 杀（总 48/51）。
@@ -328,16 +387,33 @@ async function clearRoom(page, tag) {
         }
         emptyReads = 0;
         const before = seg.split(mobs[0]).length - 1;
-        await fightOne(page, mobs[0]);
+        const fr = await fightOne(page, mobs[0]);
+        if (fr === 'dead') {
+            const rv = await reviveOnce(page);
+            STOP_WALK = true;
+            if (rv.ok) console.log('  ✔ 复活成功 → 停止走图，立刻去领奖');
+            else console.log(`::error::复活失败（${rv.why}）→ 停止走图；` + (rv.why === 'no-item' ? '本副本已复活过一次，二次死亡领不到奖励' : ''));
+            return kills;
+        }
         const after = viewSeg(await getPageText(page));
         const nowCount = after.split(mobs[0]).length - 1;
-        kills += Math.max(0, before - nowCount);
-        if (before - nowCount === 0 && attempt > 10) {
-            await page.screenshot({ path: `dungeon-stuck-${tag}.png` }).catch(() => {});
+        const got = Math.max(0, before - nowCount);
+        kills += got;
+        if (got === 0) {
+            const n = (stuckHits.get(mobs[0]) || 0) + 1;
+            stuckHits.set(mobs[0], n);
+            if (n >= 3) {
+                skip.add(mobs[0]);
+                console.log(`::warning::[${tag}] 「${mobs[0]}」连续 ${n} 次打不死 → 本轮跳过它，继续清其它怪`);
+                await page.screenshot({ path: `dungeon-stuck-${tag}.png` }).catch(() => {});
+            }
+        } else {
+            stuckHits.delete(mobs[0]);
         }
     }
     await page.screenshot({ path: `dungeon-room-stuck-${tag}.png` }).catch(() => {});
-    throw new Error(`[${tag}] 房间怪物清理失败（15次尝试）`);
+    console.log(`::warning::[${tag}] 房间 15 次未清完（跳过 ${skip.size ? [...skip].join('/') : '无'}）→ 带回缺口继续，不中断副本`);
+    return kills;
 }
 
 // 走一条支路：从枢纽沿该方向一路深入（每方向 8 层 × 3 只），走到没有同方向出口为止，再回枢纽。
@@ -358,6 +434,7 @@ async function runArm(page, arm, tagPrefix = '') {
     let armKills = 0;
     let rooms = 0;
     for (rooms = 0; rooms < 30; rooms++) {
+        if (STOP_WALK) break;   // 死亡→复活后不再往下走，交回 run() 去领奖
         const seg = viewSeg(await getPageText(page));
         const present = monstersIn(seg);
         const roomKills = await clearRoom(page, tag);
@@ -658,28 +735,37 @@ async function run() {
         }
         console.log('到达枢纽广场，剩余', await remainMin(page), '分钟');
 
-        for (const arm of ARMS) {
-            const r = await runArm(page, arm);
-            if (r.code === 'notHub') {
-                console.log('不在枢纽广场，中止');
-                break;
+        // 四线遍历全程兜住异常（2026-11-21 与 kidd.js 对齐）：任何一线出问题都只告警，
+        // 不中断后续对账与领奖。旧代码在 clearRoom 里 throw 会跳过领奖整段。
+        try {
+            for (const arm of ARMS) {
+                if (STOP_WALK) { console.log('人物战死并已复活 → 停止走图，直接去领奖'); break; }
+                const r = await runArm(page, arm);
+                if (r.code === 'notHub') {
+                    console.log('不在枢纽广场，中止');
+                    break;
+                }
+                if (r.code === 'noTime') {
+                    console.log(`剩余${r.left}分钟，不足5分钟，不再开新线`);
+                    break;
+                }
+                if (r.code === 'noExit') {
+                    console.log(`[${arm.label}] 枢纽处无${arm.dir}向出口，跳过`);
+                    armResults.push(`${arm.label}: 无入口`);
+                    continue;
+                }
+                totalKills += r.kills;
+                armResults.push(`${arm.label}: ${r.kills}杀/${r.rooms}间`);
+                console.log(`[${arm.label}] 已回到枢纽广场，累计${totalKills}杀，剩余${await remainMin(page)}分钟`);
+                if (!r.back) {
+                    console.log(`[${arm.label}] 返回枢纽失败，中止`);
+                    break;
+                }
             }
-            if (r.code === 'noTime') {
-                console.log(`剩余${r.left}分钟，不足5分钟，不再开新线`);
-                break;
-            }
-            if (r.code === 'noExit') {
-                console.log(`[${arm.label}] 枢纽处无${arm.dir}向出口，跳过`);
-                armResults.push(`${arm.label}: 无入口`);
-                continue;
-            }
-            totalKills += r.kills;
-            armResults.push(`${arm.label}: ${r.kills}杀/${r.rooms}间`);
-            console.log(`[${arm.label}] 已回到枢纽广场，累计${totalKills}杀，剩余${await remainMin(page)}分钟`);
-            if (!r.back) {
-                console.log(`[${arm.label}] 返回枢纽失败，中止`);
-                break;
-            }
+        } catch (e) {
+            console.log(`::warning::四线遍历异常（${e.message}）→ 不中断，继续对账与领奖`);
+            armResults.push(`异常: ${e.message}`);
+            await page.screenshot({ path: 'dungeon-arm-error.png' }).catch(() => {});
         }
 
         // ---- 数量对账（★ 只做诊断与补怪，绝不阻断领奖）----
@@ -693,11 +779,16 @@ async function run() {
             if (canRescan) {
                 console.log(`⚠ 对账 ${totalAll}/${DUNGEON_EXPECT}，差 ${gap} 只 → 回扫一遍补怪（剩余${left}分钟）`);
                 let recov = 0;
-                for (const arm of ARMS) {
-                    const r = await runArm(page, arm, '补扫·');
-                    if (r.code !== 'ok') { console.log(`[补扫] 中止（${r.code}）`); break; }
-                    recov += r.kills;
-                    if (!r.back) break;
+                try {
+                    for (const arm of ARMS) {
+                        if (STOP_WALK) break;
+                        const r = await runArm(page, arm, '补扫·');
+                        if (r.code !== 'ok') { console.log(`[补扫] 中止（${r.code}）`); break; }
+                        recov += r.kills;
+                        if (!r.back) break;
+                    }
+                } catch (e) {
+                    console.log(`::warning::回扫异常（${e.message}）→ 不阻断领奖，带着已有击杀数去领奖`);
                 }
                 if (recov) {
                     totalKills += recov;
