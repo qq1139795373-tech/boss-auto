@@ -173,7 +173,11 @@ async function sailFlow(page) {
     await clickExact(page, '自动航行', 5000);
     console.log('航行中...');
 
-    for (let w = 0; w < 80; w++) {
+    // 航行等待：80 → 120 轮 × 3 秒 = 6 分钟（2026-11-23）。
+    // 威尼斯/马六甲 → 阿姆斯特丹是跨海域长航线，实测 2/5 个号 4 分钟内没走完，
+    // 到点就转传送兜底、兜底再失败就整趟丢（冷6 那次）。基德副本本身有 60 分钟，
+    // 多给 2 分钟航行远便宜于丢一趟。
+    for (let w = 0; w < 120; w++) {
         await sleep(3000);
         const txt = await getPageText(page);
         if (txt.includes(`当前城市：${NAV_DEST}`)) {
@@ -196,7 +200,7 @@ async function sailFlow(page) {
             console.log('自动航行(重新)启动');
         }
     }
-    console.log('航行未完成（约4分钟）');
+    console.log(`航行未完成（约 ${Math.round((120 * 3) / 60)} 分钟）`);
     return false;
 }
 
@@ -251,9 +255,20 @@ async function teleportToDest(page) {
             await sleep(2000);
             txt = await getPageText(page);
         }
+        // ★ 到达判据改成轮询（2026-11-23 冷6 实证）：跨海域传送（地中海→北海）实测要 5~10 秒，
+        //   原来只「等 3 秒查一次 + 点确定后再查一次」，慢了就判「未检测到到达」并整趟放弃。
+        //   这里最多再等 20 秒，到了就立刻返回。
         if (txt.includes(`当前城市：${NAV_DEST}`)) {
             console.log(`传送兜底: 已到达${NAV_DEST}`);
             return true;
+        }
+        for (let w = 0; w < 20; w++) {
+            await sleep(1000);
+            txt = await getPageText(page);
+            if (txt.includes(`当前城市：${NAV_DEST}`)) {
+                console.log(`传送兜底: 已到达${NAV_DEST}（等 ${w + 1}s）`);
+                return true;
+            }
         }
         console.log('传送兜底: 未检测到到达');
         await page.screenshot({ path: 'teleport-fail.png' }).catch(() => {});
@@ -862,7 +877,14 @@ async function run() {
             if (!arrived) {
                 console.log('出航未完成，改用传送兜底...');
                 await page.screenshot({ path: 'nav-fail.png' }).catch(() => {});
-                await teleportToDest(page);
+                // ★ 传送兜底给两次机会（2026-11-23 冷6 实证）：它第一次失败后只打印
+                //   「未检测到到达」就整趟放弃，而同 run 的下一个步骤（炼器窟）紧接着用另一种导航
+                //   一次就到了伦敦 —— 说明游戏本身是好的，是这一步的判据太紧。失败再试一次成本
+                //   只有十几秒，比丢掉整趟基德（51 杀 + 领奖）便宜得多。
+                if (!(await teleportToDest(page))) {
+                    console.log('传送兜底第 1 次未成，再试一次...');
+                    await teleportToDest(page);
+                }
             }
             await sleep(2000);
             pageText = await getPageText(page);
