@@ -1,17 +1,24 @@
 const { chromium } = require('playwright');
+// 副本内自恢复（先扫荡/领奖再退本）
 const drain = require('./dungeon-recover.js');
+// 刷怪时长预算（刷到下一个派发节点前 5 分钟）
+const { farmBudgetMin } = require('./farm-budget.js');
 
 const ACCOUNT = process.env.GAME_ACCOUNT;
 const PASSWORD = process.env.GAME_PASSWORD;
-// 农场固定去广州沙滩
+// 农场固定去广州沙滩打经验妖灵（11-09 起小号也走广州，不再去杭州西湖）
 const NAV_DEST = '广州';
 const NAV_REGION = '东亚';
-// 刷怪时长上限（分钟）：job 的 6 小时上限会把「跑到上限」判成 failure，
-// 到点自己收尾 exit 0，红色只留给真故障。FARM_MAX_MIN=0 表示不限（旧行为）。
-// 300 而不是 330：farm 是在 Run Tasks 之后启动的，00:00 那一波任务段要跑 0:04→0:32（约 28 分钟），
-// 330+28=358 分钟再叠加启动与 index.js 就压线超过 360（10-30 实证 master 与 boss0/3/4 全被砍）。
-// 300 留 60 分钟余量，任务段再怎么拖也不会撞上限。
-const FARM_MAX_MIN = Number(process.env.FARM_MAX_MIN || 300);
+// 刷怪时长（分钟）：默认不再写死 300，改成「刷到下一个派发节点前 5 分钟」自动算（farm-budget.js）。
+// 写死 300 的毛病：11:30 派发这趟，farm 是 boss 打完立刻起跑（约 11:42~11:50，本文件就是紧随
+//   Run Boss 的下一个 step），固定 300 分钟会刷到 16:4x 就收尾，离 18:00 派发白空一个多小时
+//   （用户 11-22 23:34 指出「完全可以刷满野怪」）。
+// 预算是启动那一刻现场算的，起跑越早预算越长，收尾恒为「下一个节点前 5 分钟」= 17:55。
+// 显式设置 FARM_MAX_MIN 时以它为准；FARM_MAX_MIN=0 仍表示不限（旧行为，但会被 job timeout 砍成红叉，慎用）。
+const FARM_MAX_MIN_RAW = process.env.FARM_MAX_MIN;
+const FARM_MAX_MIN_FIXED = (FARM_MAX_MIN_RAW === undefined || String(FARM_MAX_MIN_RAW).trim() === '')
+    ? null
+    : Number(FARM_MAX_MIN_RAW);
 
 // 退出诊断：GitHub 的 job 日志偶发 404 全丢（2026-11-12 00:00 小号波 farm failure 就是这样查不下去），
 // 所以进程自己把「退出原因 + 退出码 + 击杀数 + 运行时长」压成一行打在末尾。
@@ -151,8 +158,9 @@ async function clickLoginButton(page) {
     }
 }
 
+// 只拼可见节点。原实现 textContent('body') 不排除 display:none，
+// 残留弹窗节点会一直留在 DOM 里 → 读出幽灵文案，把「没成」判成「成了」（2026-10-28 同源问题）。
 async function getPageText(page) {
-    // 只拼可见节点：textContent('body') 会把 display:none 的残留弹窗读进来（幽灵文案）
     return await drain.visibleText(page);
 }
 
@@ -184,6 +192,12 @@ async function jsClick(page, text, exclude = '') {
     }, { t: text, ex: exclude });
 }
 
+// jsClick优先（穿遮罩），失败退回文本点击
+async function clickBtn(page, text, timeout = 3000) {
+    if (await jsClick(page, text)) return true;
+    return await clickText(page, text, timeout);
+}
+
 async function closePopup(page) {
     // 尝试点击不同位置关闭弹窗
     await page.mouse.click(10, 10);
@@ -210,48 +224,38 @@ async function clickExact(page, text, timeout = 3000) {
 // 出航失败原因（nomap = 该号没有目标城市的海图，传送一样没用，别白花银币）
 let SAIL_FAIL = '';
 
-async function failNav(page, why) {
-    const t = await getPageText(page);
-    console.log(`出航中止(${why})，${mapBlock(t)}`);
-    await page.screenshot({ path: 'nav-fail-detail.png' }).catch(() => {});
-    return false;
-}
-
-// 选目的地并等到「出航确认」框。
-// 11-08 06:00 实证的坑：广州两个字同时出现在聊天栏（"[公共] 中华 ： 在广州拍卖行等着"），
-// clickText 的 getByText(exact:false).first() 命中的是聊天栏 → 城市根本没选上，
-// 老代码却照样点「立即出发」空等 5 分钟，必然失败（当天 00:00/06:00 两波刷怪 0 次）。
-// 现在：① 第2轮起改用 JS 叶子派发并排除聊天栏；② 见到「出航确认」才算选上，否则不出发。
-async function pickConfirm(page) {
+async function pickConfirm(page, region, dest) {
     SAIL_FAIL = '';
     for (let round = 1; round <= 3; round++) {
-        // 关掉可能遮挡点击的弹窗/残留面板（高峰期弹窗会吃掉坐标点击）
+        // 先关掉可能遮挡点击的弹窗/残留面板（高峰期弹窗会吃掉坐标点击）
         await page.mouse.click(10, 10);
         await sleep(300);
         await page.keyboard.press('Escape');
-        await sleep(600);
-        let opened = await clickText(page, '出航', 2500);
+        await sleep(500);
+        let opened = await clickText(page, '出航', 2000);
         if (!opened) {
             await clickText(page, '城内地图');
             await sleep(2000);
             await clickText(page, '码头');
             await sleep(3000);
-            opened = await clickText(page, '出航', 2500);
+            await clickText(page, '出航');
         }
         await sleep(2000);
-        await clickExact(page, NAV_REGION, 3000);
-        await sleep(1200);
+        await clickExact(page, region);
+        await sleep(1000);
         for (let s = 0; s < 5; s++) {
+            // 第2轮起用JS叶子派发点击，绕过遮罩对坐标点击的拦截；排除聊天栏同名词（"在广州拍卖行等着"）
             const ok = round === 1
-                ? await clickText(page, NAV_DEST, 2000)
-                : await jsClick(page, NAV_DEST, '拍卖');
+                ? await clickText(page, dest, 2000)
+                : await jsClick(page, dest, '拍卖');
             if (ok) {
-                // 确认框慢半拍，最多轮询 8 秒；「暂无地图」与确认框会同时出现，必须先判 nomap
-                for (let c = 0; c < 8; c++) {
-                    await sleep(1000);
+                // 高峰期确认框慢半拍，单次1.5秒查询会误判，改成最多9秒轮询
+                for (let c = 0; c < 6; c++) {
+                    await sleep(1500);
                     const t = await getPageText(page);
+                    // 「暂无地图」与出航确认框会同时出现（实测），必须先判 nomap
                     if (t.includes('暂无地图')) {
-                        console.log(`「暂无地图，查看失败」→ 该号没有${NAV_DEST}的海图，不传送`);
+                        console.log(`「暂无地图，查看失败」→ 该号没有${dest}的海图，不传送`);
                         SAIL_FAIL = 'nomap';
                         return false;
                     }
@@ -261,8 +265,16 @@ async function pickConfirm(page) {
             await page.mouse.wheel(0, 300);
             await sleep(1000);
         }
-        console.log(`未看到出航确认框，重开出航面板重试(${round}/3)...`);
+        console.log(`未看到出航确认框，重开面板重试(${round}/3)...`);
     }
+    return false;
+}
+
+// 出航失败时把现场拍下来（此前失败路径无任何页面文本，无从定位）
+async function failNav(page, why) {
+    const t = await getPageText(page);
+    console.log(`出航中止(${why})，页面文本: ${t.replace(/\s+/g, ' ').substring(0, 300)}`);
+    await page.screenshot({ path: 'nav-fail-detail.png' }).catch(() => {});
     return false;
 }
 
@@ -308,10 +320,11 @@ async function sailFlow(page, rounds = 200) {
     if (atSea) {
         console.log('已在航行中，跳过出航选择直接等待到达...');
     } else {
-        const picked = await pickConfirm(page);
+        let picked = await pickConfirm(page, NAV_REGION, NAV_DEST);
         if (!picked) {
             return failNav(page, SAIL_FAIL === 'nomap' ? `目的地${NAV_DEST}无地图` : '出航确认框始终未出现');
         }
+
         await clickText(page, '立即出发');
         await sleep(2000);
         // 起航校验：硬证据优先，只看到「航行中」也算离港；
@@ -322,7 +335,8 @@ async function sailFlow(page, rounds = 200) {
             state = await waitSailing(page, 8);
             if (!state && a === 1) {
                 console.log('自动航行未启动，重新开面板选目的地...');
-                if (!(await pickConfirm(page))) break;
+                picked = await pickConfirm(page, NAV_REGION, NAV_DEST);
+                if (!picked) break;
                 await clickText(page, '立即出发');
                 await sleep(2000);
             }
@@ -332,10 +346,9 @@ async function sailFlow(page, rounds = 200) {
             if (!(await observeSail(page))) return failNav(page, '起航未确认(观察60秒仍无航行迹象)');
         }
         console.log(state === 'soft' ? '航行中...(仅见「航行中」)' : '航行中...');
-        console.log('航行中...');
     }
 
-    // 旧上限 80 轮≈4 分钟，跨海域（大阪→广州）根本不够 → 默认 200 轮≈10 分钟
+    // 旧上限 80 轮≈4 分钟，跨海域（大阪→广州）走不完 → 默认 200 轮≈10 分钟
     for (let w = 0; w < rounds; w++) {
         await sleep(3000);
         const txt = await getPageText(page);
@@ -343,7 +356,7 @@ async function sailFlow(page, rounds = 200) {
             console.log(`到达${NAV_DEST}`);
             return true;
         }
-        if (w > 0 && w % 20 === 0) console.log(`航行中... 已等 ${Math.round(w * 3 / 60)} 分钟 ${mapBlock(txt)}`);
+        if (w > 0 && w % 20 === 0) console.log(`航行中... 已等 ${Math.round(w * 3 / 60)} 分钟（${(txt.match(/当前城市：\S+/) || ['位置未知'])[0]}）`);
         if (txt.includes('遭遇海盗')) {
             console.log('遭遇海盗，选择避战...');
             await page.screenshot({ path: 'sail-pirate.png' }).catch(() => {});
@@ -361,8 +374,46 @@ async function sailFlow(page, rounds = 200) {
         }
     }
     const txt = await getPageText(page);
-    console.log(`航行 ${Math.round(rounds * 3 / 60)} 分钟仍未到达，${mapBlock(txt)}`);
+    console.log(`航行 ${Math.round(rounds * 3 / 60)} 分钟仍未到达，页面文本:`, txt.substring(0, 300));
     await page.screenshot({ path: 'nav-timeout.png' }).catch(() => {});
+    return false;
+}
+
+// 卡副本自恢复：身处副本房间先**把副本做完（扫荡/领奖）**，实在没可领的才退本回城。
+// 2026-10-27 boss(0) 教训：炼器窟已扫荡、条件已达成、只差领奖，
+// 老逻辑读到「副本条件」直接退本，把当天奖励扔了。现在先交给 recoverDungeon 处理。
+async function exitDungeonIfInside(page) {
+    const t0 = await getPageText(page);
+    if (!(t0.includes('副本条件') && t0.includes('回到起点'))) return false;
+    console.log('自恢复：检测到身处副本，先尝试完成副本（扫荡/领奖）...');
+    try {
+        const r = await drain.recoverDungeon(page, { tag: '自恢复', screenshot: 'dungeon-recover-fail.png' });
+        if (r.claimed) console.log(r.swept ? '已扫荡并领取奖励，副本结束' : '已领取奖励，副本结束');
+        if (r.exited) { console.log('已退出副本'); return true; }
+        console.log(`副本内没能完成/退出（${r.kind}，领奖=${r.claimed}），走兜底流程`);
+    } catch (e) {
+        console.log('副本内处理异常:', e.message);
+    }
+    for (let i = 1; i <= 3; i++) {
+        if (!(await clickText(page, '退出副本', 2000))) {
+            await jsClick(page, '退出副本');
+        }
+        await sleep(1500);
+        let t = await getPageText(page);
+        if (t.includes('副本条件') && t.includes('确定')) {
+            await clickExact(page, '确定', 2000);
+            await sleep(1500);
+            t = await getPageText(page);
+        }
+        if (!(t.includes('副本条件') && t.includes('回到起点'))) {
+            console.log('已退出副本');
+            return true;
+        }
+        console.log(`第${i}次退出副本未生效，重试...`);
+    }
+    const t = await getPageText(page);
+    console.log('退出副本失败，仍在:', t.replace(/\s+/g, ' ').substring(0, 200));
+    await page.screenshot({ path: 'dungeon-recover-fail.png' }).catch(() => {});
     return false;
 }
 
@@ -415,7 +466,7 @@ async function openTeleportPanel(page) {
 
 // 传送兜底：出航流程失败后重新登录 → 码头点传送 → 点目标城市瞬间到达
 async function teleportToDest(page) {
-    // 防白花银币：已到达 / 仍在海上（传送在航行中打不开）都别重登折腾
+    // 防白花银币：已到达 / 仍在海上（传送在航行中点不开）都别重登折腾
     const chk = await getPageText(page);
     if (chk.includes(`当前城市：${NAV_DEST}`)) {
         console.log(`传送兜底: 其实已在${NAV_DEST}，跳过传送(省银币)`);
@@ -463,6 +514,9 @@ async function teleportToDest(page) {
         await sleep(3000);
         console.log('传送兜底: 重新登录完成');
 
+        // 重登可能落回副本房间，先退出再开传送面板
+        await exitDungeonIfInside(page);
+
         // 面板打不开多半是页面半渲染（点击无响应），重载页面再来一轮基本能救回
         let panelOpen = await openTeleportPanel(page);
         if (!panelOpen) {
@@ -470,43 +524,43 @@ async function teleportToDest(page) {
             await page.screenshot({ path: 'teleport-reload.png' }).catch(() => {});
             await reloadGame(page);
             await sleep(4000);
+            await exitDungeonIfInside(page);
             panelOpen = await openTeleportPanel(page);
         }
         if (!panelOpen) {
-            console.log('传送兜底: 找不到传送入口');
+            const pt = await getPageText(page);
+            console.log('传送兜底: 找不到传送入口，页面文本:', pt.replace(/\s+/g, ' ').substring(0, 300));
             await page.screenshot({ path: 'teleport-fail.png' }).catch(() => {});
             return false;
         }
-        await sleep(2000);
 
         await clickExact(page, NAV_REGION);
         await sleep(1000);
 
-        let picked = false;
         for (let s = 0; s < 5; s++) {
-            if (await clickText(page, NAV_DEST, 2000)) {
-                picked = true;
-                break;
-            }
+            if (await clickText(page, NAV_DEST, 2000)) break;
             await page.mouse.wheel(0, 300);
             await sleep(1000);
         }
-        if (!picked) console.log('传送兜底: 列表中找不到目的地');
 
-        await sleep(3000);
-        let txt = await getPageText(page);
-        if (!txt.includes(`当前城市：${NAV_DEST}`)) {
-            await clickText(page, '确定');
-            await sleep(2000);
-            await clickText(page, '确认');
-            await sleep(2000);
+        // 传送即时生效：轮询到达，其间按需点确定/确认
+        let txt = '';
+        for (let i = 0; i < 8; i++) {
+            await sleep(1500);
             txt = await getPageText(page);
+            if (txt.includes(`当前城市：${NAV_DEST}`)) {
+                console.log(`传送兜底: 已到达${NAV_DEST}`);
+                return true;
+            }
+            if (txt.includes('确定')) {
+                await clickText(page, '确定');
+                await sleep(1000);
+            } else if (txt.includes('确认')) {
+                await clickText(page, '确认');
+                await sleep(1000);
+            }
         }
-        if (txt.includes(`当前城市：${NAV_DEST}`)) {
-            console.log(`传送兜底: 已到达${NAV_DEST}`);
-            return true;
-        }
-        console.log('传送兜底: 未检测到到达，页面文本:', txt.substring(0, 300));
+        console.log('传送兜底: 未检测到到达，页面文本:', txt.replace(/\s+/g, ' ').substring(0, 300));
         await page.screenshot({ path: 'teleport-fail.png' }).catch(() => {});
         return false;
     } catch (e) {
@@ -694,7 +748,7 @@ async function run() {
         let pageText = await getPageText(page);
         if (pageText.includes('请输入账号密码') || pageText.includes('登录注册') || pageText.includes('选择角色')) {
             console.log('ERROR: 未进入游戏主界面，退出');
-            console.log('::error::登录失败：未进入游戏主界面，农场已跳过');
+            console.log('::error::登录失败：未进入游戏主界面，刷怪已退出');
             diag('登录失败：未进入游戏主界面', 1);
             await page.screenshot({ path: 'login-fail.png' }).catch(() => {});
             await browser.close();
@@ -712,20 +766,8 @@ async function run() {
         pageText = await getPageText(page);
         console.log('关闭弹窗后前200字:', pageText.substring(0, 200));
 
-        // 卡副本自恢复：大号 0:00 波先跑炼器窟/基德，只要某一步没退本、或上一波被 cancel 时人还在本里，
-        // 这里就会带着「副本条件」页面往下走 —— 副本里既没有「出航」也没有「传送」，
-        // 导航必然失败，最后「未到达广州，跳过农场」，整波刷怪白扔。
-        // 先交给 dungeon-recover：能扫荡就扫荡、能领奖就领奖，实在没得领才退本；不在副本里时直接返回 false。
-        try {
-            const rec = await drain.recoverDungeon(page, { tag: '自恢复', screenshot: 'dungeon-recover-fail.png' });
-            if (rec.inDungeon) {
-                console.log(`自恢复：起始就在副本里（${rec.kind}），扫荡=${rec.swept} 领奖=${rec.claimed} 退本=${rec.exited}`);
-                await sleep(3000);
-                pageText = await getPageText(page);
-            }
-        } catch (e) {
-            console.log('副本自恢复异常:', e.message);
-        }
+        // 卡副本自恢复（dungeon误进/未退出会把号留在房间里，后续全部步骤都会撞死）
+        await exitDungeonIfInside(page);
 
         // 检查是否在广州（失败不直接放弃：重载页面再试一轮，点击无响应多半能救回）
         pageText = await getPageText(page);
@@ -738,24 +780,24 @@ async function run() {
                 if (round > 1) {
                     await reloadGame(page);
                     await sleep(4000);
+                    await exitDungeonIfInside(page);
                 }
 
                 const arrived = await sailFlow(page);
-                if (!arrived && SAIL_FAIL !== 'nomap') {
+                if (!arrived && SAIL_FAIL === 'nomap') {
+                    console.log(`⚠ ${NAV_DEST} 暂无地图（该号没有这张海图），不传送`);
+                    await page.screenshot({ path: 'nav-nomap.png' }).catch(() => {});
+                } else if (!arrived) {
                     await page.screenshot({ path: 'nav-fail.png' }).catch(() => {});
                     // 船还在海上（跨洋没走完）→ 续等一轮，别重登（重登会打断航行）
                     const now = await getPageText(page);
                     if (now.includes('停止自动航行') || now.includes('剩余距离')) {
                         console.log('首轮航行未到港但船仍在海上 → 续等 5 分钟...');
-                        const arrived2 = await sailFlow(page, 100);
-                        if (!arrived2) await teleportToDest(page);
+                        if (!(await sailFlow(page, 100))) await teleportToDest(page);
                     } else {
                         console.log('出航未完成（没起航/已回港），改用传送兜底...');
                         await teleportToDest(page);
                     }
-                } else if (!arrived && SAIL_FAIL === 'nomap') {
-                    console.log(`⚠ ${NAV_DEST} 暂无地图（该号没有这张海图），不传送`);
-                    await page.screenshot({ path: 'nav-nomap.png' }).catch(() => {});
                 }
                 await sleep(2000);
 
@@ -785,10 +827,15 @@ async function run() {
             return;
         }
 
-        // 循环打经验妖灵
-        // 日志节流：每轮都打印会刷出几MB日志、拖垮runner，改为每60秒汇报一次进度
+        // 循环打经验妖灵（选怪→50→攻击→50→关闭→50，一刀一个）
+        // 日志节流：每轮都打印会刷出几十MB日志、拖垮runner，改为每60秒汇报一次进度
         let count = 0;
         const loopStart = Date.now();
+        // 本次预算：显式 FARM_MAX_MIN 优先，否则算到「下一个派发节点前 5 分钟」。
+        // 算出来 0 表示离下一个节点不足 5 分钟 —— 这时直接收尾，不要再开一轮。
+        const budgetMin = FARM_MAX_MIN_FIXED === null ? farmBudgetMin(loopStart) : FARM_MAX_MIN_FIXED;
+        const budgetOn = FARM_MAX_MIN_FIXED !== 0;      // 仅显式 0 才是「不限」
+        console.log(`本次刷怪预算 ${budgetMin} 分钟（${budgetOn ? '到下一个派发节点前 5 分钟' : 'FARM_MAX_MIN=0 不限'}）`);
         let lastLogAt = Date.now();
         let lastCountAt = Date.now();
         let kickedAt = 0;
@@ -798,12 +845,12 @@ async function run() {
             pageText = await getPageText(page);
             EXIT_DIAG.kills = count;
 
-            // 到点主动收尾：job 的 timeout-minutes 是 360，被它砍掉时整个 run 标 failure，
+            // 到点主动收尾：被 job 的 timeout-minutes 砍掉时整个 run 标 failure，
             // 于是「跑到上限」和「真故障」混成一片红（2026-10-29 00:00 波 4 个 job 全是这样）。
-            // 刷到这里就正常退出，red 只留给真问题。FARM_MAX_MIN=0 可关闭该限制。
-            if (FARM_MAX_MIN > 0 && Date.now() - loopStart >= FARM_MAX_MIN * 60000) {
-                console.log(`已刷满 ${FARM_MAX_MIN} 分钟（击杀 ${count} 次），主动收尾退出，避免撞 job 6 小时上限被判 failure`);
-                diag(`刷满 ${FARM_MAX_MIN} 分钟主动收尾`, 0);
+            // 刷到这里就正常退出，red 只留给真问题。
+            if (budgetOn && Date.now() - loopStart >= budgetMin * 60000) {
+                console.log(`已刷满 ${budgetMin} 分钟（击杀 ${count} 次），主动收尾退出：下一个派发节点马上到，让新 run 干净接手`);
+                diag(`刷满 ${budgetMin} 分钟主动收尾`, 0);
                 break;
             }
 

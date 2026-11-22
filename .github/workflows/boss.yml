@@ -4,14 +4,24 @@ on:
   workflow_dispatch:
     inputs:
       tasks_mode:
-        description: '任务流程：auto按北京时间(00:00 签到/竞技场/炼器窟/基德宝藏/钓鱼/秘宝/每日任务，18:00 山寨/邮件)，或强制 dawn/dusk/skip'
+        description: '任务流程：auto按北京时间（00:00 签到/竞技场/奔月/镇妖塔/海盗王/钓鱼/附魔/秘宝/基德/炼器窟/每日任务，18:00 山寨/邮件，周二六 20:00 攻城），或强制 dawn/dusk/gongcheng/skip'
         type: string
         default: 'auto'
+      gongcheng_wait:
+        description: '周二/六 18:00 那趟是否等 20:00 攻城：留空=看仓库变量 GONGCHENG_WAIT(没设就等)；填 false 强制不等'
+        type: string
+        default: ''
+      gc_mode:
+        description: '攻城验证（非活动日也能用）：view=只读攻城页(不出航/不花铜贝) | test=走到城门刷新但不出手；留空=正常流程'
+        type: string
+        default: ''
 
 jobs:
   boss:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    # 420 而不是 360（11-22）：farm 改成「刷到下一个派发节点前 5 分钟」自动收尾，
+    # 11:30 那趟刷到 17:55 = 派发后 6 小时 25 分，360 分钟会在 17:30 把它砍成 failure。
+    timeout-minutes: 420
     steps:
       - uses: actions/checkout@v4
 
@@ -25,23 +35,36 @@ jobs:
           npx playwright install chromium
 
       - name: 随机错峰
+        # 攻城验证模式不需要错峰：不出航、不抢怪，直接登录拿结果
+        if: ${{ inputs.gc_mode == '' }}
         run: sleep $((RANDOM % 300))
 
       - name: Run Tasks
         env:
           GAME_ACCOUNT: ${{ secrets.GAME_ACCOUNT }}
           GAME_PASSWORD: ${{ secrets.GAME_PASSWORD }}
-          TASKS_MODE: ${{ inputs.tasks_mode }}
+          # gc_mode 非空时强制走攻城流程（验证用），否则按 tasks_mode
+          TASKS_MODE: ${{ inputs.gc_mode != '' && 'gongcheng' || inputs.tasks_mode }}
+          # 攻城验证两个档位：view 只读页面（不出航、不花铜贝），test 走到城门刷新但不出手
+          GC_VIEW: ${{ inputs.gc_mode == 'view' && '1' || '' }}
+          GONGCHENG_TEST: ${{ inputs.gc_mode == 'test' && '1' || '' }}
+          # 三档优先级：手填 → 仓库变量 → 空（= 等）。
+          # 自动派发（cron-job.org 直调 API）不带任何 inputs，只靠 inputs 的话开关对每天那 4 趟不生效。
+          GONGCHENG_WAIT: ${{ inputs.gongcheng_wait != '' && inputs.gongcheng_wait || vars.GONGCHENG_WAIT }}
         run: node tasks.js
 
       - name: Run Boss
+        # gc_mode 非空 = 只做攻城验证，不浪费 runner 去打 boss
+        if: ${{ inputs.gc_mode == '' }}
         env:
           GAME_ACCOUNT: ${{ secrets.GAME_ACCOUNT }}
           GAME_PASSWORD: ${{ secrets.GAME_PASSWORD }}
         run: node index.js
 
       - name: Run Farm
-        if: success()
+        # 旧版是 success()：boss 失败就整天不刷怪。现在只要没被取消就刷，
+        # 打 boss 失败不等于刷怪没意义（11-22 与 multi-boss 统一口径）。
+        if: ${{ inputs.gc_mode == '' && !cancelled() }}
         env:
           GAME_ACCOUNT: ${{ secrets.GAME_ACCOUNT }}
           GAME_PASSWORD: ${{ secrets.GAME_PASSWORD }}

@@ -2,6 +2,14 @@
 //
 // 铁律：同一账号同一时间只能有一个会话。两条实例同时登录同一个号会互相顶号下线
 // （10-27 实证：自己起的探查把用户顶下线两次）。
+//
+// ★ 作用域（11-22 用户判断后写清，别再误当成「防并发的主力」）：
+//   任务本身是一个接一个串行的，正常情况下根本不会并发登录，所以这把锁**日常从不触发**。
+//   · CI：每个 runner 的临时目录各自独立，锁文件不在同一块盘 → **对跨 runner 完全无效**，
+//     别指望它挡住两个 workflow 同时登一个号（boss.yml 的 matrix 就是各号各 runner）。
+//   · 本机：同一台机器上两条入口（批量脚本 + 手动补跑）共用同一份锁文件，这时它才是有效的安全网；
+//     10-27 那次顶号就是本机场景。
+//   特殊情况下的顶号是偶发事件，不构成任何排期/闸门的理由；本模块只保留「本机误开两个进程」这一道拦截。
 // 之前 tasks.js 内联了一份、kidd.js / hdwang-batch.js / bymj-batch.js 各自没有，
 // 于是「锁只保护了任务流程，没保护副本脚本」—— 这就是脚本间的真冲突。
 //
@@ -72,6 +80,25 @@ function release(acc) {
     return true;
 }
 
+// 续期（11-22 加）：tasks.js 在周二/六会阻塞等到 20:00 打攻城，最长要占着账号接近 2 小时，
+// 而默认 TTL 只有 45 分钟 —— 不续期的话等待途中锁就"过期"了，此时任何别的实例（手动补跑、
+// 别的派发）都能取到锁并登录，直接把这个号的攻城会话顶掉。
+// 只续自己的锁：pid 对得上（或本来就是无 pid 的旧格式）才重写时间戳，别人的锁一律不碰。
+// 保持原格式不升级成 pid 格式：tasks.js 的语义是"跑完后 45 分钟内重复派发直接跳过"，
+// 换成 pid 格式会变成"进程一退出立刻可接管"，反而把防重复派发的效果弄丢。
+function refresh(acc) {
+    if (!acc) return false;
+    const cur = parse(raw(acc));
+    if (!cur) return false;
+    if (cur.pid && cur.pid !== process.pid) return false;
+    // ★ 必须保留原有格式（11-22 修）：原实现无条件写纯时间戳，会把 pid 格式的锁**降级成 legacy**，
+    //   之后 release() 判 `cur.pid !== process.pid`（pid 变成了 0）直接不删，
+    //   锁要白等到 45 分钟 TTL 才过期，期间谁也登不上这个号。legacy 锁（pid=0）继续写纯时间戳。
+    const body = cur.pid ? `${Date.now()}|${cur.pid}|${cur.tag}` : String(Date.now());
+    try { fs.writeFileSync(lockFile(acc), body); } catch (e) { return false; }
+    return true;
+}
+
 // 取锁。返回 { ok, st }；ok=false 时调用方自己决定跳过还是退出。
 function acquire(acc, { ttl = DEFAULT_TTL, tag = '', keepAfterExit = false, legacyFormat = false } = {}) {
     if (!acc) return { ok: true, skipped: '无账号' };
@@ -97,4 +124,4 @@ function guard(acc, opts = {}) {
     process.exit(opts.exitCode || 0);
 }
 
-module.exports = { acquire, release, state, guard, describe, lockFile, DEFAULT_TTL };
+module.exports = { acquire, release, state, guard, describe, lockFile, refresh, DEFAULT_TTL };
