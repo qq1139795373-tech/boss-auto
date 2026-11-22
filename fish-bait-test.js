@@ -92,5 +92,19 @@ t('买饵仍锁定「小鱼活饵 + 银贝」那一行，不乱点别的饵', ()
     assert.ok(/txt\.includes\('小鱼活饵'\) && txt\.includes\('银贝'\)/.test(SRC), '锁定条件被改动了');
 });
 
+console.log('\n[5] 鱼老板页被浮层吞点击时要有 DOM 直发兜底（11-23 冷6 卖鱼连开 3 次失败）');
+t('开面板前会关「更新公告 / 活动公告」浮层', () => {
+    assert.ok(/t0\.includes\('更新公告'\) \|\| t0\.includes\('活动公告'\)/.test(SRC), '没有公告浮层清理');
+});
+t('面板 2 秒没出现会补一次 jsClick（DOM 直发）', () => {
+    assert.ok(/w === 1 && !panelOpen/.test(SRC), '没有「2 秒未出现」的补救点');
+    assert.ok(/补一次 DOM 直发点击/.test(SRC), '缺少 DOM 直发兜底的日志');
+});
+t('jsClick 兜底不再被 clickText 的恒 true 短路', () => {
+    // clickText 只要元素可见就 return true，所以「if (!clickText) jsClick」这条老路走不到；
+    // 现在轮询里有独立的 w===1 触发点，不依赖 clickText 的返回值。
+    assert.ok(/if \(w === 1 && !panelOpen\) \{\n\s*console\.log\('鱼老板页 2 秒未出现/.test(SRC), 'DOM 直发仍是 clickText 的从属分支');
+});
+
 console.log(`\n结果：通过 ${pass} 项，失败 ${fail} 项`);
 process.exit(fail ? 1 : 0);

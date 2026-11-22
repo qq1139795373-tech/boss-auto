@@ -814,6 +814,16 @@ async function openBoss(page) {
         }
         // 查包裹的滚动可能把页面停在中间，鱼老板在视口外时force点击会点空：先归位再点
         await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+        // ★ 2026-11-23 冷6 实证：卖鱼时鱼老板页连开 3 次都没开，页面文本里同时挂着
+        //   「更新公告(11,12)」和「【聚宝盆36】…展开」两个浮层 —— force 点击被它们吞掉了。
+        //   开面板前先把公告类浮层关掉。
+        {
+            const t0 = await getPageText(page);
+            if (t0.includes('更新公告') || t0.includes('活动公告')) {
+                await clickLeaf(page, '×', false).catch(() => {});
+                await sleep(600);
+            }
+        }
         const el = page.getByText('鱼老板', { exact: false }).first();
         await el.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {});
         await sleep(400);
@@ -834,6 +844,12 @@ async function openBoss(page) {
             if (t.includes('购买鱼饵') || t.includes('出售鱼')) panelOpen = true;
             if (/银贝[:：]\s*[\d,.]+/.test(t)) silverReady = true;
             if (panelOpen && silverReady) return true;
+            // clickText 只要元素可见就返回 true —— 点击被浮层吞掉时它也不会报失败，
+            // 所以 jsClick 兜底原来永远走不到。这里强制补一次 DOM 直发（直接派发点击事件，绕过浮层）。
+            if (w === 1 && !panelOpen) {
+                console.log('鱼老板页 2 秒未出现 → 补一次 DOM 直发点击');
+                await jsClick(page, '鱼老板');
+            }
         }
         if (panelOpen) {
             console.log(`鱼老板页已打开，但账户余额行等 ${8}s 仍未渲染（余额读不到 → 资金检查将跳过）`);

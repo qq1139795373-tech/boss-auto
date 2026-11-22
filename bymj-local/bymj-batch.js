@@ -347,6 +347,7 @@ async function dfs(page, x, y, depth) {
         const nx = x + dx, ny = y + dy;
         if (st.visited.has(`${nx},${ny}`)) continue;
         if (!(await move(page, dir))) { log(`  ⚠ 点不动 ${dir}`); continue; }
+        st.backFail = 0;
         await dfs(page, nx, ny, depth + 1);
         if (stopAll) return;
         let back = await move(page, OPP[dir]);
@@ -355,7 +356,19 @@ async function dfs(page, x, y, depth) {
             // 回退失败不终止整趟：继续从这个房间探索，宁可坐标偏移也要把新房间走一遍
             log(`  ⚠ 回不去 ${OPP[dir]}（位置漂移），继续探索`);
             st.backFail = (st.backFail || 0) + 1;
-            if (st.backFail >= 4) { log('  ⚠ 连续回退失败 4 次，收工'); st.reason = 'stuck'; stopAll = true; return; }
+            // ★ 2026-11-23 冷0 实证：这个计数原来只加不清、阈值只有 4，一次连续漂移就让整趟收工
+            //   （44 间 / 94 杀 vs 其它号 57 间 / 119 杀，而且当时还剩 51 分钟）。
+            //   现在是「连续」语义：① 任何一次成功移动（进入或回退）都清零；
+            //   ② 阈值 4 → 8；③ 触发时只放弃**当前这条分支**，累计 3 条分支漂移才整趟收工。
+            if (st.backFail >= 8) {
+                st.drift = (st.drift || 0) + 1;
+                log(`  ⚠ 连续回退失败 ${st.backFail} 次（漂移分支 ${st.drift}/3）→ 放弃这条分支，保留其它出口`);
+                st.backFail = 0;
+                if (st.drift >= 3) { log('  ⚠ 3 条分支都漂移，收工'); st.reason = 'stuck'; stopAll = true; }
+                return;
+            }
+        } else {
+            st.backFail = 0;
         }
     }
 }
@@ -643,8 +656,20 @@ async function runAccount(account) {
         await sleep(1200);
 
         // 进本前在主界面记背包「奔月副本箱」基线（领奖后用它做硬对账，见 claim）
-        st.boxBefore = await readBymjBox(page);
-        log(`[基线] 背包「奔月副本箱」= ${st.boxBefore === null ? '读取失败' : st.boxBefore + ' 个'}`);
+        // ★ 2026-11-23：冷6 / 冷2 都在这里读到「读取失败」——当时页面正好是一层加载壳
+        //   （紧接着就是「回城失败」「白屏恢复 reload」）。基线丢了，后面领奖只能靠 toast，
+        //   toast 一错过就变成「到账未证实」。所以读失败要等页面就绪后重试，别一次定生死。
+        for (let r = 1; r <= 3; r++) {
+            st.boxBefore = await readBymjBox(page);
+            if (st.boxBefore !== null) break;
+            if (r < 3) {
+                log(`[基线] 背包读取失败（第${r}/3次），等页面就绪后重试...`);
+                await sleep(2500);
+                await page.keyboard.press('Escape').catch(() => {});
+                await sleep(800);
+            }
+        }
+        log(`[基线] 背包「奔月副本箱」= ${st.boxBefore === null ? '读取失败（重试 3 次仍失败）' : st.boxBefore + ' 个'}`);
         await sleep(1000);
 
         if (!(await enterDungeon(page))) return st;
