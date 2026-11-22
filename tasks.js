@@ -1,12 +1,37 @@
 const { spawnSync } = require('child_process');
 const { existsSync } = require('fs');
+// 同账号互斥锁统一在 ./acct-lock.js（kidd / 海盗王 / 奔月三个副本脚本也接同一把锁，
+// 否则「任务流程在跑」和「副本脚本在跑」会同时登录同一个号互相顶号）。
+const acct = require('./acct-lock.js');
+
+// 同账号互斥（2026-11-06 加，11-19 并入公共锁模块）：
+//   本地可能同时有两条入口在跑同一个号（排队的批量脚本 + 手动补跑），两条都登录会互相顶号下线，
+//   这正是「同账号单会话」那条铁律要防的情况。用临时目录里的锁文件挡住后启动的那条：
+//   · 45 分钟内已有实例（正在跑 / 刚跑完都算）→ 后来的直接退出，一次都不登录
+//   · 想强行重跑：TASKS_NO_LOCK=1（或通用开关 NO_ACCT_LOCK=1）
+//   CI 里每个号一个独立 runner，临时目录各自独立，锁不会互相影响。
+function acquireAccountLock() {
+    const a = process.env.GAME_ACCOUNT || '';
+    if (!a || process.env.TASKS_NO_LOCK === '1') return true;
+    // keepAfterExit：跑完不删锁，45 分钟内再派一次直接跳过（避免同一波被重复派）；
+    // legacyFormat：仍写纯时间戳，和旧版任务流程/历史锁文件保持兼容。
+    const r = acct.acquire(a, { tag: 'tasks.js', keepAfterExit: true, legacyFormat: true });
+    if (!r.ok) {
+        const mins = Math.round((r.st.age || 0) / 60000);
+        console.log(`[tasks] ${a} 锁未过期（${mins} 分钟前由「${r.st.tag}」启动，锁文件 ${acct.lockFile(a)}），本次跳过：避免两条实例登录同一账号互相顶号`);
+        console.log('[tasks] 确认没有实例在跑、就是要重跑时，加 TASKS_NO_LOCK=1');
+        return false;
+    }
+    return true;
+}
 
 // 任务闸门（和 index.js 打boss同一套逻辑，按北京时间判断）：
-//   00:00-00:59 → 每日签到（signin.js，已签自动跳过）→ 竞技场 → 炼器窟副本 → 基德宝藏（阿姆斯特丹，与炼器窟同在北海）→ 钓鱼 → 秘宝抽奖（mibao.js，免费银贝箱，同在威尼斯）→ 镇妖塔（zhenyaota.js，泉州守塔武僧，每天1次）→ 每日任务（daily.js）（签到仅此窗口跑；竞技场不限地点先打，再去伦敦，最后威尼斯钓鱼）
+//   00:00-00:59 → 每日签到（signin.js，已签自动跳过）→ 竞技场 → 炼器窟副本 → 基德宝藏（阿姆斯特丹，与炼器窟同在北海）→ 钓鱼 → 附魔秘境（fmsj.js，威尼斯·铁匠铺→附魔师，只跑大号）→ 秘宝抽奖（mibao.js，免费银贝箱，同在威尼斯）→ 镇妖塔（zhenyaota.js，泉州守塔武僧，每天1次）→ 每日任务（daily.js）（签到仅此窗口跑；竞技场不限地点先打，再去伦敦，最后威尼斯钓鱼）
 //   18:00-18:30 → 山寨农场 → 邮件领取（mail.js，领取所有+确定+返回）
+//   周二/六 20:00-20:30 → 怪物攻城（按等级档位城市，四城门杀满5只即停）
 //   其他时间    → 跳过（中午11:50那趟由 index.js 自己的闸门打boss）
 // 任务跑完正常退出，交给 boss.yml 后面的 Run Boss / Run Farm（刷怪到6小时上限）
-// TASKS_MODE=dawn|dusk|skip 可强制指定，auto(默认)=按时间
+// TASKS_MODE=dawn|dusk|gongcheng|skip 可强制指定，auto(默认)=按时间
 
 const MODE = (process.env.TASKS_MODE || 'auto').toLowerCase();
 
@@ -14,14 +39,15 @@ const MODE = (process.env.TASKS_MODE || 'auto').toLowerCase();
 const FAILED_STEPS = [];
 
 function bjNow() {
-    const now = new Date();
-    return { hour: (now.getUTCHours() + 8) % 24, min: now.getUTCMinutes() };
+    const d = new Date(Date.now() + 8 * 3600 * 1000);
+    return { hour: d.getUTCHours(), min: d.getUTCMinutes(), day: d.getUTCDay() };
 }
 
-function resolveMode(hour, min) {
+function resolveMode(hour, min, day) {
     if (MODE !== 'auto') return MODE;
     if (hour === 0) return 'dawn';   // 00:00-00:59 一整个小时
     if (hour === 18 && min <= 30) return 'dusk';
+    if (hour === 20 && min <= 30 && (day === 2 || day === 6)) return 'gongcheng';
     return 'skip';
 }
 
@@ -35,7 +61,13 @@ function runStep(name, script) {
     }
     console.log(`[tasks] >>> ${name} (${script}) 开始`);
     const t0 = Date.now();
-    const r = spawnSync(process.execPath, [script], { stdio: 'inherit', env: process.env });
+    // ★ NO_ACCT_LOCK=1 必须传给子脚本（11-22 实证）：
+    //   本进程开头已经用 legacy 格式（只有时间戳、没有 pid）持了这把锁，而子脚本（kidd.js 用
+    //   acct.guard）再取同一把锁时，acct-lock 的判活顺序里「无 pid 的旧格式锁 → 只按 TTL 判」，
+    //   于是它把自己的父进程当成占用者 → guard 直接 exit(0)，整步**静默什么都不做**（日志还显示 exit=0）。
+    //   账号在本进程整个生命周期内已被独占，子脚本不需要重复取锁；别的进程/manual 补跑照样会被挡。
+    const childEnv = { ...process.env, NO_ACCT_LOCK: '1' };
+    const r = spawnSync(process.execPath, [script], { stdio: 'inherit', env: childEnv });
     const sec = Math.round((Date.now() - t0) / 1000);
     const code = r.status === null ? 'signal' : r.status;
     console.log(`[tasks] <<< ${name} 结束 exit=${code} 耗时${sec}s`);
@@ -48,9 +80,13 @@ function runStep(name, script) {
 }
 
 function main() {
-    const { hour, min } = bjNow();
-    const mode = resolveMode(hour, min);
-    console.log(`[tasks] 北京时间 ${hour}:${String(min).padStart(2, '0')} → mode=${mode} (TASKS_MODE=${MODE})`);
+    if (!acquireAccountLock()) {
+        process.exit(0);
+        return;
+    }
+    const { hour, min, day } = bjNow();
+    const mode = resolveMode(hour, min, day);
+    console.log(`[tasks] 北京时间 ${hour}:${String(min).padStart(2, '0')}(周${'日一二三四五六'[day]}) → mode=${mode} (TASKS_MODE=${MODE})`);
 
     // 每日签到（幂等：已显示"今日已签到"直接跳过；只在dawn窗口登录，其他时间不登录）
     if (mode === 'dawn') {
@@ -64,6 +100,9 @@ function main() {
         // 小号 127 级实测打得动（51/51 全清，领奖明细 藏宝图碎片*15）
         runStep('基德宝藏', 'kidd.js');
         runStep('钓鱼', 'fish.js');
+        // 附魔秘境（威尼斯）：与钓鱼同一张图，收竿后直接城内地图→铁匠铺→附魔师→附魔秘境，
+        // 不用出航。只跑大号（131 级小号满血一刀被秒），脚本内部自己按账号名拦。
+        runStep('附魔秘境', 'fmsj.js');
         runStep('秘宝抽奖', 'mibao.js');
         // 镇妖塔：泉州 ★守塔武僧 → 进入镇妖塔，每天 1 次，一局打到死为止（约 3 分钟）
         runStep('镇妖塔', 'zhenyaota.js');
@@ -71,6 +110,8 @@ function main() {
     } else if (mode === 'dusk') {
         runStep('山寨农场', 'shanzhai.js');
         runStep('邮件领取', 'mail.js');
+    } else if (mode === 'gongcheng') {
+        runStep('怪物攻城', 'gongcheng.js');
     } else if (MODE === 'skip') {
         console.log('[tasks] 强制跳过任务(TASKS_MODE=skip)');
     } else {
