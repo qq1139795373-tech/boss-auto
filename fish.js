@@ -820,11 +820,24 @@ async function openBoss(page) {
         if (!(await clickText(page, '鱼老板', 3000))) {
             await jsClick(page, '鱼老板');
         }
-        // 高峰期服务器响应慢，固定等2秒不够：轮询最多8秒等鱼老板页真正出现
+        // 高峰期服务器响应慢，固定等2秒不够：轮询最多8秒等鱼老板页真正出现。
+        // ★ 2026-11-23 补：只认「购买鱼饵 / 出售鱼」这两个静态标签是不够的 —— 实测日志出现
+        //   「鱼老板页未读到银贝，跳过资金检查」紧接着「第1轮未找到小鱼活饵的购买按钮」，
+        //   两条是同一个原因：面板外壳先出、真正的动态内容（顶部账户余额行、饵料列表）晚一拍才到。
+        //   余额行读不到 → 资金检查被静默跳过；饵料列表没出 → 第 1 轮找不到「购买」按钮。
+        //   现在把「银贝可读」也算进就绪判据，返回 true 时余额已拿到。
+        let panelOpen = false;
+        let silverReady = false;
         for (let w = 0; w < 8; w++) {
             await sleep(1000);
             const t = await getPageText(page);
-            if (t.includes('购买鱼饵') || t.includes('出售鱼')) return true;
+            if (t.includes('购买鱼饵') || t.includes('出售鱼')) panelOpen = true;
+            if (/银贝[:：]\s*[\d,.]+/.test(t)) silverReady = true;
+            if (panelOpen && silverReady) return true;
+        }
+        if (panelOpen) {
+            console.log(`鱼老板页已打开，但账户余额行等 ${8}s 仍未渲染（余额读不到 → 资金检查将跳过）`);
+            return true;
         }
         const t = await getPageText(page);
         console.log(`第${attempt}次未打开鱼老板页:`, t.replace(/\s+/g, ' ').substring(0, 150));
@@ -871,7 +884,9 @@ async function buyBait(page, qty = 100) {
             return true;
         });
         if (!ok) {
-            console.log(`第${round}轮未找到小鱼活饵的购买按钮`);
+            // 第 1 轮找不到按钮基本都是「鱼老板面板外壳已出、饵料列表还没渲染」（11-22 日志第 481 行就是这种，
+            // 第 2 轮就买到了）。所以不按失败处理：只说明是等渲染，下一轮再找。
+            console.log(`第${round}轮饵料列表还没渲染出小鱼活饵的「购买」按钮，等渲染重试`);
             continue;
         }
         // 点了购买按钮后轮询最多6秒等确认框弹出
@@ -913,6 +928,21 @@ function parseBossSilver(t) {
     if (!m) return null;
     const v = parseFloat(m[1].replace(/,/g, ''));
     return Number.isFinite(v) ? v : null;
+}
+
+// 带重试的银贝读数（2026-11-23）：账户余额行是异步拉的，openBoss 刚返回时可能还没渲染，
+// 原来只读一次，读不到就「跳过资金检查」—— 等于银贝不足时不会去山寨卖榴莲补钱，买饵可能直接失败。
+// 现在读不到就再等 1.2s 重读，最多 3 次；仍然 null 才放弃（并把原因打到 warning 级，不再静默）。
+async function readBossSilver(page, tries = 3) {
+    for (let i = 1; i <= tries; i++) {
+        const v = parseBossSilver(await getPageText(page));
+        if (v !== null) return v;
+        if (i < tries) {
+            console.log(`鱼老板页银贝第${i}次未读到，等渲染重读...`);
+            await sleep(1200);
+        }
+    }
+    return null;
 }
 
 // 退出山寨页回主视图（关详情框 → 类名返回箭头(shanzhai.js同款) → 坐标(18,30) → goBack 逐级兜底）
@@ -1500,7 +1530,7 @@ async function run() {
                 return;
             }
             // 银贝保障：鱼老板页直接读银贝，<5000先去山寨仓库卖榴莲200补钱，回来再买饵
-            const silver = parseBossSilver(await getPageText(page));
+            const silver = await readBossSilver(page);
             if (silver !== null && silver < 5000) {
                 console.log(`银贝${silver} < 5000，先去山寨卖榴莲补钱`);
                 await page.screenshot({ path: 'fish-low-silver.png' }).catch(() => {});
@@ -1517,12 +1547,14 @@ async function run() {
                         await browser.close();
                         return;
                     }
-                    const s2 = parseBossSilver(await getPageText(page));
+                    const s2 = await readBossSilver(page, 2);
                     console.log(`补钱后银贝=${s2 === null ? '未知' : s2}，继续买饵`);
                     if (s2 !== null && s2 < 5000) console.log('::error::钓鱼：补钱后银贝仍<5000，买饵可能失败');
                 }
             } else if (silver === null) {
-                console.log('鱼老板页未读到银贝，跳过资金检查');
+                // 重试 3 次仍读不到才走到这里（openBoss 已经把「银贝可读」算进就绪判据，正常不该出现）
+                console.log('::warning::鱼老板页未读到银贝（已重试 3 次）→ 本次跳过资金检查，直接按需买饵');
+                await page.screenshot({ path: 'fish-silver-unread.png' }).catch(() => {});
             } else {
                 console.log(`银贝${silver} ≥ 5000，资金充足`);
             }
