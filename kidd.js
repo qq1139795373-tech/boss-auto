@@ -362,6 +362,19 @@ let BLOOD_DEAD = false;   // 体力宝用光/补药失败后不再反复开背�
 let BLOOD_HARD = false;
 let STOP_WALK = false;    // 复活成功/复活失败后置位：三线、走廊、房间循环都要立刻收手去领奖
 
+// ★ 出刀上限（2026-11-23 用户提「基德狂兽可以一直打啊，为什么要跳过」后重定）
+//   旧值 18 刀是 11-16 为「打不死的怪别拖住整趟副本」定的，但基德狂兽血最厚（18500），18 刀根本不够；
+//   更要命的是「18 刀没结算 → 关面板 → 下一轮重新选怪」—— 重新选怪等于重开一场，
+//   所以「连续 3 次打不死」其实是 3 段各自从头打的 18 刀，永远打不完，最后把这只怪整只跳过。
+//   现在照另外两份副本（海盗王 110 刀 / 奔月 90 刀）的口径，一次就把刀数给够。
+//   MAX_BLADES：单次进战斗最多出刀数（够一只厚血怪打完）；
+//   MOB_MAX_MS ：单次战斗的墙上时钟兜底（读页面本身耗时就占 0.6s/刀，刀数只是粗算）；
+//   STUCK_BLADES / STUCK_MS：同一只怪累计打多少刀 / 多久还没结算，才判定「真打不动」跳过它。
+const MAX_BLADES = Number(process.env.KIDD_MAX_BLADES || 110);
+const MOB_MAX_MS = Number(process.env.KIDD_MOB_MAX_MS || 180000);
+const STUCK_BLADES = Number(process.env.KIDD_STUCK_BLADES || 400);
+const STUCK_MS = Number(process.env.KIDD_STUCK_MS || 420000);
+
 // 人物战死 → 点「复活」→ 确认。副本内只有 1 次复活机会，第二次死亡会提示「道具不足」。
 // 与奔月 / 海盗王两份脚本同一套判据（那两份用 CDP 触摸确认，基德面板是普通 DOM，这里用文本点击）。
 async function reviveOnce(page) {
@@ -379,26 +392,36 @@ async function reviveOnce(page) {
     return { ok: true, why: '' };
 }
 
+// 返回 { res, blades, ms }：
+//   res='win'       出现结算（打死了）
+//   res='dead'      人物战死（交回上层复活）
+//   res='alive'     刀数/时间用完仍未结算（怪还在，上层接着打）
+//   res='nomonster' 点不到这只怪（交互失败，不能算「打不死」）
 async function fightOne(page, name) {
-    if (!(await clickMonster(page, name))) return false;
+    if (!(await clickMonster(page, name))) return { res: 'nomonster', blades: 0, ms: 0 };
     await sleep(300);
+    const t0 = Date.now();
     let blades = 0;
     let heals = 0;
-    // 上限统一 18 刀：普通模式一般 3~5 刀就结算，多余刀数不会白点（出结算就走「关闭」分支）；
-    // 硬打模式血池 0、怪更肉，12 刀可能不够打完（原来是 BLOOD_HARD?18:12，硬打发生在循环中途时上限不生效）
-    for (let a = 0; a < 18; a++) {
+    // 上限 MAX_BLADES 刀 / MOB_MAX_MS 毫秒：普通怪 3~5 刀就结算，出结算立刻走「关闭」分支，多给的上限不会白点；
+    // 厚血怪（基德狂兽 18500）一次就打到底，不再「18 刀就断、下一轮重新选怪从头打」。
+    for (let a = 0; a < MAX_BLADES; a++) {
+        if (Date.now() - t0 > MOB_MAX_MS) {
+            console.log(`  [战斗] ${name}: 已打 ${blades} 刀 / ${Math.round((Date.now() - t0) / 1000)}s 仍未结算，交回上层接着打`);
+            break;
+        }
         const txt = await getPageText(page);
         if (txt.includes('复活')) {
             // 人被打死了：战斗面板会变成「复活」入口，这里立刻交回上层去复活+领奖，
-            // 不再空点攻击（死亡状态下点攻击无效，会把 12 刀白耗完）
+            // 不再空点攻击（死亡状态下点攻击无效，白白耗完刀数）
             console.log(`  [战斗] ${name}: 人物战死`);
-            return 'dead';
+            return { res: 'dead', blades, ms: Date.now() - t0 };
         }
         if (txt.includes('关闭')) {
             await page.locator('text=关闭').first().click({ force: true, timeout: 500 }).catch(() => {});
             await sleep(300);
             console.log(`  [战斗] ${name}: ${blades}刀+结算`);
-            return true;
+            return { res: 'win', blades, ms: Date.now() - t0 };
         }
         if (txt.includes('攻击')) {
             // 血池 0 的处置（2026-11-15 定策略，2026-11-20 两轮修正）：
@@ -440,9 +463,10 @@ async function fightOne(page, name) {
         if (!t2.includes('攻击') && !t2.includes('关闭') && !t2.includes('复活')) break;
     }
     await page.locator('text=关闭').first().click({ force: true, timeout: 300 }).catch(() => {});
-    if (blades) console.log(`  [战斗] ${name}: ${blades}刀(未见结算)`);
+    const spent = Date.now() - t0;
+    if (blades) console.log(`  [战斗] ${name}: ${blades}刀(未见结算，本次 ${Math.round(spent / 1000)}s)`);
     await sleep(200);
-    return true;
+    return { res: 'alive', blades, ms: spent };
 }
 
 // evaluate精确点击页面上的链接文本（绕过遮罩）
@@ -528,15 +552,24 @@ async function northToHubClearing(page) {
 // ★ 不抛异常（2026-11-16 教训）：11-16 00:00 北线兽栏口一只「基德狂兽」连打 15 轮 ×12 刀都读不到结算，
 //   旧代码在这里 `throw` → 一路冒泡出 run() → 后面的「对账 / 领取奖励」整段被跳过，
 //   36 杀早已满足条件（基德手下:20）却没领奖，剩 58 分钟白白浪费。领奖是大头，绝对不能因为
-//   「某一只怪打不死」就把整个副本的奖励丢掉。改为：同一只怪连续打 3 次不死 → 本轮跳过它，
-//   继续清同房间其它怪；15 次仍清不完 → 告警并带着缺口返回，由上层照常对账 + 领奖。
+//   「某一只怪打不死」就把整个副本的奖励丢掉。
+// ★ 跳过条件（2026-11-23 改）：原来按「连续 3 次」计数，但每次只给 18 刀、中途还关面板重开，
+//   等于 3 段从头打的 18 刀 —— 厚血怪永远打不完就被整只跳过（用户看到「18刀(未见结算)」）。
+//   现在按「同一只怪累计刀数 / 累计时间」判：没到 STUCK_BLADES 刀、STUCK_MS 毫秒就继续打它，
+//   到了才算是真打不动，跳过并告警。房间另有 40 次尝试与 ROOM_MAX_MS 兜底。
+const ROOM_MAX_MS = Number(process.env.KIDD_ROOM_MAX_MS || 720000);
 async function clearRoom(page, tag) {
     let kills = 0;
     let emptyReads = 0;
-    const stuckHits = new Map();     // 怪名 → 连续打不死的次数
+    const roomT0 = Date.now();
+    const mobSpent = new Map();      // 怪名 → { blades, ms } 累计打刀数与耗时
     const skip = new Set();          // 本轮直接跳过的怪名
-    for (let attempt = 0; attempt < 15; attempt++) {
+    for (let attempt = 0; attempt < 40; attempt++) {
         if (STOP_WALK) return kills;
+        if (Date.now() - roomT0 > ROOM_MAX_MS) {
+            console.log(`::warning::[${tag}] 房间已耗 ${Math.round((Date.now() - roomT0) / 60000)} 分钟，先收手带走缺口`);
+            break;
+        }
         const txt = await getPageText(page);
         // 死亡兜底：页面挂着「复活」时读不到「你看到」区块，旧代码会空转 15 次才放弃这一间。
         // 这里先认出来 → 复活一次 → 停止走图去领奖（复活后副本不再渲染「领取奖励」的话就真领不到了）。
@@ -578,31 +611,42 @@ async function clearRoom(page, tag) {
         emptyReads = 0;
         const before = seg.split(mobs[0]).length - 1;
         const fr = await fightOne(page, mobs[0]);
-        if (fr === 'dead') {
+        if (fr.res === 'dead') {
             const rv = await reviveOnce(page);
             STOP_WALK = true;
             if (rv.ok) console.log('  ✔ 复活成功 → 停止走图，立刻去领奖');
             else console.log(`::error::复活失败（${rv.why}）→ 停止走图；` + (rv.why === 'no-item' ? '本副本已复活过一次，二次死亡领不到奖励' : ''));
             return kills;
         }
+        if (fr.res === 'nomonster') {
+            // 点不到怪不是因为「打不死」，而是面板/浮层没就绪：不要计进 stuck，重读一次页面再来
+            console.log(`[${tag}] 「${mobs[0]}」点不到（可能有浮层），重读页面重试`);
+            await sleep(1200);
+            continue;
+        }
         const after = viewSeg(await getPageText(page));
         const nowCount = after.split(mobs[0]).length - 1;
         const got = Math.max(0, before - nowCount);
         kills += got;
         if (got === 0) {
-            const n = (stuckHits.get(mobs[0]) || 0) + 1;
-            stuckHits.set(mobs[0], n);
-            if (n >= 3) {
+            const s = mobSpent.get(mobs[0]) || { blades: 0, ms: 0 };
+            s.blades += fr.blades;
+            s.ms += fr.ms;
+            mobSpent.set(mobs[0], s);
+            const sec = Math.round(s.ms / 1000);
+            if (s.blades >= STUCK_BLADES || s.ms >= STUCK_MS) {
                 skip.add(mobs[0]);
-                console.log(`::warning::[${tag}] 「${mobs[0]}」连续 ${n} 次打不死（每轮 12 刀无结算）→ 本轮跳过它，继续清其它怪`);
+                console.log(`::warning::[${tag}] 「${mobs[0]}」累计 ${s.blades} 刀 / ${sec}s 仍无结算 → 本轮跳过它，继续清其它怪`);
                 await page.screenshot({ path: `dungeon-stuck-${tag}.png` }).catch(() => {});
+            } else {
+                console.log(`  [战斗] 「${mobs[0]}」还没倒下（累计 ${s.blades} 刀 / ${sec}s），继续打`);
             }
         } else {
-            stuckHits.delete(mobs[0]);
+            mobSpent.delete(mobs[0]);
         }
     }
     await page.screenshot({ path: `dungeon-room-stuck-${tag}.png` }).catch(() => {});
-    console.log(`::warning::[${tag}] 房间 15 次未清完（跳过 ${skip.size ? [...skip].join('/') : '无'}）→ 带回缺口继续，不中断副本`);
+    console.log(`::warning::[${tag}] 房间 40 次尝试用完（跳过 ${skip.size ? [...skip].join('/') : '无'}）→ 带回缺口继续，不中断副本`);
     return kills;
 }
 
