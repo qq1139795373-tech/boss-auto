@@ -1,18 +1,24 @@
 const { chromium } = require('playwright');
 // 副本内自恢复（先扫荡/领奖再退本）
 const drain = require('./dungeon-recover.js');
+// 刷怪时长预算（刷到下一个派发节点前 5 分钟）
+const { farmBudgetMin } = require('./farm-budget.js');
 
 const ACCOUNT = process.env.GAME_ACCOUNT;
 const PASSWORD = process.env.GAME_PASSWORD;
 // 农场固定去广州沙滩打经验妖灵（11-09 起小号也走广州，不再去杭州西湖）
 const NAV_DEST = '广州';
 const NAV_REGION = '东亚';
-// 刷怪时长上限（分钟）：job 的 6 小时上限会把「跑到上限」判成 failure，
-// 到点自己收尾 exit 0，红色只留给真故障。FARM_MAX_MIN=0 表示不限（旧行为）。
-// 300 而不是 330：farm 是在 Run Tasks 之后启动的，00:00 那一波任务段要跑 0:04→0:32（约 28 分钟），
-// 330+28=358 分钟再叠加启动与 index.js 就压线超过 360（10-30 实证 master 与 boss0/3/4 全被砍）。
-// 300 留 60 分钟余量，任务段再怎么拖也不会撞上限。
-const FARM_MAX_MIN = Number(process.env.FARM_MAX_MIN || 300);
+// 刷怪时长（分钟）：默认不再写死 300，改成「刷到下一个派发节点前 5 分钟」自动算（farm-budget.js）。
+// 写死 300 的毛病：11:30 派发这趟，farm 是 boss 打完立刻起跑（约 11:42~11:50，本文件就是紧随
+//   Run Boss 的下一个 step），固定 300 分钟会刷到 16:4x 就收尾，离 18:00 派发白空一个多小时
+//   （用户 11-22 23:34 指出「完全可以刷满野怪」）。
+// 预算是启动那一刻现场算的，起跑越早预算越长，收尾恒为「下一个节点前 5 分钟」= 17:55。
+// 显式设置 FARM_MAX_MIN 时以它为准；FARM_MAX_MIN=0 仍表示不限（旧行为，但会被 job timeout 砍成红叉，慎用）。
+const FARM_MAX_MIN_RAW = process.env.FARM_MAX_MIN;
+const FARM_MAX_MIN_FIXED = (FARM_MAX_MIN_RAW === undefined || String(FARM_MAX_MIN_RAW).trim() === '')
+    ? null
+    : Number(FARM_MAX_MIN_RAW);
 
 // 退出诊断：GitHub 的 job 日志偶发 404 全丢（2026-11-12 00:00 小号波 farm failure 就是这样查不下去），
 // 所以进程自己把「退出原因 + 退出码 + 击杀数 + 运行时长」压成一行打在末尾。
@@ -825,6 +831,11 @@ async function run() {
         // 日志节流：每轮都打印会刷出几十MB日志、拖垮runner，改为每60秒汇报一次进度
         let count = 0;
         const loopStart = Date.now();
+        // 本次预算：显式 FARM_MAX_MIN 优先，否则算到「下一个派发节点前 5 分钟」。
+        // 算出来 0 表示离下一个节点不足 5 分钟 —— 这时直接收尾，不要再开一轮。
+        const budgetMin = FARM_MAX_MIN_FIXED === null ? farmBudgetMin(loopStart) : FARM_MAX_MIN_FIXED;
+        const budgetOn = FARM_MAX_MIN_FIXED !== 0;      // 仅显式 0 才是「不限」
+        console.log(`本次刷怪预算 ${budgetMin} 分钟（${budgetOn ? '到下一个派发节点前 5 分钟' : 'FARM_MAX_MIN=0 不限'}）`);
         let lastLogAt = Date.now();
         let lastCountAt = Date.now();
         let kickedAt = 0;
@@ -834,12 +845,12 @@ async function run() {
             pageText = await getPageText(page);
             EXIT_DIAG.kills = count;
 
-            // 到点主动收尾：job 的 timeout-minutes 是 360，被它砍掉时整个 run 标 failure，
+            // 到点主动收尾：被 job 的 timeout-minutes 砍掉时整个 run 标 failure，
             // 于是「跑到上限」和「真故障」混成一片红（2026-10-29 00:00 波 4 个 job 全是这样）。
-            // 刷到这里就正常退出，red 只留给真问题。FARM_MAX_MIN=0 可关闭该限制。
-            if (FARM_MAX_MIN > 0 && Date.now() - loopStart >= FARM_MAX_MIN * 60000) {
-                console.log(`已刷满 ${FARM_MAX_MIN} 分钟（击杀 ${count} 次），主动收尾退出，避免撞 job 6 小时上限被判 failure`);
-                diag(`刷满 ${FARM_MAX_MIN} 分钟主动收尾`, 0);
+            // 刷到这里就正常退出，red 只留给真问题。
+            if (budgetOn && Date.now() - loopStart >= budgetMin * 60000) {
+                console.log(`已刷满 ${budgetMin} 分钟（击杀 ${count} 次），主动收尾退出：下一个派发节点马上到，让新 run 干净接手`);
+                diag(`刷满 ${budgetMin} 分钟主动收尾`, 0);
                 break;
             }
 

@@ -1,0 +1,66 @@
+name: Team5 Form
+
+# 世界boss 前把「一起战斗吧！」5 人普通队组好（战力加成）。
+#
+# ★ 常规不再靠这条 workflow（11-22 深夜改）：组队已内置进 boss.yml 的 form job——
+#   11:30 派发 → form 先跑完 → matrix 各号才登录，串行不重叠，也不用额外加一条派发。
+#   本文件保留给「中途队伍被散了、想单独补一次」的场景，跑完不影响打 boss。
+#
+# 单独派发的话用 11:40 或更早（不要 11:50）：
+#   组队 165s + CI 冷启动（checkout + setup-node + npm install + playwright install）90~180s，
+#   合计 4.5~5.75 分钟。boss 11:30 开门、12:30 关门，11:50 才派发则 5/5 要到 11:54~11:56，
+#   而各号 11:55 前后已开打 —— 前面几分钟吃不到加成。
+#   只要一条，不要像 boss 那样成对派发两个 ref：两个进程同时改组同一支队伍会互相打断。
+#
+# 脚本内闸门：11:15~11:45，过了就跳过（防的是「加成吃不全」的误配）。
+# 手动：Run workflow 时勾 force 可跳过 11:15-11:45 的时间窗口（本地/临时验证用）
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '跳过时间窗口（11:15-11:45）强制组队'
+        type: boolean
+        default: false
+
+jobs:
+  form:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # 账号表先校验：jq 取不到 password 会吐字面量 "null"，拿 "null" 登录只会得到「密码错误」，
+      # 和大号/小号密码不同这件事混在一起根本分不清。这一步在装依赖之前就红叉。
+      - name: 校验账号表（每项必须有 account + password）
+        env:
+          JSON: ${{ secrets.GAME_ACCOUNTS_JSON }}
+        run: node accounts-json-check.js
+
+      - name: Setup
+        run: |
+          npm install
+          npx playwright install chromium
+
+      - name: 组 5 人队
+        env:
+          # 大号：repo 级 secret（master 用的那两个），multi-boss 分支同样读得到
+          GAME_ACCOUNT: ${{ secrets.GAME_ACCOUNT }}
+          GAME_PASSWORD: ${{ secrets.GAME_PASSWORD }}
+          # 小号表：脚本内部按账号拆成 GAME_PASSWORD_<账号>，绝不回落到共用 GAME_PASSWORD
+          GAME_ACCOUNTS_JSON: ${{ secrets.GAME_ACCOUNTS_JSON }}
+          TEAM5_FORCE: ${{ inputs.force == true && '1' || '' }}
+        run: node team5-form.js
+
+      - name: Upload Screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: team5-screenshots
+          path: "team5-*.png"
+          if-no-files-found: ignore
+          compression-level: 6
+          overwrite: false

@@ -2,8 +2,16 @@ const { chromium } = require('playwright');
 // 只读可见节点的页面文本（避免 display:none 残留节点造成的幽灵文案）
 const { visibleText } = require('./dungeon-recover.js');
 
-const ACCOUNT = process.env.GAME_ACCOUNT;
-const PASSWORD = process.env.GAME_PASSWORD;
+const pass = require('./account-pass.js');
+
+const ACC = pass.currentAccount();
+// ★ 缺环境变量就立刻说清楚（11-22 加，随后统一走 account-pass）：
+//   以前会一路跑到 inputs[1].fill(undefined)，只留一行
+//   "elementHandle.fill: value: expected string, got undefined"，看不出是配置缺了密码。
+//   大号 coldwind 与小号 coldwindN 密码不同，这里不内置任何默认密码。
+const AUTH = pass.resolveOrExit(ACC);
+const ACCOUNT = AUTH.account;
+const PASSWORD = AUTH.password;
 // 每日签到：主菜单→福利→向下滚到签到按钮→点今日签到→按钮变「今日已签到」即完成；
 // 页面已是「今日已签到」则直接跳过（幂等）
 

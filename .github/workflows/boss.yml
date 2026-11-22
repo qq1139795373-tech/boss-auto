@@ -20,9 +20,17 @@ on:
         type: boolean
         default: false
       tasks_mode:
-        description: '任务流程：auto按北京时间(00:00钓鱼等/18:00山寨)，或强制 dawn/dusk/skip'
+        description: '任务流程：auto按北京时间(00:00钓鱼等/18:00山寨/周二六20:00攻城)，或强制 dawn/dusk/gongcheng/skip'
         type: string
         default: 'auto'
+      gongcheng_wait:
+        description: '周二/六 18:00 那趟是否等 20:00 攻城：留空=看仓库变量 GONGCHENG_WAIT(没设就等)；填 false 强制不等'
+        type: string
+        default: ''
+      gc_mode:
+        description: '攻城验证（只验证脚本能否跑通，非活动日也能用）：view=只读攻城页(不出航/不花铜贝) | test=走到城门刷新但不出手；留空=正常流程'
+        type: string
+        default: ''
 
 jobs:
   prepare:
@@ -30,24 +38,90 @@ jobs:
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}
     steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # ★ 先校验账号表再 fanout（11-22）：jq 取不到 password 时会吐出字面量 "null"，
+      #   拿 "null" 去登录只会得到「密码错误」，配上「大号 coldwind 与小号 coldwindN 密码不同」
+      #   根本分不清是缺字段还是写错。这一步在装依赖之前就红叉，省下 5 个 runner 的空转。
+      - name: 校验账号表（每项必须有 account + password）
+        env:
+          JSON: ${{ secrets.GAME_ACCOUNTS_JSON }}
+        run: node accounts-json-check.js
+
       - id: set
         env:
           JSON: ${{ secrets.GAME_ACCOUNTS_JSON }}
         run: |
-          if [ -z "$JSON" ]; then
-            echo "错误: 仓库 secret GAME_ACCOUNTS_JSON 未配置"
-            exit 1
-          fi
-          if ! echo "$JSON" | jq -e 'type=="array" and length>0' >/dev/null; then
-            echo "错误: GAME_ACCOUNTS_JSON 应为非空JSON数组"
-            exit 1
-          fi
           echo "matrix=$(echo "$JSON" | jq -c '[range(length)]')" >> "$GITHUB_OUTPUT"
 
-  boss:
+  # ── 世界boss 开打前先组 5 人队（战力加成）─────────────────────────────────────
+  # 为什么放在 boss.yml 里、而不是只靠独立的 team5.yml（11-22 深夜用户定：11:30 派发）：
+  #   boss 是 matrix「每号一个 runner」，各 runner 互相看不到对方的登录状态，
+  #   只有这样一个独立 job 才能在同一个浏览器里把 5 个号摆进一支队伍。
+  #   顺序上 form 一结束 matrix 才开始 —— 串行，队伍必然先就绪。
+  # 成对派发（master + multi-boss）会同时起两个 form：用同名 concurrency 组把两者串起来，
+  #   第一个组完第二个才进来，那时队伍已是 5/5，team5-form.js 会直接复核退出、不拆重建。
+  # 0:00 / 06:00 / 18:00 这三趟也会把这个 job 拉起来：它会白装一次依赖（约 2 分钟），
+  #   然后被 team5-form.js 内部的时间窗口（11:15-11:45）判掉、exit 0 —— 不登录任何账号，纯浪费时间。
+  #   之所以不在 job 级加 if 预判：GitHub 表达式没有北京时区换算，硬要算就得在 YAML 里重写一遍
+  #   窗口逻辑，与脚本内的 shouldFormTeam 形成两份口径（不一致风险大于省下这 2 分钟）。
+  form:
     needs: prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 20
+    concurrency:
+      group: team5-form
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 校验账号表（每项必须有 account + password）
+        env:
+          JSON: ${{ secrets.GAME_ACCOUNTS_JSON }}
+        run: node accounts-json-check.js
+
+      - name: Setup
+        run: |
+          npm install
+          npx playwright install chromium
+
+      - name: 组 5 人队
+        env:
+          # 大号走 repo 级 secret；小号表按账号拆开，绝不回落到共用 GAME_PASSWORD
+          GAME_ACCOUNT: ${{ secrets.GAME_ACCOUNT }}
+          GAME_PASSWORD: ${{ secrets.GAME_PASSWORD }}
+          GAME_ACCOUNTS_JSON: ${{ secrets.GAME_ACCOUNTS_JSON }}
+        run: node team5-form.js
+
+      - name: Upload Screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          # 成对派发时两个 run 都会传，名字必须带 run_id 才不撞
+          name: team5-screenshots-${{ github.run_id }}
+          path: "team5-*.png"
+          if-no-files-found: ignore
+          compression-level: 6
+
+  boss:
+    needs: [prepare, form]
+    # form 组不满 / 装依赖失败，不能让整趟 boss 白丢：只要账号表校验过了、且没被取消，就照打（只是没加成）。
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-latest
+    # 420 而不是 360（11-22 改）：farm.js 现在刷到「下一个派发节点前 5 分钟」才收尾。
+    # farm 是 boss 一结束就起跑（Run Farm 紧接 Run Boss，无固定等待）；11:30 派发这趟 boss 10 次挑战
+    # 每次 30 秒冷却（index.js），加上错峰最晚 11:44 开打，实际起跑在 11:42~11:50 之间、17:55 收尾，
+    # 最长 = 派发后约 6 小时 25 分；360 分钟会在 17:30 把它砍成 failure。
+    # 420 覆盖所有趟的最长值（18:00 那趟到 23:55、0:00 那趟到 5:55 都远在范围内）。
+    timeout-minutes: 420
     strategy:
       fail-fast: false
       matrix:
@@ -72,14 +146,26 @@ jobs:
           npx playwright install chromium
 
       - name: 随机错峰
+        # 攻城验证模式不需要错峰：不出航、不抢怪，各号同时登录反而更快拿到结果
+        if: ${{ inputs.gc_mode == '' }}
         run: sleep $((RANDOM % 300))
 
       - name: Run Tasks
         env:
-          TASKS_MODE: ${{ inputs.tasks_mode }}
+          # gc_mode 非空时强制走攻城流程（验证用），否则按 tasks_mode
+          TASKS_MODE: ${{ inputs.gc_mode != '' && 'gongcheng' || inputs.tasks_mode }}
+          # 攻城验证的两个档位：view 只读页面（不出航、不花铜贝），test 走到城门刷新但不出手
+          GC_VIEW: ${{ inputs.gc_mode == 'view' && '1' || '' }}
+          GONGCHENG_TEST: ${{ inputs.gc_mode == 'test' && '1' || '' }}
+          # 三档优先级：手动填了就用填的 → 否则用仓库变量 vars.GONGCHENG_WAIT → 再否则空（= 等）。
+          # 之所以要仓库变量这一档：自动派发（cron-job.org 直调 GitHub API）不会带任何 inputs，
+          # 只靠 inputs 的话开关对每天那 4 趟自动运行完全不生效，等于没做。
+          GONGCHENG_WAIT: ${{ inputs.gongcheng_wait != '' && inputs.gongcheng_wait || vars.GONGCHENG_WAIT }}
         run: node tasks.js
 
       - name: Run Boss
+        # gc_mode 非空 = 只做攻城验证，不浪费 runner 去打 boss
+        if: ${{ inputs.gc_mode == '' && hashFiles('.skip-run') == '' && env.BOSS_SKIP_RUN != '1' }}
         env:
           BOSS_FORCE: ${{ inputs.force }}
           NAV_DEST: ${{ inputs.nav_dest }}
@@ -88,7 +174,7 @@ jobs:
         run: node index.js
 
       - name: Run Farm
-        if: ${{ !inputs.force }}
+        if: ${{ inputs.gc_mode == '' && !inputs.force && hashFiles('.skip-run') == '' && env.BOSS_SKIP_RUN != '1' }}
         run: node farm.js
 
       - name: Upload Screenshots

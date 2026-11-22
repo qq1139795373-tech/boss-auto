@@ -476,7 +476,7 @@ async function run() {
     const { hour, min } = await getBjTime();
     console.log(`北京时间: ${hour}:${String(min).padStart(2, '0')}`);
 
-    // 只有 11:30-12:30 才打boss，其他时间跳过（cron 11:50 出门也能直接开打，不再空等）
+    // 只有 11:30-12:30 才打boss，其他时间跳过（cron 11:30 出门就能直接开打，不再空等）
     if (!FORCE && !inBossWindow(hour, min)) {
         console.log(`非boss时间（开放时段 ${BOSS_OPEN_TEXT}），跳过boss`);
         return;

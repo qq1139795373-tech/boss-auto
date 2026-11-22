@@ -51,5 +51,16 @@ t('11-22 实探原文里第 10/11 间正是这两只（证明排除位置正确�
         assert.ok(/精英·巨型仙人掌/.test(s11), '第11间不是巨型仙人掌: ' + s11);
     });
 
+console.log('[6] 小号连脚本都不启动（tasks.js 派发前就拦）');
+const tasks = require('./tasks.js');
+t('coldwind8 判为小号 → 不启动附魔秘境', () => assert.strictEqual(tasks.isSubAccount('coldwind8'), true));
+t('coldwind1 / coldwind2 / coldwind6 同样判为小号',
+    () => { for (const a of ['coldwind1', 'coldwind2', 'coldwind6']) assert.strictEqual(tasks.isSubAccount(a), true, a); });
+t('大号 coldwind 不是小号 → 才会启动', () => assert.strictEqual(tasks.isSubAccount('coldwind'), false));
+t('空值 / 未设账号按大号处理（脚本内部还有一道拦截）',
+    () => { assert.strictEqual(tasks.isSubAccount(''), false); assert.strictEqual(tasks.isSubAccount(undefined), false); });
+t('require tasks.js 不会触发主流程（否则单测会真登录）',
+    () => assert.strictEqual(typeof tasks.resolveMode, 'function'));
+
 console.log(`\n结果: ${pass} 通过 / ${fail} 失败`);
 process.exit(fail ? 1 : 0);

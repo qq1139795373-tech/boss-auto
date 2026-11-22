@@ -28,10 +28,17 @@ const daily = require('./daily.js');
 const drain = require('./dungeon-recover.js');
 const { createBagReader, evTo } = require('./bag-read.js');
 const acct = require('./acct-lock.js');
+const pass = require('./account-pass.js');
 
 const URL = 'http://yiyu.yiyutx.top/yysh/#/pages/login/login';
 const ACC = process.env.GAME_ACCOUNT || process.env.ACCOUNT || 'coldwind';
-const PASSWORD = process.env.GAME_PASSWORD || '';
+// ★ 密码按账号解析，缺了在 main() 里 exit 2（11-22）：原来缺 GAME_PASSWORD 时是空串，
+//   会往密码框里填 ""，报错变成「登录失败」看不出原因。大号小号密码不同，这里不做任何默认值。
+//   解析放在 main() 里做而不是模块顶层：本文件被 fmsj-test.js require 时不该因为「没给密码」直接退出。
+let AUTH = null;
+let PW_ERR = null;
+try { AUTH = pass.resolve(ACC); } catch (e) { PW_ERR = e; }
+const PASSWORD = AUTH ? AUTH.password : '';
 const NO_CLAIM = process.env.FMSJ_NO_CLAIM === '1';
 // 目标物品与期望数量（领奖明细 / 背包增量共用同一张表）
 const FMSJ_REWARDS = { '卡魂碎片箱': 1 };
@@ -481,7 +488,11 @@ async function main() {
         log(`${ACC} 是小号 → 跳过附魔秘境（131 级实测满血一刀被秒，本副本不是给小号刷的；确有需要时 FMSJ_FORCE=1）`);
         return 0;
     }
-    if (!PASSWORD) { log('::error::没有 GAME_PASSWORD'); return 1; }
+    if (!PASSWORD) {
+        // 缺密码 = 配置错，不是「本步不适用」→ 非 0 退出让 CI 变红，别静默当成功
+        log('::error::' + (PW_ERR ? PW_ERR.message : '没有可用密码'));
+        return 2;
+    }
     acct.guard(ACC, { tag: 'fmsj.js' });
 
     const browser = await chromium.launch({ headless: true });
