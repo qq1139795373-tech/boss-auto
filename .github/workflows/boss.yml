@@ -16,8 +16,102 @@ on:
         type: string
         default: ''
 
+# job-gate.js 要通过 REST API 查「另一个分支那个 run 里的 job 是否结束」，只需要 actions: read。
+permissions:
+  contents: read
+  actions: read
+
 jobs:
+  # ★ 情侣迷宫：和 multi-boss 同一套脚本（qllm-run.js / qllm-daily.js），分支差异只在配对怎么填。
+  #   为什么必须排在本分支 boss 之前：情侣迷宫要队长建队、邀请、队员在线准备，两个号在同一个
+  #   浏览器会话里跑；而下面的 boss 会登录大号 coldwind。两者同时登大号必然互顶，所以只能串行。
+  #   为什么这个 job 属于本分支而不是「大号专用」：情侣迷宫不是单人任务，大号的伴侣是冷6（小号），
+  #   两个分支各跑各的一对，账号不重叠（本分支 大号+冷6；multi-boss 冷0+冷8）。
+  #
+  # ★★ 跨分支抢号（用户 11-23 23:14「大号情侣副本两个账户在不同分支」）—— 本 job 是"占用方"
+  #   冷6(笑嘻了) 的伴侣是大号(一缕寒风)，所以这一对必然横跨两个分支：
+  #     · 本 job 需要冷6 当队员，冷6 的密码从 GAME_ACCOUNTS_JSON 取（secret 是仓库级，两分支共享）
+  #     · multi-boss 的 matrix 里也有冷6（它要跑 dawn 10 步 + 刷怪 6 小时）
+  #   两分支派发相差 3~6 秒，workflow run 之间没有 needs，concurrency 只作用在 job 级。
+  #   本 job 是"先用"的一方，多本那一侧靠时间闸门让路：
+  #     · 本 job 实测 396s + 22s ≈ 7 分钟；timeout 设 20 分钟（2.8 倍余量）→ **最晚 0:20 释放冷6**
+  #     · multi-boss 的 matrix 用 cross-branch-hold.js 把冷6 压到 **0:25** 才登录（5 分钟缓冲）
+  #   ★ 改这里的 timeout 必须同步改 multi-boss 的 CROSS_BRANCH_HOLD（那边按 20 分钟推的）。
+  #     改大的后果：冷6 在 0:25 被矩阵抢登录 → 两号互顶 → 当天次数被扣、奖没领。
+  #     改小的后果：只是本 job 更容易被砍，比撞号便宜，所以宁可小不可大。
+  couple:
+    runs-on: ubuntu-latest
+    # 时间窗口（06:00-08:59）由 qllm-daily.js 内部判，job 级不写第二份时间逻辑：
+    #   GitHub 表达式没有北京时区换算，硬算会形成两份口径。窗口判断放在下面的 `win` 步骤里，
+    #   直接调 qllm-daily.js 导出的 shouldRunCouple()，只有一个口径。
+    # ★ 25 分钟不是按实测 7 分钟随便压的（用户 11-23 23:37「刷不干净再跑一轮的冗余不考虑吗」）：
+    #   清怪有重试路径 —— clearRoom 每间最多 10 轮、moveBy 每方向重试 3 次、DFS 90 步上限、
+    #   单只怪最长 FIGHT_MAX_MS。qllm-run.js 已给清怪加了 CLEAR_BUDGET_MS（默认 20 分钟，
+    #   银锁死后到点就停手去领奖），所以最坏 = Setup 3 + 清怪 20 + 两段领奖 2 = 25 分钟。
+    #   COUPLES 配 N 对时改成 N×(20+2)+3+5。
+    timeout-minutes: 25
+    concurrency:
+      # ★ 与 multi-boss 的 couple job **不同名**（那边是 qllm-couple），两分支并行跑。
+      #   账号不重叠（本分支 大号+冷6，那边 冷0/1/2/8），并行不会互相顶号；
+      #   同名反而排队，把 06:00 这 50 分钟窗口串起来，白挤掉刷怪时间。
+      #   「情侣副本只能单实例」这条不变式指的是**同一对不能被并发操作**，不是所有对都得串行。
+      group: qllm-couple-master
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # 先判窗口再装依赖：四趟派发都会拉起本 job，只有 06:00 那趟该真跑。
+      - id: win
+        name: 判断是否在 06:00-08:59
+        run: |
+          ok=$(node -e "process.stdout.write(require('./qllm-daily.js').shouldRunCouple() ? 'yes' : 'no')")
+          echo "run=$ok" >> "$GITHUB_OUTPUT"
+          echo "情侣迷宫窗口=06:00-08:59 → 本趟[$ok]"
+
+      - name: Setup
+        if: steps.win.outputs.run == 'yes'
+        run: |
+          npm install
+          npx playwright install chromium
+
+      - name: 情侣迷宫（仅 06:00-08:59 那趟真跑）
+        env:
+          # 两个号的密码来源不同：大号走 GAME_PASSWORD（本分支唯一凭据），
+          # 队员冷6 走 GAME_ACCOUNTS_JSON 里的 password 字段。
+          # qllm-daily.js 的 passwordFor() 按账号分开取、再注入 GAME_PASSWORD_<账号>，
+          # 小号绝不回落到大号密码（单测有专门一条守着）。
+          GAME_PASSWORD: ${{ secrets.GAME_PASSWORD }}
+          GAME_ACCOUNTS_JSON: ${{ secrets.GAME_ACCOUNTS_JSON }}
+          # 大号(队长) + 冷6(队员，昵称 笑嘻了)：2026-11-23 本地实测 396s/+9 玫瑰
+          # ★ 顺序不能反（用户 11-23 23:24「需要由大号去刷怪」）：
+          #   qllm-run.js 的清怪（DFS 遍历 18 间房）全线走 LEADER 那个浏览器，队员只点「准备」+ 事后领奖。
+          #   所以队长必须是大号：160 级当队长 396s；冷6（134 级，攻击 854-1056、血池 7032）
+          #   比冷0 还弱，当队长要 700s+ 且更容易战死。
+          #   写反了 qllm-daily.js 会打 ::warning::（mainInMemberSlot 检查，单测有守卫）。
+          COUPLES: 'coldwind:coldwind6:笑嘻了'
+          # 属于 multi-boss 那一侧四个小号。本 job 万一被改到大号之外的配对（比如冷0+冷8），
+          # 会在登录之前被拒掉并 warning —— 那两个号此刻正被多本分支的 matrix/couple 使用。
+          QLLM_RESERVED: 'coldwind0,coldwind1,coldwind2,coldwind8'
+        if: steps.win.outputs.run == 'yes'
+        run: node qllm-daily.js
+
+      - name: Upload Screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qllm-screenshots-${{ github.run_id }}
+          path: "qllm-*.png"
+          if-no-files-found: ignore
+          compression-level: 6
+
   boss:
+    needs: couple
+    # couple 失败 / 超时不能把整天的大号流程带走：只要没被取消就照跑。
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     # GitHub **托管** runner 的 job 执行时间硬上限是 6 小时（360 分钟），timeout-minutes
     #   只能调低、调高不生效。farm 不再自己算时长，一直刷到 6 小时被砍为止（用户 11-23 20:00 定）。
@@ -34,10 +128,21 @@ jobs:
           npm install
           npx playwright install chromium
 
-      - name: 随机错峰
+      - name: 随机错峰 + 让 form 先组队
         # 攻城验证模式不需要错峰：不出航、不抢怪，直接登录拿结果
         if: ${{ inputs.gc_mode == '' }}
-        run: sleep $((RANDOM % 300))
+        env:
+          # 11:30 那趟让路：multi-boss 的 form job 要登大号组 5 人队，本 job 若同时登大号会互顶
+          # → 少一个队员（11-23 实测只组到 4/5）。
+          # 不再写「等到 11:40」这种钟点（用户 23:35：卡顿/排队会把钟点顶穿）：job-gate.js 直接查
+          # API，multi-boss 那个 run 里的 form job 结束了才放行。form 自己会重试到 3 轮（实测 3m40s，
+          # 全重试最坏约 11 分钟），所以「等它真结束」比猜时间更省：组得快就早走，组得慢就跟。
+          # 兜底 11:50 / 硬顶 11:55（= form job 的 25 分钟超时上限，也是 team5-form 的窗口末点）。
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          JOB_GATE: '*=multi-boss/form@11:50..11:55#11:25-11:59'
+        run: |
+          sleep $((RANDOM % 300))
+          node job-gate.js
 
       - name: Run Tasks
         env:
