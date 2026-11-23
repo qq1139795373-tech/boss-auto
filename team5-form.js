@@ -19,7 +19,7 @@
 //   CI 里两份来源都能拿到：secrets.GAME_ACCOUNT/GAME_PASSWORD=大号，secrets.GAME_ACCOUNTS_JSON=小号表。
 //
 // 用法（boss-auto 目录）：
-//   node team5-form.js                     组队并复核 5/5（仅在 11:15-11:45 北京时间执行）
+//   node team5-form.js                     组队并复核 5/5（仅在 11:15-11:55 北京时间执行，失败重试到 3 轮）
 //   TEAM5_FORCE=1 node team5-form.js       跳过时间窗口（本地验证用）
 //   DROP_MEMBERS=1 node team5-form.js      组完关掉 4 个队员，复核队伍是否还在（验证离线保留）
 // 退出码：0=5/5 成立（或不在窗口内主动跳过）；2=没组满 / 关键步骤失败
@@ -45,22 +45,34 @@ const NICK = {
 };
 const nickOf = (a) => NICK[a] || a;
 
-// ── 时间窗口：只在 11:15~11:45（北京时间）组队 ───────────────────────────────
+// ── 时间窗口：只在 11:15~11:55（北京时间）组队 ───────────────────────────────
 // 为什么要有这道闸门：这个 workflow 可能被别的派发误触发（0:00/06:00/18:00 那三趟不需要组队，
 // 而且 0:00 副本会拆队）。
 //
-// ★ 时间账（11-22 深夜定稿：派发时刻 11:30）：
-//   组队本体实测 165s，前置 CI 冷启动（checkout + setup-node + npm install + playwright install）
-//   90~180s → 从 form job 启动到 5/5 约 4.5~5.75 分钟。
-//   11:30 派发 → form 约 11:32~11:34 启动、11:35~11:38 到 5/5 → matrix 各号随后登录，
-//   加上各自 setup 与 0~299s 随机错峰，最早约 11:36、最晚约 11:44 跑到 index.js。
-//   对比旧的 11:50 派发：那时平均 11:55 才开打、到 12:30 只剩 35 分钟（11-20 实测 7/10）；
-//   现在可用 46~54 分钟，是「牺牲一点刷怪时间换 boss 次数」的取舍（用户 23:27 认可）。
-//   上限 11:45 只作误配保护：11:50 那种迟到派发直接跳过，不拿 boss 前几分钟换加成。
+// ★ 时间账（11-23 深夜按用户要求放宽：boss 时段 11:30-12:30 共 60 分钟，比原先算的宽裕）：
+//   组队本体实测 165s；失败重试最多 3 轮（见 TEAM5_ATTEMPTS），最坏 ~5 分钟；
+//   前置 CI 冷启动（checkout + setup-node + npm install + playwright install）90~180s。
+//   11:30 派发 → form 约 11:32~11:34 启动 → 11:35~11:38 到 5/5（重试全用完也不晚于 11:43）
+//   → matrix 各号登录 + 0~299s 随机错峰，最早 11:36、最晚 11:44 跑到 index.js。
+//   到 12:30 收摊，可用 46~54 分钟。
+//   上限放到 11:55 是为了「迟到派发也有救」：11:55 启动 → 约 11:58 组完 → 仍有 30 分钟打 boss，
+//   比直接放弃这一段加成划算。再晚（12:00 之后）就没意义了，所以窗口到 11:55 为止。
+//   11:45 那道旧上限作废（用户 11-23 23:03 指出中午时间宽裕，不必卡这么死）。
 //   账号互顶不是这条闸门的理由（任务串行、顶号只在特殊情况偶发；CI 各 runner 临时目录独立，
 //   acct-lock 对跨 runner 本来就无效）—— 这道闸门防的是「加成吃不全」。
 const WINDOW_START_MIN = 11 * 60 + 15;
-const WINDOW_END_MIN = 11 * 60 + 45;
+const WINDOW_END_MIN = 11 * 60 + 55;
+
+// 组队最多试几轮（含第一轮）。用户 11-23 23:03：失败重试两次，还不成才放着照打 boss。
+// 上限 5 是为了防止误配成很大的值把 form job 撑爆（job timeout 25 分钟兜底）。
+function envInt(v, dflt, lo, hi) {
+    const n = Number(String(v === undefined ? '' : v).trim());
+    if (!Number.isFinite(n)) return dflt;
+    const i = Math.trunc(n);
+    return i < lo || i > hi ? dflt : i;
+}
+const TEAM5_ATTEMPTS = envInt(process.env.TEAM5_ATTEMPTS, 3, 1, 5);
+const TEAM5_RETRY_PAUSE_MS = envInt(process.env.TEAM5_RETRY_PAUSE_MS, 5000, 0, 60000);
 
 function bjNow(nowMs) {
     const d = new Date(typeof nowMs === 'number' ? nowMs : Date.now());
@@ -246,7 +258,7 @@ async function main() {
     const { hour, min } = bjNow();
     const hhmm = `${hour}:${String(min).padStart(2, '0')}`;
     if (process.env.TEAM5_FORCE !== '1' && !shouldFormTeam()) {
-        console.log(`[team5] 北京时间 ${hhmm} 不在组队窗口 11:15-11:45，跳过（TEAM5_FORCE=1 可强制；11:45 之后才组，boss 前面几分钟的加成吃不到）`);
+        console.log(`[team5] 北京时间 ${hhmm} 不在组队窗口 11:15-11:55，跳过（TEAM5_FORCE=1 可强制；这趟不登录任何账号）`);
         return 0;
     }
 
@@ -362,39 +374,42 @@ async function main() {
             }
         }
     };
-    await inviteAll();
-
-    // 5) 队员从「邀请列表」同意
-    for (const a of invited) {
-        const r = await acceptInvite(P[a]);
-        log(a, `${nickOf(a)} 接受: ${r.ok ? 'ok' : 'failed'}`);
-        await sleep(1000);
-    }
-
-    // 6) 校验 5/5
-    await sleep(1500);
-    let panel = await teamPanelText(lead);
-    let n = await memberCount(lead);
-    log(LEADER_ACC, `【最终队伍】${panel.slice(0, 400)}`);
-    log(LEADER_ACC, `【人数】${n}/5　组队总用时 ${el()}s`);
-
-    // 6b) 不满 5 人 → 补一轮「重新邀请 + 再接受 + 再校验」，最多一轮
-    //     原来不满就直接 exit 2（2026-11-23 笑呵呵接受失败 → 4/5 → 整个 run 红叉），
-    //     但 boss 实际照打了（只少一个号加成），红叉纯属噪音、还掩盖真故障。
-    if (n < 5) {
-        log(LEADER_ACC, `不满 5 人（${n}/5）→ 补一轮邀请+接受`);
+    // 5) 每一轮：邀请 → 队员同意 → 复核人数。不满 5 人就再来一轮（默认 3 轮，可用环境变量调）。
+    //    重试能救的是「邀请没点到 / 队员接受慢」这类偶发失败；救不了「这个号正被另一条分支的
+    //    runner 登录着」——那种情况邀请列表里根本点不中，几轮都组不满，最后照常去打 boss。
+    let panel = '';
+    let n = 0;
+    for (let round = 1; round <= TEAM5_ATTEMPTS; round++) {
+        if (round > 1) {
+            // 两轮之间队伍可能散了（队员被判离线 / 队长被顶下线）→ 先确认队伍还在，不在就重建
+            const t = await teamPanelText(lead);
+            if (!t.includes('解散')) {
+                log(LEADER_ACC, `第 ${round} 轮前发现队伍已不在 → 重建`);
+                await clickHard(lead, '创建队伍', true);
+                await sleep(2600);
+                const ins2 = await lead.$$('input');
+                if (ins2.length) { await ins2[0].fill(TEAM).catch(() => { }); await sleep(500); }
+                await clickHard(lead, '确定', true);
+                await sleep(3000);
+            }
+        }
         invited.length = 0;
         await inviteAll();
         for (const a of invited) {
             const r = await acceptInvite(P[a]);
-            log(a, `${nickOf(a)} 接受(补): ${r.ok ? 'ok' : 'failed'}`);
+            log(a, `${nickOf(a)} 接受(第 ${round} 轮): ${r.ok ? 'ok' : 'failed'}`);
             await sleep(1000);
         }
-        await sleep(2000);
+        await sleep(1500);
         panel = await teamPanelText(lead);
         n = await memberCount(lead);
-        log(LEADER_ACC, `【补漏后队伍】${panel.slice(0, 400)}`);
-        log(LEADER_ACC, `【人数】${n}/5　组队总用时 ${el()}s`);
+        log(LEADER_ACC, `【第 ${round}/${TEAM5_ATTEMPTS} 轮队伍】${panel.slice(0, 300)}`);
+        log(LEADER_ACC, `【人数】${n}/5　累计 ${el()}s`);
+        if (n >= 5) break;
+        if (round < TEAM5_ATTEMPTS) {
+            log(LEADER_ACC, `不满 5 人 → ${Math.round(TEAM5_RETRY_PAUSE_MS / 1000)}s 后重试邀请`);
+            await sleep(TEAM5_RETRY_PAUSE_MS);
+        }
     }
     await lead.screenshot({ path: 'team5-final.png' }).catch(() => { });
 
@@ -418,7 +433,7 @@ async function main() {
     await browser.close();
     for (const a of all) acct.release(a);
     // 不足 5 人只告警、不红叉：boss 仍会照打（少几人加成而已），红叉要留给真故障。
-    if (n !== 5) console.log(`::warning::组队只到 ${n}/5（已补过一轮），boss 照打但少 ${5 - n} 人加成`);
+    if (n !== 5) console.log(`::warning::组队只到 ${n}/5（已试满 ${TEAM5_ATTEMPTS} 轮），boss 照打但少 ${5 - n} 人加成`);
     return 0;
 }
 
@@ -429,4 +444,4 @@ if (require.main === module) {
     });
 }
 // 只导出给单测用；被 require 时不会跑主流程
-module.exports = { shouldFormTeam, buildEnv, bjNow, WINDOW_START_MIN, WINDOW_END_MIN };
+module.exports = { shouldFormTeam, buildEnv, bjNow, envInt, TEAM5_ATTEMPTS, WINDOW_START_MIN, WINDOW_END_MIN };

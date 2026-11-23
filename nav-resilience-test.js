@@ -122,9 +122,12 @@ t('★ 不再「第 2 轮没按钮就直接 failed」', () => {
 t('点完要复核按钮是否真的消失（防假阳性 ok）', () => {
     assert.ok(/点击后按钮仍在（第 \$\{i \+ 1\} 轮），继续重试/.test(TEAM5), '没有「点击后复核」');
 });
-t('不满 5 人会补一轮邀请+接受', () => {
-    assert.ok(/不满 5 人（\$\{n\}\/5）→ 补一轮邀请\+接受/.test(TEAM5), '没有补漏');
-    assert.ok(/【补漏后队伍】/.test(TEAM5), '补漏后没有复核日志');
+t('不满 5 人会重试邀请（默认 3 轮，不是只补一次）', () => {
+    assert.ok(/for \(let round = 1; round <= TEAM5_ATTEMPTS; round\+\+\)/.test(TEAM5), '没有多轮重试循环');
+    assert.ok(/invited\.length = 0;/.test(TEAM5), '每轮没有重置邀请记录');
+    assert.ok(/后重试邀请/.test(TEAM5), '重试前没有等待与日志');
+    assert.ok(/【第 \$\{round\}\/\$\{TEAM5_ATTEMPTS\} 轮队伍】/.test(TEAM5), '每轮没有复核日志');
+    assert.ok(/第 \$\{round\} 轮前发现队伍已不在 → 重建/.test(TEAM5), '队伍散了不会重建');
 });
 t('★ 仍不足 5 人只告警不红叉（return 0）', () => {
     assert.ok(/::warning::组队只到 \$\{n\}\/5/.test(TEAM5), '没有 warning');

@@ -32,6 +32,12 @@ on:
         type: string
         default: ''
 
+# job-gate.js 要通过 REST API 查「另一个分支那个 run 里的 job 是否结束」，只需要 actions: read。
+# 显式声明而不是吃仓库默认值：默认值可能被仓库设置改成只读/只写，改了这边不会跟着坏。
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   prepare:
     runs-on: ubuntu-latest
@@ -65,14 +71,18 @@ jobs:
   #   顺序上 form 一结束 matrix 才开始 —— 串行，队伍必然先就绪。
   # 成对派发（master + multi-boss）会同时起两个 form：用同名 concurrency 组把两者串起来，
   #   第一个组完第二个才进来，那时队伍已是 5/5，team5-form.js 会直接复核退出、不拆重建。
-  # 0:00 / 06:00 / 18:00 这三趟也会把这个 job 拉起来：它会白装一次依赖（约 2 分钟），
-  #   然后被 team5-form.js 内部的时间窗口（11:15-11:45）判掉、exit 0 —— 不登录任何账号，纯浪费时间。
+  # 0:00 / 06:00 / 18:00 这三趟也会把这个 job 拉起来：它装完依赖才发现不在窗口（整个 job 约 17 秒，
+  #   11-23 18:00 趟实测：Setup 11s、组队那一步 0s、job 全程 16s），
+  #   然后被 team5-form.js 内部的时间窗口（11:15-11:45）判掉、exit 0 —— 不登录任何账号。
   #   之所以不在 job 级加 if 预判：GitHub 表达式没有北京时区换算，硬要算就得在 YAML 里重写一遍
   #   窗口逻辑，与脚本内的 shouldFormTeam 形成两份口径（不一致风险大于省下这 2 分钟）。
   form:
     needs: prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 组队本体 165s；失败重试到 3 轮（TEAM5_ATTEMPTS）最坏约 5 分钟；加冷启动 90~180s，
+    #   合计不超过 9 分钟。25 分钟是给「runner 特别慢 / 某一轮邀请卡住」留的余量。
+    #   超时被杀也不影响 boss：boss 的 needs 只等它结束，if: !cancelled() 让它照常开打。
+    timeout-minutes: 25
     concurrency:
       group: team5-form
       cancel-in-progress: false
@@ -111,9 +121,139 @@ jobs:
           if-no-files-found: ignore
           compression-level: 6
 
+  # ── 情侣迷宫（每日 1 次，必须两个号同时在线）──────────────────────────────────
+  # 为什么要一个独立 job、而不是塞进 matrix 里的某个号（11-23 定，详见 qllm-daily.js 头注释）：
+  #   matrix 是「每号一个 runner」，每个 runner 只持自己那个号的锁；acct-lock 在 CI 里对跨 runner 无效。
+  #   情侣迷宫要队长建队+进本清怪、队员点准备+事后领奖，两个号必须在同一个浏览器会话里。
+  #   塞进某个号的任务链，要么搭档那个号正被自己的 runner 占着，要么两边同时建队互相顶号。
+  #   所以照 form job 同一套：先用一个 runner 把两个号跑完，再 fanout 到 matrix —— 串行、零重叠。
+  # 时间窗口（0:00-2:59）由 qllm-daily.js 内部判，和 form 一样不在 job 级写 if：
+  #   GitHub 表达式没有北京时区换算，硬算会形成两份口径。代价是 11:30/18:00 那两趟会白跑一次
+  #   （装依赖 12s + 判窗口退出，整个 job 约 20 秒）然后退出，不登录任何账号。
+  # ★ 为什么情侣副本必须是独立 job、且必须排在 matrix 之前（用户 11-23 22:34 指出）
+  #   0:00 那趟 11 个任务里，副本分三类（用户 11-23 22:45 明确）：
+  #     · 单人本：基德宝藏、炼器窟 —— **不用组队**，代码里没有建队步骤，带着别人的队也照样进
+  #     · 多人本：奔月秘境、海盗王的诅咒 —— 要建队，但**自己一个人建队就能打**，
+  #       不用凑满 5 人（所以 tasks.js 里是「单号自建队单打」）
+  #     · 情侣本：情侣迷宫 —— **必须 2 人，且必须是已结为伴侣的两个号**，缺一不可
+  #   其余（签到/竞技场/镇妖塔/钓鱼/附魔/秘宝/每日）根本不碰队伍。
+  #   所以 1 个号对应 1 个 runner，号与号零耦合，谁都不抢谁。
+  #   情侣迷宫不同：它是双人本，**一个流程同时占住情侣双方两个号**（队长建队 → 邀请 →
+  #   队员在线接受并准备 → 两人同时在队才能进本）。塞进 matrix 必然被拆成两个 runner，
+  #   结果是两号各自建队、互相邀请不到、还会来回顶号。
+  #   所以把它提成 matrix 的前置 job：这一对两个号全跑完、两个浏览器都关掉，matrix 才启动。
+  #   隔离靠的就是下面 boss.needs 的顺序，**不是账号锁**——acct-lock.js 第 8-9 行写明
+  #   锁文件在各自 runner 的临时目录，跨 runner 完全无效。
+  #
+  #   ★ 关于 5 人队（用户 11-23 22:44 纠正两处）：世界 boss **打完不退队**，那支 5 人队
+  #   （目标是【一起战斗吧！】）会一直留到次日 0:00。多人本要求队伍目标是它自己
+  #   （【副本·奔月秘境】等），入口页会以「队伍目标不一致」挡下，所以建队前必须先解散
+  #   旧的 5 人队——**被拆的原因是目标对不上，不是人不够**（多人本自己一个人就能打）。
+  #   那支队使命已完成，拆它零损失，与情侣副本无关。真正需要 5 人队活着的只有
+  #   11:30 打 boss 那一刻，所以情侣副本放在 0:00、绝不放 11:30 前后。
+  #
+  #   ★ 三类副本里**只有「情侣」这一类必须两个人一起打**（用户 11-23 22:45 定）：
+  #   单人本（基德/炼器窟）一个人进；多人本（奔月/海盗王/温莎）自己建队自己打，
+  #   不用等别人；情侣本少一个人就进不去。所以整个 0:00 只有情侣迷宫是「一号动、另一号必须跟着动」。
+  #
+  #   ★★ 为什么整块搬到 06:00（用户 11-23 23:39「把情侣副本摘出来，加在 06:00 这个时段」）
+  #   上一版挂在 0:00，而 0:00 是四趟里**唯一「两个分支同时登号跑副本」**的时段，
+  #   三对伴侣的账号又是交叉的（qllm-couple-scan.json 实测）：
+  #     冷0(笑嘻L) ↔ 冷8(笑嘻嘻)      两个都在本分支的账号矩阵里
+  #     冷1(笑呵呵) ↔ 冷2(笑哈哈)      两个都在本分支的账号矩阵里
+  #     冷6(笑嘻了) ↔ 大号(一缕寒风)   **队员在本分支矩阵里，队长在 master 的 job 里**
+  #   跨分支没有 needs、concurrency 只作用在 job 级，只能靠「等对方 job 结束」错开 —— 而任何
+  #   写死的钟点都会被 runner 排队 / 游戏卡顿顶穿（用户 23:35「确定要卡这么死」）。
+  #   06:00 那趟 tasks_mode=skip，没有任何副本在跑，把情侣副本放这里：
+  #     · 两个分支各跑自己那对，账号不重叠（本分支 冷0/1/2/8，master 大号+冷6）→ 不需要时间闸门
+  #     · 06:00 离 11:30 有 5 个多小时，重试/卡顿都吃得下，不怕把后面那趟挤爆
+  #   唯一保留的闸门是 `coldwind6`：master 那对最坏会拖到 06:25（25 分钟 job 硬超时），
+  #   而本分支矩阵正常 06:30 才起 —— 极端情况下可能重叠，所以 matrix 里冷6 仍用 job-gate.js
+  #   去「查 master 的 couple job 是否真的结束」，而不是猜一个钟点。
+  #
+  #   ★ 为什么**不能**让 matrix 里每个号各跑一份（用户 23:17 问的，这条是错的实现）：
+  #     · acct-lock.js 的锁写在各自 runner 临时目录，跨 runner 完全无效
+  #     · concurrency 是 job 级，matrix 的 5 个副本属于同一个 job，不互斥
+  #     · 「剩余 N 次」只挡先后、挡不住同时：5 个 runner 会同时读到「剩余 1 次」，
+  #       同时建队同时邀请，互相顶掉会话，次数已扣而清怪/领奖全落空
+  #     结论：情侣副本在整个仓库必须「同时只有 1 个实例」，这是它必须独立成 job 的根本原因。
+  couple:
+    needs: prepare
+    runs-on: ubuntu-latest
+    # 每对实测：队长段 396~721s + 队员领奖 20~90s ≈ 7~13.5 分钟。
+    # ★ 本分支跑 **2 对**，但超时不能只按实测算 —— 清怪有重试路径（用户 23:37 提醒）：
+    #   clearRoom 每间最多 10 轮、moveBy 每方向重试 3 次、DFS 90 步上限、单只怪最长 FIGHT_MAX_MS。
+    #   qllm-run.js 现在给清怪阶段加了 CLEAR_BUDGET_MS（默认 20 分钟/对，银锁死后到点就停手去领奖），
+    #   所以一对的最坏耗时 = Setup 3 + 清怪预算 20 + 两段领奖 2 ≈ 25 分钟。
+    #   2 对 = 50 分钟。公式：N×(20+2)+3+5。加对时按这个改，否则后面的对会被硬超时砍掉。
+    #   冷6 那对不在本分支（它是大号的伴侣，归 master 的 couple job）。
+    timeout-minutes: 50
+    concurrency:
+      # ★ 与 master 的 couple job **不同名**（那边是 qllm-couple-master），两分支并行。
+      #   两边的账号不重叠（本分支冷0/1/2/8，master 大号+冷6），并行不会互相顶号；
+      #   同名反而会排队，把 06:00 这 50 分钟的窗口白白串起来，挤掉刷怪时间。
+      #   「情侣副本只能单实例」指的是**同一对不能被并发操作**，不是所有对都得串行。
+      group: qllm-couple
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # ★ 先判窗口再装依赖：这个 job 在四趟派发里都会启动，只有 06:00 那趟该真跑。
+      #   不判的话另外三趟要白装一次依赖（11-23 实测约 15 秒），而 boss 的 needs 里有本 job
+      #   → 那 15 秒会直接压到 matrix 的启动时刻上，白等不如省掉。
+      #   判定源用 qllm-daily.js 导出的 shouldRunCouple()，不在这里重写一份口径（避免两处不一致）。
+      - id: win
+        name: 判断是否在 06:00-08:59
+        run: |
+          ok=$(node -e "process.stdout.write(require('./qllm-daily.js').shouldRunCouple() ? 'yes' : 'no')")
+          echo "run=$ok" >> "$GITHUB_OUTPUT"
+          echo "情侣迷宫窗口=06:00-08:59 → 本趟[$ok]"
+
+      - name: 校验账号表（每项必须有 account + password）
+        if: steps.win.outputs.run == 'yes'
+        env:
+          JSON: ${{ secrets.GAME_ACCOUNTS_JSON }}
+        run: node accounts-json-check.js
+
+      - name: Setup
+        if: steps.win.outputs.run == 'yes'
+        run: |
+          npm install
+          npx playwright install chromium
+
+      - name: 情侣迷宫（仅 06:00-08:59 那趟真跑）
+        env:
+          # 两个号的密码都由 qllm-daily.js 从账号表里查，再注入 GAME_PASSWORD_<账号>，
+          # 这里不需要 GAME_ACCOUNT/GAME_PASSWORD（那两个是单号流程用的）
+          GAME_ACCOUNTS_JSON: ${{ secrets.GAME_ACCOUNTS_JSON }}
+          # 本分支负责两对（用户 11-23 23:21 明确：5 个小号里 4 个组成两队，剩下冷6 跟大号走）：
+          #   冷0(笑嘻L) + 冷8(笑嘻嘻)   实测 690s
+          #   冷1(笑呵呵) + 冷2(笑哈哈)  实测 721s
+          # vars.QLLM_COUPLES 设了就用它（临时换对/加对不用改代码），没设就是这两对。
+          COUPLES: "${{ vars.QLLM_COUPLES || 'coldwind0:coldwind8:笑嘻嘻,coldwind1:coldwind2:笑哈哈' }}"
+          # 属于 master 分支那一对的号：大号跑 dawn 11 步、冷6 陪大号打情侣副本，都不归本分支。
+          # 本 job 万一被配到这两号会直接跳过该对并 warning（见 qllm-daily.js 的 reservedHits）。
+          QLLM_RESERVED: 'coldwind,coldwind6'
+        if: steps.win.outputs.run == 'yes'
+        run: node qllm-daily.js
+
+      - name: Upload Screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qllm-screenshots-${{ github.run_id }}
+          path: "qllm-*.png"
+          if-no-files-found: ignore
+          compression-level: 6
+
   boss:
-    needs: [prepare, form]
+    needs: [prepare, form, couple]
     # form 组不满 / 装依赖失败，不能让整趟 boss 白丢：只要账号表校验过了、且没被取消，就照打（只是没加成）。
+    # couple 同理：情侣迷宫失败不该拖累当天的 boss 和刷怪。
     if: ${{ !cancelled() && needs.prepare.result == 'success' }}
     runs-on: ubuntu-latest
     # GitHub **托管** runner 的 job 执行时间硬上限是 6 小时（360 分钟），timeout-minutes
@@ -142,10 +282,24 @@ jobs:
           npm install
           npx playwright install chromium
 
-      - name: 随机错峰
+      - name: 随机错峰 + 跨分支避让
         # 攻城验证模式不需要错峰：不出航、不抢怪，各号同时登录反而更快拿到结果
+        # （避让也一起跳过：gc_mode 下不跑 dawn 链，不碰情侣副本）
         if: ${{ inputs.gc_mode == '' }}
-        run: sleep $((RANDOM % 300))
+        env:
+          # 冷6 的伴侣是大号，那对由 master 的 couple job 在 06:00 打。
+          # 这里不再写「等到几点」——写死的钟点会被 runner 排队和游戏卡顿顶穿（用户 23:35）。
+          # job-gate.js 直接查 GitHub API：master 那个 run 里的 couple job 结束了才放行。
+          #   正常路径：master 那对 06:01~06:08 就跑完，本矩阵 06:30 起来时早就 done → 零等待
+          #   极端路径：master 那对拖到 25 分钟硬超时（06:25），仍然 done 之后才放行 → 不会撞号
+          #   观测失效（没 token / 网络）：退回兜底钟点 06:55（= 25 分钟硬顶 + 30 分钟排队余量）
+          #   硬顶 07:05：连兜底都过了还在跑就带告警放行，不能让冷6 的 dawn 无限期等着
+          # 窗口 06:00-07:10 之外（0:00 / 11:30 / 18:00 三趟）立即返回，不会卡住
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          JOB_GATE: 'coldwind6=master/couple@06:55..07:05#06:00-07:10'
+        run: |
+          sleep $((RANDOM % 300))
+          node job-gate.js
 
       - name: Run Tasks
         env:
