@@ -19,9 +19,9 @@ on:
 jobs:
   boss:
     runs-on: ubuntu-latest
-    # 420 而不是 360（11-22）：farm 改成「刷到下一个派发节点前 5 分钟」自动收尾，
-    # 11:30 那趟刷到 17:55 = 派发后 6 小时 25 分，360 分钟会在 17:30 把它砍成 failure。
-    timeout-minutes: 420
+    # GitHub **托管** runner 的 job 执行时间硬上限是 6 小时（360 分钟），timeout-minutes
+    #   只能调低、调高不生效。farm 不再自己算时长，一直刷到 6 小时被砍为止（用户 11-23 20:00 定）。
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
 
