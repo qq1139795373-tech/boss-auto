@@ -22,10 +22,11 @@ function envNum(name, def) {
 //   「我就玩一会儿，比如30分钟就下线了，如果不设定自愈，那本次工作流后面任务比如刷野怪不就不会跑了？」）
 //   - 派发窗口内被顶 → 是另一趟 CI 的交接信号 → 立刻退场（不能重登抢号，否则双方互顶）
 //   - 窗口外被顶   → 用户手动登录在玩 → 每 USER_OCCUPY_WAIT_MIN 分钟试一次接管，最多 USER_OCCUPY_TRIES 轮
-//   间隔取 20 分钟的理由：每次重登都会把在玩的人挤下线，间隔太短会反复打断用户；
-//   3 轮共 1 小时，足够覆盖「玩一会儿就下线」。两个值都可用环境变量覆盖。
-const USER_OCCUPY_WAIT_MIN = envNum('FARM_USER_WAIT_MIN', 20);
-const USER_OCCUPY_TRIES = envNum('FARM_USER_WAIT_TRIES', 3);
+//   为什么第一轮就等 35 分钟：farm 每次重登都会把在玩的人挤下线，等待太短会反复打断。
+//   用户举的例子是「玩 30 分钟就下线」，35 分钟探第一次正好落在他下线之后，全程不打断他；
+//   2 轮共 70 分钟，覆盖「玩一小时以内」。两个值都可用环境变量覆盖，想让出更多时间就调大。
+const USER_OCCUPY_WAIT_MIN = envNum('FARM_USER_WAIT_MIN', 35);
+const USER_OCCUPY_TRIES = envNum('FARM_USER_WAIT_TRIES', 2);
 
 // 刷怪时长：不设。一直刷到 GitHub 托管 runner 的 job 6 小时硬上限把进程杀掉为止
 //   （用户 11-23 20:00：「刷野怪不用设定多少分钟，工作流会自动达到上限6小时而停止」）。
