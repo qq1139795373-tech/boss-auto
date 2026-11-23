@@ -104,17 +104,20 @@ function parseCouples(spec) {
 //     冷6(笑嘻了) ↔ 大号(一缕寒风)  **队员在 multi-boss 的矩阵里，队长在 master 的 job 里**
 //   所以大号那一对必然横跨两个分支：master 的 couple job 要登冷6，multi-boss 的 matrix 也要登冷6。
 //   两个 workflow run 之间没有 needs（跨 run 不存在依赖），concurrency 又只作用在 job 级
-//   （而且两边 group 名不同），**没有任何机制能让其中一个等另一个**。
+//   （而且两边 group 名不同），工作流层面没有任何机制能让其中一个等另一个。
 //
-//   现有两道闸门配合使用：
-//     ① 时间闸门（cross-branch-hold.js，在 multi-boss 的 matrix 里）：
-//        冷6 在 0:25 之前不登录，等 master 的 couple（20 分钟硬超时）先跑完释放。
-//     ② 配置闸门（就是下面这两个函数）：本 job 的 COUPLES 里只要出现「不属于本分支」的账号，
-//        直接拒绝该对并 warning，不登录。
-//   ② 是兜底，为什么必须有：① 依赖 CROSS_BRANCH_HOLD 写对。万一有人把 multi-boss 的 COUPLES
-//   改成大号那一对（'coldwind:coldwind6'），① 里 coldwind 不在 hold 规格中就立即放行，
-//   于是两个分支同时登大号 → 顶号 → **当天次数被扣、奖没领**（这是最贵的失败，比报错糟得多）。
-//   ② 能在登录之前把这种误配拦住。
+//   ★ 11-23 23:39 起，这个问题从排期上化解了（用户「把情侣副本摘出来，加在 06:00 这个时段」）：
+//     06:00 那趟 tasks_mode=skip，没有别的副本在跑，两个分支各跑自己那对、账号不重叠，
+//     所以**不需要再靠「等到几点」这种钟点闸门**（那种闸门会被 runner 排队、游戏卡顿顶穿）。
+//     只剩两处兜底：
+//       ① job-gate.js（在 multi-boss 的 matrix 里）：冷6 起手查 API，等 master 的 couple job
+//          真的 completed 才登录 —— 事件驱动，对方慢多久就等多久，不猜时间。
+//       ② 配置闸门（就是下面这两个函数）：本 job 的 COUPLES 里只要出现「不属于本分支」的账号，
+//          直接拒绝该对并 warning，不登录。
+//   ② 为什么必须有：① 依赖「能观测到对方 job 状态」；万一有人把 multi-boss 的 COUPLES 改成
+//   大号那一对（'coldwind:coldwind6'），① 观测的是 master/couple，根本不知道这边也要登大号，
+//   于是两个分支同时登大号 → 顶号 → **当天次数被扣、奖没领**（最贵的失败，比报错糟得多）。
+//   ② 只看账号名，能在登录之前把这种误配拦住。
 //
 //   为什么不能干脆让 matrix 里每个号各跑一份（用户 23:17 问的）：
 //     · acct-lock.js 的锁在各自 runner 的临时目录里，跨 runner 完全无效；
