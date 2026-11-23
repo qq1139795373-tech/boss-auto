@@ -1,12 +1,32 @@
 const { chromium } = require('playwright');
 // 副本内自恢复（先扫荡/领奖再退本）
 const drain = require('./dungeon-recover.js');
+// 被顶号时判断「占用方是另一趟 CI 还是用户手动登录」——见 dispatch-window.js 头注释
+const { isNearDispatch, DISPATCH_WINDOW_MIN } = require('./dispatch-window.js');
 
 const ACCOUNT = process.env.GAME_ACCOUNT;
 const PASSWORD = process.env.GAME_PASSWORD;
 // 农场固定去广州沙滩打经验妖灵（11-09 起小号也走广州，不再去杭州西湖）
 const NAV_DEST = '广州';
 const NAV_REGION = '东亚';
+
+// 读正整数环境变量，非法值（空/NaN/≤0）回退默认值 —— 上一次 FARM_MAX_MIN 传 NaN 就吃过大亏
+function envNum(name, def) {
+    const raw = process.env[name];
+    if (raw === undefined || String(raw).trim() === '') return def;
+    const v = Number(raw);
+    return Number.isFinite(v) && v > 0 ? v : def;
+}
+
+// 被「用户手动登录」占号时的等待策略（2026-11-23 20:11 用户提问：
+//   「我就玩一会儿，比如30分钟就下线了，如果不设定自愈，那本次工作流后面任务比如刷野怪不就不会跑了？」）
+//   - 派发窗口内被顶 → 是另一趟 CI 的交接信号 → 立刻退场（不能重登抢号，否则双方互顶）
+//   - 窗口外被顶   → 用户手动登录在玩 → 每 USER_OCCUPY_WAIT_MIN 分钟试一次接管，最多 USER_OCCUPY_TRIES 轮
+//   间隔取 20 分钟的理由：每次重登都会把在玩的人挤下线，间隔太短会反复打断用户；
+//   3 轮共 1 小时，足够覆盖「玩一会儿就下线」。两个值都可用环境变量覆盖。
+const USER_OCCUPY_WAIT_MIN = envNum('FARM_USER_WAIT_MIN', 20);
+const USER_OCCUPY_TRIES = envNum('FARM_USER_WAIT_TRIES', 3);
+
 // 刷怪时长：不设。一直刷到 GitHub 托管 runner 的 job 6 小时硬上限把进程杀掉为止
 //   （用户 11-23 20:00：「刷野怪不用设定多少分钟，工作流会自动达到上限6小时而停止」）。
 //   之前那两套预算（「刷到下一个派发节点前 5 分钟」farm-budget.js、「job 起跑 + 355 分钟」）
@@ -859,17 +879,63 @@ async function run() {
 
             // 不再有「到点主动收尾」：刷怪不限时长，由 job 6 小时硬上限终止进程。
 
-            // 账号被接管（退回登录页）→ 直接结束本趟，不再重登抢号。
-            // 触发场景：下一趟派发已经起跑并登录了同一个号（例如 06:00 趟刷到 11:30 被 11:30 趟的
-            //   组队顶掉），或用户手动登录在玩。
-            // 为什么不能「让位 30 分钟再重登」（原逻辑）：对方在持续占号时，本趟重登会把对方顶掉，
-            //   对方也让位再重登，双方来回抢，两个 run 的有效刷怪时间都被切碎。
-            // 所以把「被顶」当成交接信号：立刻退场，把号完整交给对方。
-            // 代价：真实掉线（会话超时）也会退场、本趟少刷；实测连续刷 5~6 小时未出现自然掉线。
+            // 账号被接管（退回登录页）→ 先判断是谁占的号，两类必须走相反动作。
+            //   a) 被顶时刻距最近派发点 ≤ DISPATCH_WINDOW_MIN → 另一趟 CI 刚起跑并登录了同一个号
+            //      （如 06:00 趟刷到 11:30 被 11:30 趟的组队顶掉）→ 立刻退场，把号完整交给对方。
+            //      为什么不能重登：对方在持续占号，本趟一登就把它顶掉，它也重登，双方来回抢，
+            //      两趟 run 的有效时间都被切碎。
+            //   b) 窗口外 → 用户手动登录在玩 → 阶梯重登等他下线，不能直接退场。
+            //      用户 11-23 20:11：「我就玩一会儿，比如30分钟就下线了，那刷野怪不就不会跑了？」
+            //      直接退场会把整趟 5~6 小时的刷怪废掉，只因为用户玩了半小时。
             if (pageText.includes('请输入账号密码') || (pageText.includes('已保存账号') && pageText.includes('请输入密码'))) {
-                console.log(`账号被接管(退回登录页)：已打 ${count} 次、运行 ${Math.round((Date.now() - loopStart) / 60000)} 分钟，本趟立即结束，把号交给下一趟/手动登录`);
+                const mins = Math.round((Date.now() - loopStart) / 60000);
                 await page.screenshot({ path: 'farm-offline.png' }).catch(() => {});
-                diag('账号被接管（退回登录页），主动退场', 0);
+
+                if (isNearDispatch(Date.now())) {
+                    console.log(`账号被接管(退回登录页)：已打 ${count} 次、运行 ${mins} 分钟。距派发点 ≤ ${DISPATCH_WINDOW_MIN} 分钟 → 判定为下一趟 CI 交接，本趟立即退场`);
+                    diag('账号被接管（派发窗口内，CI 交接），主动退场', 0);
+                    break;
+                }
+
+                console.log(`账号被接管(退回登录页)：已打 ${count} 次、运行 ${mins} 分钟。不在派发窗口内 → 判定为手动登录占用，每 ${USER_OCCUPY_WAIT_MIN} 分钟尝试接管一次（最多 ${USER_OCCUPY_TRIES} 轮）`);
+                let resumed = false;
+                let exitByWindow = false;
+                for (let i = 1; i <= USER_OCCUPY_TRIES; i++) {
+                    await sleep(USER_OCCUPY_WAIT_MIN * 60000);
+                    // 等待期间可能已经进入下一趟派发窗口：这时必须让位，不能把 CI 的号顶掉
+                    if (isNearDispatch(Date.now())) {
+                        console.log(`等待第 ${i} 轮期间进入派发窗口（距派发点 ≤ ${DISPATCH_WINDOW_MIN} 分钟），放弃接管、让位退场`);
+                        exitByWindow = true;
+                        break;
+                    }
+                    console.log(`手动占用等待第 ${i}/${USER_OCCUPY_TRIES} 轮：尝试重新登录...`);
+                    if (!(await relogin(page))) {
+                        console.log(`第 ${i} 轮重登失败（页面打不开），继续等`);
+                        continue;
+                    }
+                    pageText = await getPageText(page);
+                    if (pageText.includes('请输入账号密码')) {
+                        console.log(`第 ${i} 轮仍被占用（对方还在线），继续等`);
+                        continue;
+                    }
+                    // 登进去了：先确保回到广州打怪点（重登可能落在别的城市，见 coldwind8 事故）
+                    if (!(await recoverToBeach())) {
+                        console.log(`第 ${i} 轮已登录但回不到打怪点，继续等`);
+                        if (healFails >= 3) break;      // recoverToBeach 里已 ::error:: + diag(…, 1)
+                        continue;
+                    }
+                    resumed = true;
+                    break;
+                }
+                if (resumed) {
+                    lastCountAt = Date.now();
+                    console.log(`已接管账号，恢复刷怪（累计已打 ${count} 次）`);
+                    continue;
+                }
+                if (healFails >= 3) break;
+                diag(exitByWindow
+                    ? '等待手动占用期间进入派发窗口，让位退场'
+                    : `手动占用超过 ${USER_OCCUPY_TRIES} 轮（约 ${USER_OCCUPY_TRIES * USER_OCCUPY_WAIT_MIN} 分钟），主动退场`, 0);
                 break;
             }
 
