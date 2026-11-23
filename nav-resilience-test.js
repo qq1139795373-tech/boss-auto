@@ -78,13 +78,13 @@ t('存在 ensureGuangzhou（跨城：出航 → 传送兜底 → 严格校验）
     assert.ok(/await sailFlow\(page\)/.test(body.slice(0, 2000)), 'ensureGuangzhou 里没有出航');
     assert.ok(/await teleportToDest\(page\)/.test(body.slice(0, 2000)), 'ensureGuangzhou 里没有传送兜底');
 });
-t('★ 唯一自愈路径（10 分钟无击杀）仍先过 ensureGuangzhou 再走沙滩', () => {
-    // 掉线路径 2026-11-23 改成「被顶即退场」，不再自愈；只剩「10 分钟无击杀」这一条
+t('★ 两条路径（被顶后接管、10 分钟无击杀）都先过 ensureGuangzhou 再走沙滩', () => {
+    // 掉线路径 2026-11-23 20:11 起改成「窗口外阶梯重登、重登后同样要回广州」，所以也是调 recoverToBeach
     assert.ok(/async function recoverToBeach\(\)/.test(FARM), '没有 recoverToBeach');
     assert.ok(!/if \(!pageText\.includes\('经验妖灵'\)\) await gotoBeach\(page\)\.catch\(\(\) => false\);/.test(FARM),
         '还有自愈路径直接调 gotoBeach（外地城市必然失败）');
     const calls = (FARM.match(/await recoverToBeach\(\)/g) || []).length;
-    assert.strictEqual(calls, 1, `recoverToBeach 应只在「10 分钟无击杀」自愈里调一次，实际 ${calls} 次`);
+    assert.strictEqual(calls, 2, `recoverToBeach 应被两条路径各调一次，实际 ${calls} 次`);
 });
 t('recoverToBeach 内先 ensureGuangzhou 再 gotoBeach', () => {
     const body = FARM.slice(FARM.indexOf('async function recoverToBeach()'));
@@ -95,7 +95,8 @@ t('recoverToBeach 内先 ensureGuangzhou 再 gotoBeach', () => {
 t('连续 3 次自愈失败 → diag 报错并停手（不再空转到 job 被杀）', () => {
     assert.ok(/if \(healFails >= 3\) \{\n\s*console\.log\(`::error::farm 连续 3 次自愈失败/.test(FARM), '没有 3 次停手');
     const breaks = (FARM.match(/if \(healFails >= 3\) break;/g) || []).length;
-    assert.strictEqual(breaks, 1, `自愈停手应只有 1 处（掉线已改为退场），实际 ${breaks} 处`);
+    // 被顶接管循环：跳出 for + 跳出 while 各一处；「10 分钟无击杀」自愈一处 → 共 3 处
+    assert.strictEqual(breaks, 3, `自愈停手应有 3 处（接管循环内外 + 10 分钟无击杀），实际 ${breaks} 处`);
 });
 t('击杀成功会清零 healFails（相隔很远的偶发失败不该累加）', () => {
     assert.ok(/count\+\+;\n\s*healFails = 0;/.test(FARM), '击杀后没有清零');
@@ -131,16 +132,37 @@ t('★ 仍不足 5 人只告警不红叉（return 0）', () => {
 });
 }
 
-console.log('\n[7] 被顶号即退场（2026-11-23：刷怪不设时长，用「被顶」做任务交接信号）');
-t('★ farm 不再「让位 30 分钟再重登」', () => {
+console.log('\n[7] 被顶号：派发窗口内退场、窗口外等用户下线（2026-11-23 20:11 第二轮修正）');
+t('★ 不再有「让位 30 分钟再重登」那套旧状态机', () => {
     assert.ok(!/RELOGIN_WAIT_MS/.test(FARM), '还留着让位常量');
     assert.ok(!/满\d+分钟再重登/.test(FARM), '还留着让位日志');
     assert.ok(!/kickedAt/.test(FARM), '还留着让位状态变量');
 });
-t('★ 退回登录页直接结束本趟（diag 0 + break，run 保持绿）', () => {
-    assert.ok(/账号被接管\(退回登录页\)/.test(FARM), '没有退场日志');
-    assert.ok(/diag\('账号被接管（退回登录页），主动退场', 0\)/.test(FARM), '退场没走 diag(…, 0)');
-    assert.ok(/主动退场', 0\);\s*\n\s*break;/.test(FARM), '退场后没有 break');
+t('★ 派发窗口内被顶 → diag(…, 0) + break 退场（run 保持绿，不抢 CI 的号）', () => {
+    assert.ok(/isNearDispatch\(Date\.now\(\)\)/.test(FARM), '没有调用 isNearDispatch');
+    assert.ok(/判定为下一趟 CI 交接，本趟立即退场/.test(FARM), '没有 CI 交接日志');
+    assert.ok(/diag\('账号被接管（派发窗口内，CI 交接），主动退场', 0\);\s*\n\s*break;/.test(FARM),
+        'CI 交接退场没有 diag(…, 0) + break');
+});
+t('★ 窗口外被顶 → 阶梯重登接管（直接退场会让用户玩半小时就废掉整趟刷怪）', () => {
+    assert.ok(/const USER_OCCUPY_WAIT_MIN = envNum\('FARM_USER_WAIT_MIN', 20\)/.test(FARM), '没有等待间隔常量');
+    assert.ok(/const USER_OCCUPY_TRIES = envNum\('FARM_USER_WAIT_TRIES', 3\)/.test(FARM), '没有轮次常量');
+    assert.ok(/for \(let i = 1; i <= USER_OCCUPY_TRIES; i\+\+\)/.test(FARM), '没有阶梯重登循环');
+    assert.ok(/await sleep\(USER_OCCUPY_WAIT_MIN \* 60000\)/.test(FARM), '等待没有用 USER_OCCUPY_WAIT_MIN');
+    assert.ok(/已接管账号，恢复刷怪/.test(FARM), '没有接管成功的日志');
+});
+t('★ 等待期间进入派发窗口立刻让位（不能把 CI 正在用的号顶掉）', () => {
+    assert.ok(/等待第 \$\{i\} 轮期间进入派发窗口/.test(FARM), '等待循环里没有再判一次派发窗口');
+    assert.ok(/exitByWindow = true;/.test(FARM), '没有 exitByWindow 标记');
+});
+t('★ dispatch-window.js 确实被 require 且文件在（防止漏入库导致 CI Cannot find module）', () => {
+    assert.ok(/require\('\.\/dispatch-window\.js'\)/.test(FARM), '没有引入 dispatch-window');
+    assert.ok(fs.existsSync(path.join(__dirname, 'dispatch-window.js')), 'dispatch-window.js 不存在');
+    assert.ok(fs.existsSync(path.join(__dirname, 'dispatch-window-test.js')), 'dispatch-window-test.js 不存在');
+});
+t('两个 env 覆盖都做了非法值兜底（NaN / ≤0 回退默认）', () => {
+    assert.ok(/Number\.isFinite\(v\) && v > 0 \? v : def/.test(FARM), 'envNum 没有兜底');
+    assert.ok(/String\(raw\)\.trim\(\) === ''/.test(FARM), '没有把空串当未设置');
 });
 t('「10 分钟无击杀」自愈仍保留重登（这条不是被顶，不能一起删）', () => {
     assert.ok(/连续10分钟无击杀/.test(FARM), '自愈分支被误删');
