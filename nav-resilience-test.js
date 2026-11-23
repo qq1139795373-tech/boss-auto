@@ -145,8 +145,8 @@ t('★ 派发窗口内被顶 → diag(…, 0) + break 退场（run 保持绿，�
         'CI 交接退场没有 diag(…, 0) + break');
 });
 t('★ 窗口外被顶 → 阶梯重登接管（直接退场会让用户玩半小时就废掉整趟刷怪）', () => {
-    assert.ok(/const USER_OCCUPY_WAIT_MIN = envNum\('FARM_USER_WAIT_MIN', 20\)/.test(FARM), '没有等待间隔常量');
-    assert.ok(/const USER_OCCUPY_TRIES = envNum\('FARM_USER_WAIT_TRIES', 3\)/.test(FARM), '没有轮次常量');
+    assert.ok(/const USER_OCCUPY_WAIT_MIN = envNum\('FARM_USER_WAIT_MIN', 35\)/.test(FARM), '没有等待间隔常量');
+    assert.ok(/const USER_OCCUPY_TRIES = envNum\('FARM_USER_WAIT_TRIES', 2\)/.test(FARM), '没有轮次常量');
     assert.ok(/for \(let i = 1; i <= USER_OCCUPY_TRIES; i\+\+\)/.test(FARM), '没有阶梯重登循环');
     assert.ok(/await sleep\(USER_OCCUPY_WAIT_MIN \* 60000\)/.test(FARM), '等待没有用 USER_OCCUPY_WAIT_MIN');
     assert.ok(/已接管账号，恢复刷怪/.test(FARM), '没有接管成功的日志');
