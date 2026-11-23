@@ -2,7 +2,7 @@
 //
 // 除了「当前模型无重叠」，还必须证明**审计器真的能抓到问题**——
 // 一个永远返回「无冲突」的检查器等于没检查（假阴性比假阳性更危险）。
-// 所以下面有一组「证伪」用例：把 form-hold / cross-branch-hold 拿掉，必须报出冲突。
+// 所以下面有一组「证伪」用例：把 job-gate 的等待拿掉，必须报出冲突。
 //
 // 用法：node conflict-audit-test.js
 const assert = require('assert');
@@ -59,12 +59,12 @@ t('每个号每天都被用到（没有漏配的号）', () => {
 
 console.log('[conflict-audit] ★ 证伪：把隔离手段拿掉，审计器必须报出冲突');
 
-t('★ 去掉 form-hold（大号 11:30 立刻登）→ 必须报 form 与大号的冲突', () => {
+t('★ 去掉 job-gate（大号 11:30 立刻登）→ 必须报 form 与大号的冲突', () => {
     const jobs = withPatched({
         'master/boss': {
             from: (d) => {
                 if (d === 0) return audit.SETUP_WORST + audit.MASTER_COUPLE + 0.2;
-                return 0.3;      // ← 去掉 form-hold
+                return 0.3;      // ← 去掉 job-gate
             },
         },
     });
@@ -72,7 +72,7 @@ t('★ 去掉 form-hold（大号 11:30 立刻登）→ 必须报 form 与大号�
     assert.ok(c.some((x) => x.acc === 'coldwind'), '审计器没发现「大号被 form 和 boss 同时登录」');
 });
 
-t('★ 去掉冷6 避让 → 必须报冷6 的冲突（两边同时出故障的最坏组合）', () => {
+t('★ 去掉冷6 闸门 → 必须报冷6 的冲突（两边同时出故障的最坏组合）', () => {
     // 冷6 真正危险的不是「两边都正常」（正常时 matrix 要 34.9 分钟才登，master 早完了），
     // 而是下面这个组合，两道故障叠在一起：
     //   · master 那对卡住跑满 25 分钟硬超时（06:03~06:28）
