@@ -116,12 +116,9 @@ jobs:
     # form 组不满 / 装依赖失败，不能让整趟 boss 白丢：只要账号表校验过了、且没被取消，就照打（只是没加成）。
     if: ${{ !cancelled() && needs.prepare.result == 'success' }}
     runs-on: ubuntu-latest
-    # 420 而不是 360（11-22 改）：farm.js 现在刷到「下一个派发节点前 5 分钟」才收尾。
-    # farm 是 boss 一结束就起跑（Run Farm 紧接 Run Boss，无固定等待）；11:30 派发这趟 boss 10 次挑战
-    # 每次 30 秒冷却（index.js），加上错峰最晚 11:44 开打，实际起跑在 11:42~11:50 之间、17:55 收尾，
-    # 最长 = 派发后约 6 小时 25 分；360 分钟会在 17:30 把它砍成 failure。
-    # 420 覆盖所有趟的最长值（18:00 那趟到 23:55、0:00 那趟到 5:55 都远在范围内）。
-    timeout-minutes: 420
+    # GitHub **托管** runner 的 job 执行时间硬上限是 6 小时（360 分钟），timeout-minutes
+    #   只能调低、调高不生效。farm 不再自己算时长，一直刷到 6 小时被砍为止（用户 11-23 20:00 定）。
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:

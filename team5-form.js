@@ -208,17 +208,24 @@ async function inviteOne(page, name) {
 async function acceptInvite(page) {
     await openTeam(page);
     await tab(page, '邀请列表');
-    for (let i = 0; i < 3; i++) {
+    // 2026-11-23 修：原来 3 轮、且「第 2 轮还没按钮就直接 failed」，有效等待只有 1.8 秒。
+    // 实测笑呵呵（coldwind1）在第 2 轮没读到「同意」→ 判 failed → 队伍 4/5 → 整个 job exit 2 红叉。
+    // 邀请列表是异步拉的，晚一两秒很正常 → 改成 6 轮 × 2 秒，并且点完要复核「按钮是否真的消失」，
+    // 避免点了没生效也返回 ok（假阳性比失败更糟：会让人以为 5/5 已经成立）。
+    for (let i = 0; i < 6; i++) {
         const ls = await leaves(page);
         const agree = ls.filter((l) => ['同意', '接受', '确认'].includes(l.t)).sort((a, b) => a.a - b.a);
         if (!agree.length) {
-            const t = flat(await txt(page));
-            if (i > 0) return { ok: false, panel: t.slice(0, 160) };
-            await sleep(1800); continue;
+            await sleep(2000);
+            continue;
         }
         await Promise.race([page.mouse.click(agree[0].x, agree[0].y), evTo(8000)]).catch(() => { });
         await sleep(2800);
-        return { ok: true, panel: flat(await txt(page)).slice(0, 160) };
+        const after = await leaves(page);
+        const still = after.filter((l) => ['同意', '接受', '确认'].includes(l.t));
+        if (!still.length) return { ok: true, panel: flat(await txt(page)).slice(0, 160) };
+        console.log(`[邀请列表] 点击后按钮仍在（第 ${i + 1} 轮），继续重试`);
+        await sleep(1500);
     }
     return { ok: false, panel: flat(await txt(page)).slice(0, 160) };
 }
@@ -342,17 +349,20 @@ async function main() {
 
     // 4) 队长逐个邀请（每邀请一人面板会收起 → 每次重新打开）
     const invited = [];
-    for (const a of MEMBER_ACCS) {
-        if (!P[a]) continue;
-        for (let attempt = 0; attempt < 2; attempt++) {
-            await openInvite(lead);
-            const r = await inviteOne(lead, nickOf(a));
-            log(LEADER_ACC, `邀请 ${nickOf(a)}（第 ${attempt + 1} 次）: ${r}`);
-            await sleep(2000);
-            if (r === 'clicked') { invited.push(a); break; }
-            await sleep(1000);
+    const inviteAll = async () => {
+        for (const a of MEMBER_ACCS) {
+            if (!P[a] || invited.includes(a)) continue;
+            for (let attempt = 0; attempt < 2; attempt++) {
+                await openInvite(lead);
+                const r = await inviteOne(lead, nickOf(a));
+                log(LEADER_ACC, `邀请 ${nickOf(a)}（第 ${attempt + 1} 次）: ${r}`);
+                await sleep(2000);
+                if (r === 'clicked') { invited.push(a); break; }
+                await sleep(1000);
+            }
         }
-    }
+    };
+    await inviteAll();
 
     // 5) 队员从「邀请列表」同意
     for (const a of invited) {
@@ -363,10 +373,29 @@ async function main() {
 
     // 6) 校验 5/5
     await sleep(1500);
-    const panel = await teamPanelText(lead);
-    const n = await memberCount(lead);
+    let panel = await teamPanelText(lead);
+    let n = await memberCount(lead);
     log(LEADER_ACC, `【最终队伍】${panel.slice(0, 400)}`);
     log(LEADER_ACC, `【人数】${n}/5　组队总用时 ${el()}s`);
+
+    // 6b) 不满 5 人 → 补一轮「重新邀请 + 再接受 + 再校验」，最多一轮
+    //     原来不满就直接 exit 2（2026-11-23 笑呵呵接受失败 → 4/5 → 整个 run 红叉），
+    //     但 boss 实际照打了（只少一个号加成），红叉纯属噪音、还掩盖真故障。
+    if (n < 5) {
+        log(LEADER_ACC, `不满 5 人（${n}/5）→ 补一轮邀请+接受`);
+        invited.length = 0;
+        await inviteAll();
+        for (const a of invited) {
+            const r = await acceptInvite(P[a]);
+            log(a, `${nickOf(a)} 接受(补): ${r.ok ? 'ok' : 'failed'}`);
+            await sleep(1000);
+        }
+        await sleep(2000);
+        panel = await teamPanelText(lead);
+        n = await memberCount(lead);
+        log(LEADER_ACC, `【补漏后队伍】${panel.slice(0, 400)}`);
+        log(LEADER_ACC, `【人数】${n}/5　组队总用时 ${el()}s`);
+    }
     await lead.screenshot({ path: 'team5-final.png' }).catch(() => { });
 
     // 7) 可选：关掉队员，验证「队员离线后队伍还在不在」
@@ -388,7 +417,9 @@ async function main() {
 
     await browser.close();
     for (const a of all) acct.release(a);
-    return n === 5 ? 0 : 2;
+    // 不足 5 人只告警、不红叉：boss 仍会照打（少几人加成而已），红叉要留给真故障。
+    if (n !== 5) console.log(`::warning::组队只到 ${n}/5（已补过一轮），boss 照打但少 ${5 - n} 人加成`);
+    return 0;
 }
 
 if (require.main === module) {

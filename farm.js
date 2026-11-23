@@ -1,24 +1,16 @@
 const { chromium } = require('playwright');
 // 副本内自恢复（先扫荡/领奖再退本）
 const drain = require('./dungeon-recover.js');
-// 刷怪时长预算（刷到下一个派发节点前 5 分钟）
-const { farmBudgetMin } = require('./farm-budget.js');
 
 const ACCOUNT = process.env.GAME_ACCOUNT;
 const PASSWORD = process.env.GAME_PASSWORD;
 // 农场固定去广州沙滩打经验妖灵（11-09 起小号也走广州，不再去杭州西湖）
 const NAV_DEST = '广州';
 const NAV_REGION = '东亚';
-// 刷怪时长（分钟）：默认不再写死 300，改成「刷到下一个派发节点前 5 分钟」自动算（farm-budget.js）。
-// 写死 300 的毛病：11:30 派发这趟，farm 是 boss 打完立刻起跑（约 11:42~11:50，本文件就是紧随
-//   Run Boss 的下一个 step），固定 300 分钟会刷到 16:4x 就收尾，离 18:00 派发白空一个多小时
-//   （用户 11-22 23:34 指出「完全可以刷满野怪」）。
-// 预算是启动那一刻现场算的，起跑越早预算越长，收尾恒为「下一个节点前 5 分钟」= 17:55。
-// 显式设置 FARM_MAX_MIN 时以它为准；FARM_MAX_MIN=0 仍表示不限（旧行为，但会被 job timeout 砍成红叉，慎用）。
-const FARM_MAX_MIN_RAW = process.env.FARM_MAX_MIN;
-const FARM_MAX_MIN_FIXED = (FARM_MAX_MIN_RAW === undefined || String(FARM_MAX_MIN_RAW).trim() === '')
-    ? null
-    : Number(FARM_MAX_MIN_RAW);
+// 刷怪时长：不设。一直刷到 GitHub 托管 runner 的 job 6 小时硬上限把进程杀掉为止
+//   （用户 11-23 20:00：「刷野怪不用设定多少分钟，工作流会自动达到上限6小时而停止」）。
+//   之前那两套预算（「刷到下一个派发节点前 5 分钟」farm-budget.js、「job 起跑 + 355 分钟」）
+//   已全部删除：job 的 6 小时硬上限总在预算之前生效，算了也用不上。
 
 // 退出诊断：GitHub 的 job 日志偶发 404 全丢（2026-11-12 00:00 小号波 farm failure 就是这样查不下去），
 // 所以进程自己把「退出原因 + 退出码 + 击杀数 + 运行时长」压成一行打在末尾。
@@ -596,6 +588,54 @@ async function relogin(page) {
     return true;
 }
 
+// 确保站在广州（跨城）：不在广州就走「出航 → 传送兜底 → 严格校验」，两轮都不行才返回 false。
+//
+// ★ 为什么必须抽成函数（2026-11-23 coldwind8 事故）：
+//   打怪循环里有两条自愈路径 —— ①掉回登录页重登后 ②连续 10 分钟无击杀重登后 ——
+//   原来两条都直接调 gotoBeach()。而 gotoBeach 只是**广州城内**走位（东城门→沙滩294→沙滩）：
+//   号一旦落在别的城市（这次是威尼斯，钓鱼城市，城内只有「海滩4」没有「沙滩」），
+//   三次点沙滩全部 false，于是每 10.5 分钟重复一轮「重登→点不到沙滩」，整趟 5 小时只刷了 8432 次
+//   （同批其他号 4 万+），而且日志里没有任何 error，从 CI 状态完全看不出来。
+//   所以自愈必须先回广州，再走城内沙滩。
+async function ensureGuangzhou(page) {
+    let pageText = await getPageText(page);
+    if (pageText.includes(`当前城市：${NAV_DEST}`)) {
+        console.log(`已在${NAV_DEST}`);
+        return true;
+    }
+    for (let round = 1; round <= 2; round++) {
+        console.log(`不在${NAV_DEST}，导航中...(第${round}/2轮)`);
+
+        if (round > 1) {
+            await reloadGame(page);
+            await sleep(4000);
+            await exitDungeonIfInside(page);
+        }
+
+        const arrived = await sailFlow(page);
+        if (!arrived && SAIL_FAIL === 'nomap') {
+            console.log(`⚠ ${NAV_DEST} 暂无地图（该号没有这张海图），不传送`);
+            await page.screenshot({ path: 'nav-nomap.png' }).catch(() => {});
+        } else if (!arrived) {
+            await page.screenshot({ path: 'nav-fail.png' }).catch(() => {});
+            // 船还在海上（跨洋没走完）→ 续等一轮，别重登（重登会打断航行）
+            const now = await getPageText(page);
+            if (now.includes('停止自动航行') || now.includes('剩余距离')) {
+                console.log('首轮航行未到港但船仍在海上 → 续等 5 分钟...');
+                if (!(await sailFlow(page, 100))) await teleportToDest(page);
+            } else {
+                console.log('出航未完成（没起航/已回港），改用传送兜底...');
+                await teleportToDest(page);
+            }
+        }
+        await sleep(2000);
+
+        pageText = await getPageText(page);
+        if (pageText.includes(`当前城市：${NAV_DEST}`)) return true;
+    }
+    return false;
+}
+
 // 走到沙滩（广州城内：东城门 -> 沙滩294 -> 沙滩），失败返回 false
 async function gotoBeach(page) {
     // 导航到沙滩：东城门 -> 沙滩294 -> 沙滩（手机手动验证过的路径）
@@ -654,9 +694,6 @@ async function gotoBeach(page) {
     }
     return false;
 }
-
-// 掉线/被顶号的等待重登时间：期间可能是用户在手动操作，不能抢号
-const RELOGIN_WAIT_MS = 30 * 60 * 1000;
 
 async function run() {
     const browser = await chromium.launch({ headless: true });
@@ -770,51 +807,14 @@ async function run() {
         await exitDungeonIfInside(page);
 
         // 检查是否在广州（失败不直接放弃：重载页面再试一轮，点击无响应多半能救回）
-        pageText = await getPageText(page);
-        if (pageText.includes('当前城市：广州')) {
-            console.log('已在广州');
-        } else {
-            for (let round = 1; round <= 2; round++) {
-                console.log(`不在广州，导航中...(第${round}/2轮)`);
-
-                if (round > 1) {
-                    await reloadGame(page);
-                    await sleep(4000);
-                    await exitDungeonIfInside(page);
-                }
-
-                const arrived = await sailFlow(page);
-                if (!arrived && SAIL_FAIL === 'nomap') {
-                    console.log(`⚠ ${NAV_DEST} 暂无地图（该号没有这张海图），不传送`);
-                    await page.screenshot({ path: 'nav-nomap.png' }).catch(() => {});
-                } else if (!arrived) {
-                    await page.screenshot({ path: 'nav-fail.png' }).catch(() => {});
-                    // 船还在海上（跨洋没走完）→ 续等一轮，别重登（重登会打断航行）
-                    const now = await getPageText(page);
-                    if (now.includes('停止自动航行') || now.includes('剩余距离')) {
-                        console.log('首轮航行未到港但船仍在海上 → 续等 5 分钟...');
-                        if (!(await sailFlow(page, 100))) await teleportToDest(page);
-                    } else {
-                        console.log('出航未完成（没起航/已回港），改用传送兜底...');
-                        await teleportToDest(page);
-                    }
-                }
-                await sleep(2000);
-
-                pageText = await getPageText(page);
-                if (pageText.includes('当前城市：广州')) break;
-            }
-
+        if (!(await ensureGuangzhou(page))) {
             // 严格校验：没到广州绝不往下走（否则会在错误城市空转数小时）
-            if (!pageText.includes('当前城市：广州')) {
-                console.log('未到达广州，跳过农场');
-                console.log('::error::farm 出航失败：未到达广州，刷怪未开始');
-                diag(`未到达广州（出航/传送均失败，SAIL_FAIL=${SAIL_FAIL || 'none'}）`, 1);
-                await page.screenshot({ path: 'farm-nav-fail.png' }).catch(() => {});
-                await browser.close();
-                return;
-            }
-            console.log('到达广州');
+            console.log('未到达广州，跳过农场');
+            console.log('::error::farm 出航失败：未到达广州，刷怪未开始');
+            diag(`未到达广州（出航/传送均失败，SAIL_FAIL=${SAIL_FAIL || 'none'}）`, 1);
+            await page.screenshot({ path: 'farm-nav-fail.png' }).catch(() => {});
+            await browser.close();
+            return;
         }
 
         if (!(await gotoBeach(page))) {
@@ -831,57 +831,47 @@ async function run() {
         // 日志节流：每轮都打印会刷出几十MB日志、拖垮runner，改为每60秒汇报一次进度
         let count = 0;
         const loopStart = Date.now();
-        // 本次预算：显式 FARM_MAX_MIN 优先，否则算到「下一个派发节点前 5 分钟」。
-        // 算出来 0 表示离下一个节点不足 5 分钟 —— 这时直接收尾，不要再开一轮。
-        const budgetMin = FARM_MAX_MIN_FIXED === null ? farmBudgetMin(loopStart) : FARM_MAX_MIN_FIXED;
-        const budgetOn = FARM_MAX_MIN_FIXED !== 0;      // 仅显式 0 才是「不限」
-        console.log(`本次刷怪预算 ${budgetMin} 分钟（${budgetOn ? '到下一个派发节点前 5 分钟' : 'FARM_MAX_MIN=0 不限'}）`);
+        // 不设时长：一直刷，直到 job 被 6 小时硬上限杀掉（用户 11-23 20:00 定）。
+        console.log('刷怪不限时长：一直刷到 job 6 小时硬上限被杀为止');
+
+        // 自愈计数：连续几次「重登后仍回不到广州/走不到沙滩」就停手。
+        // 不留这个计数的话，号只要落在外地城市就会以 10 分钟一轮无限空转到 job 被杀，
+        // 而日志里一片正常（2026-11-23 coldwind8 就这样白跑 1 小时 40 分）。
+        let healFails = 0;
+        async function recoverToBeach() {
+            if (await ensureGuangzhou(page)) {
+                if (await gotoBeach(page)) { healFails = 0; return true; }
+            }
+            healFails++;
+            console.log(`自愈失败（连续第 ${healFails} 次：不在${NAV_DEST}或走不到打怪点）`);
+            if (healFails >= 3) {
+                console.log(`::error::farm 连续 3 次自愈失败：号一直回不到${NAV_DEST}打怪点，本趟停止（不再空转到 job 被杀）`);
+                diag(`连续 3 次自愈失败（回不到${NAV_DEST}/沙滩）`, 1);
+            }
+            return false;
+        }
         let lastLogAt = Date.now();
         let lastCountAt = Date.now();
-        let kickedAt = 0;
-        let kickLogAt = 0;
         console.log('进入打怪循环（进度每60秒汇报一次）');
         while (true) {
             pageText = await getPageText(page);
             EXIT_DIAG.kills = count;
 
-            // 到点主动收尾：被 job 的 timeout-minutes 砍掉时整个 run 标 failure，
-            // 于是「跑到上限」和「真故障」混成一片红（2026-10-29 00:00 波 4 个 job 全是这样）。
-            // 刷到这里就正常退出，red 只留给真问题。
-            if (budgetOn && Date.now() - loopStart >= budgetMin * 60000) {
-                console.log(`已刷满 ${budgetMin} 分钟（击杀 ${count} 次），主动收尾退出：下一个派发节点马上到，让新 run 干净接手`);
-                diag(`刷满 ${budgetMin} 分钟主动收尾`, 0);
+            // 不再有「到点主动收尾」：刷怪不限时长，由 job 6 小时硬上限终止进程。
+
+            // 账号被接管（退回登录页）→ 直接结束本趟，不再重登抢号。
+            // 触发场景：下一趟派发已经起跑并登录了同一个号（例如 06:00 趟刷到 11:30 被 11:30 趟的
+            //   组队顶掉），或用户手动登录在玩。
+            // 为什么不能「让位 30 分钟再重登」（原逻辑）：对方在持续占号时，本趟重登会把对方顶掉，
+            //   对方也让位再重登，双方来回抢，两个 run 的有效刷怪时间都被切碎。
+            // 所以把「被顶」当成交接信号：立刻退场，把号完整交给对方。
+            // 代价：真实掉线（会话超时）也会退场、本趟少刷；实测连续刷 5~6 小时未出现自然掉线。
+            if (pageText.includes('请输入账号密码') || (pageText.includes('已保存账号') && pageText.includes('请输入密码'))) {
+                console.log(`账号被接管(退回登录页)：已打 ${count} 次、运行 ${Math.round((Date.now() - loopStart) / 60000)} 分钟，本趟立即结束，把号交给下一趟/手动登录`);
+                await page.screenshot({ path: 'farm-offline.png' }).catch(() => {});
+                diag('账号被接管（退回登录页），主动退场', 0);
                 break;
             }
-
-            // 掉线自救：会话失效会退回登录页，原逻辑只点刷新，能空转几小时
-            // 但掉线也可能是用户手动登录/新一波顶号，先让位 30 分钟，期间不自作主张重登抢号
-            if (pageText.includes('请输入账号密码') || (pageText.includes('已保存账号') && pageText.includes('请输入密码'))) {
-                const now = Date.now();
-                if (!kickedAt) {
-                    kickedAt = now;
-                    console.log(`检测到掉回登录页(已打${count}次)，可能被顶号或在水手操，先让位30分钟再尝试重登`);
-                    await page.screenshot({ path: 'farm-offline.png' }).catch(() => {});
-                }
-                if (now - kickedAt < RELOGIN_WAIT_MS) {
-                    if (now - kickLogAt >= 300000) {
-                        kickLogAt = now;
-                        console.log(`让位等待中：已等 ${Math.round((now - kickedAt) / 60000)} 分钟（满30分钟再重登）`);
-                    }
-                    await sleep(10000);
-                    continue;
-                }
-                console.log(`已让位 ${Math.round((now - kickedAt) / 60000)} 分钟，尝试重新登录...`);
-                if (await relogin(page)) {
-                    pageText = await getPageText(page);
-                    if (!pageText.includes('经验妖灵')) await gotoBeach(page).catch(() => false);
-                    lastCountAt = Date.now();
-                }
-                kickedAt = 0;
-                kickLogAt = 0;
-                continue;
-            }
-            kickedAt = 0;
 
             if (pageText.includes('经验妖灵')) {
                 await clickText(page, '经验妖灵');
@@ -901,6 +891,7 @@ async function run() {
                 await sleep(50);
 
                 count++;
+                healFails = 0;   // 打到了就说明位置正常，自愈计数清零（避免几次相隔很远的偶发失败累加到 3）
                 lastCountAt = Date.now();
             } else {
                 if (count === 0 && !global.__shot) {
@@ -917,8 +908,10 @@ async function run() {
                 await page.screenshot({ path: 'farm-stuck.png' }).catch(() => {});
                 await relogin(page);
                 pageText = await getPageText(page);
-                if (!pageText.includes('经验妖灵')) await gotoBeach(page).catch(() => false);
+                // 同掉线自救：先确保回到广州，否则 gotoBeach 在外地城市必然失败（2026-11-23 coldwind8）
+                if (!pageText.includes('经验妖灵')) await recoverToBeach();
                 lastCountAt = Date.now();
+                if (healFails >= 3) break;
                 continue;
             }
 
