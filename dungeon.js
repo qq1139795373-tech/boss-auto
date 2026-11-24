@@ -378,10 +378,10 @@ async function clearRoom(page, tag) {
             // 「本层真的没怪」和「怪还没渲染出来」必须分开。
             // kidd.js 2026-10-29 实证：基德东线首读 0 只就当空房 → 只记 8 间/24 杀（总 48/51）。
             // 炼器窟每层固定 3 只，正常路径第一读就有怪，所以全清时零额外开销；
-            // 只有真的读不到（页面还没渲染）才会在这里多等，最多 3 次 ≈4.5 秒。
+            // 只有真的读不到（页面还没渲染）才会在这里多等，最多 5 次 ≈7.5 秒（11-24 用户要求 3→5）。
             emptyReads++;
-            if (emptyReads >= 3) return kills;
-            console.log(`[${tag}] 房间没读到怪，等渲染（第${emptyReads}/3次）...`);
+            if (emptyReads >= 5) return kills;
+            console.log(`[${tag}] 房间没读到怪，等渲染（第${emptyReads}/5次）...`);
             await sleep(1500);
             continue;
         }
