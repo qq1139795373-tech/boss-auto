@@ -39,8 +39,9 @@ function acquireAccountLock() {
 //                   11-22 加入奔月/海盗王后重排过，别再把炼器窟挪回开头，否则每天多跑两三趟船。
 //                 ★ 窗口 0:00-2:59 只管「能不能起跑」，运行本身没有时长上限，会一路跑完。
 //   18:00-18:30 → 山寨农场 → 邮件领取（mail.js，领取所有+确定+返回）
-//                  ★ 周二/周六：这两步做完后原地等到 20:00，接着在同一趟里打怪物攻城
-//                    （用户 11-22 要求：这两天牺牲 18:00-20:00 的刷怪时间）。
+//                  ★ 周二/周六：这两步做完后原地等到 19:55 提前出发，在同一趟里打怪物攻城
+//                    （用户 11-22 要求：这两天牺牲 18:00-20:00 的刷怪时间；
+//                      11-24 追加：19:55 就走，别等 20:00 才开始登录出航，否则 20:02 才到城门）
 //                    代价是本进程不退出 → 后面的 Run Boss / Run Farm 顺延到攻城结束（约 20:30）才开始。
 //                    关闭等待：GONGCHENG_WAIT=false（派发时传参，别去页面上取消 run——
 //                    取消会把同一趟的刷怪一起砍掉；11-19~11-22 那 4 次 cancelled 就是这么没的）
@@ -89,6 +90,13 @@ function resolveMode(hour, min, day) {
 //   18:00 那趟的刷怪窗口从 6 小时缩到约 3.5 小时，这是用户明确接受的部分。
 const GC_DAYS = [2, 6];                    // 周二、周六
 const GC_START_MIN = 20 * 60;              // 20:00 开打
+// ★ 提前出发（用户 11-24 20:37「20:00 准时开放，你 20:02 才到，错失先机」）
+//   原来 tasks 等到 20:00 才启动 gongcheng.js，而「启动 → 登录 → 出航 → 航行 → 走到城门」
+//   实测要 70 秒（今天 5 个号并发：20:01:00 启动，20:02:0x 才点第一只怪），
+//   等于把最抢手的第一批怪整段让掉。现在 19:55 就启动，脚本提前站到城门。
+//   gongcheng.js 的 eventPhase()='wait' 分支本来就支持这个场景：20:00 前在城门每 15 秒刷新，
+//   最后 90 秒压到 3 秒刷一次，20:00 一到立刻点怪。5 分钟 = 实测 70 秒的 4 倍余量。
+const GC_LEAD_MIN = GC_START_MIN - 5;      // 19:55 提前出发（不是提前开打）
 const GC_DEADLINE_MIN = 20 * 60 + 30;      // 20:30 之后不再起（攻城只到 20:30）
 const GC_WAIT_HEARTBEAT_MS = 10 * 60 * 1000;
 
@@ -111,8 +119,12 @@ function gongchengPlan(nowMs = Date.now()) {
     if (cur >= GC_START_MIN) {
         return { action: 'run', waitMs: 0, reason: `现在 ${hhmm} 已在攻城窗口内，直接开打` };
     }
-    const waitMs = ((GC_START_MIN - cur) * 60 - sec) * 1000;
-    return { action: 'wait', waitMs: Math.max(0, waitMs), reason: `现在 ${hhmm}，等到 20:00 攻城（还有 ${Math.ceil(waitMs / 60000)} 分钟）` };
+    if (cur >= GC_LEAD_MIN) {
+        // 提前出发：脚本会自己站到城门刷新等 20:00，不会提前点怪
+        return { action: 'run', waitMs: 0, reason: `现在 ${hhmm}，提前出发到城门等 20:00 开怪` };
+    }
+    const waitMs = ((GC_LEAD_MIN - cur) * 60 - sec) * 1000;
+    return { action: 'wait', waitMs: Math.max(0, waitMs), reason: `现在 ${hhmm}，等到 19:55 提前出发（20:00 开怪，还有 ${Math.ceil(waitMs / 60000)} 分钟）` };
 }
 
 // 攻城等待开关（11-22 加，起因：用户手动取消了连续 4 天的 18:00 run）：
@@ -307,9 +319,9 @@ async function main() {
         await runStep('邮件领取', 'mail.js');
         if (doGc) {
             if (gc.action === 'wait') {
-                console.log(`[tasks] 攻城判定：${gc.reason} —— 这两小时不打怪，等它`);
+                console.log(`[tasks] 攻城判定：${gc.reason} —— 这段时间不打怪，等它`);
                 await waitWithKeepAlive(gc.waitMs, process.env.GAME_ACCOUNT || '');
-                console.log('[tasks] 到点了，开始怪物攻城');
+                console.log('[tasks] 到 19:55，提前出发：先登录出航站到城门，20:00 开怪立刻点');
             } else {
                 console.log(`[tasks] 攻城判定：${gc.reason}`);
             }

@@ -19,24 +19,30 @@ const bj = (y, mo, d, h, mi, s = 0) => Date.UTC(y, mo - 1, d, h - 8, mi, s);
 // 2026-11-22 是周日，所以 11-24 周二、11-28 周六、11-23 周一
 const TUE = [2026, 11, 24], SAT = [2026, 11, 28], SUN = [2026, 11, 22], MON = [2026, 11, 23];
 
-console.log('[1] 周二/周六 18:00 之后要等到 20:00');
-t('周二 18:05 → wait，等约 115 分钟', () => {
+console.log('[1] 周二/周六 18:00 之后要等到 19:55 提前出发（不是等到 20:00 才开始）');
+t('周二 18:05 → wait，等约 110 分钟', () => {
     const p = gongchengPlan(bj(...TUE, 18, 5));
     assert.strictEqual(p.action, 'wait');
-    assert.strictEqual(Math.round(p.waitMs / 60000), 115);
+    assert.strictEqual(Math.round(p.waitMs / 60000), 110);
 });
-t('周六 18:00:00 整 → wait，正好 7200000ms', () => {
+t('周六 18:00:00 整 → wait，正好 6900000ms（19:55-18:00）', () => {
     const p = gongchengPlan(bj(...SAT, 18, 0));
     assert.strictEqual(p.action, 'wait');
-    assert.strictEqual(p.waitMs, 7200000);
+    assert.strictEqual(p.waitMs, 6900000);
 });
-t('周二 19:59:30 → wait，只剩 30 秒（边界不提前开打）', () => {
-    const p = gongchengPlan(bj(...TUE, 19, 59, 30));
+t('周二 19:54:30 → wait，只剩 30 秒（19:55 前不出发）', () => {
+    const p = gongchengPlan(bj(...TUE, 19, 54, 30));
     assert.strictEqual(p.action, 'wait');
     assert.strictEqual(p.waitMs, 30000);
 });
 
-console.log('[2] 20:00 一到就直接打，不再等');
+console.log('[2] 19:55 就出发（到城门刷新等 20:00），20:00 之后照常直接打');
+t('周二 19:55:00 → run（提前出发，给登录+出航+航行留 5 分钟）', () => {
+    assert.strictEqual(gongchengPlan(bj(...TUE, 19, 55)).action, 'run');
+});
+t('周二 19:59:30 → run（此时出发已经偏晚，但不能再等）', () => {
+    assert.strictEqual(gongchengPlan(bj(...TUE, 19, 59, 30)).action, 'run');
+});
 t('周二 20:00:00 → run', () => {
     assert.strictEqual(gongchengPlan(bj(...TUE, 20, 0)).action, 'run');
 });
@@ -78,12 +84,12 @@ t('0:00~23:59 每隔 7 分钟扫一天，全都有确定结果', () => {
         assert.ok(typeof p.reason === 'string' && p.reason.length > 0, '缺少原因说明');
     }
 });
-t('wait 只在 20:00 之前出现，run 只在 20:00~20:29 出现', () => {
+t('wait 只在 19:55 之前出现，run 只在 19:55~20:29 出现', () => {
     for (let m = 0; m < 24 * 60; m++) {
         const p = gongchengPlan(bj(...TUE, 0, 0) + m * 60000);
         const hm = m;
-        if (p.action === 'wait') assert.ok(hm < 20 * 60, `20:00 之后还 wait: ${hm}`);
-        if (p.action === 'run') assert.ok(hm >= 20 * 60 && hm < 20 * 60 + 30, `run 出现在 ${hm} 分`);
+        if (p.action === 'wait') assert.ok(hm < 19 * 60 + 55, `19:55 之后还 wait: ${hm}`);
+        if (p.action === 'run') assert.ok(hm >= 19 * 60 + 55 && hm < 20 * 60 + 30, `run 出现在 ${hm} 分`);
     }
 });
 
