@@ -58,14 +58,14 @@ t('触发时只放弃当前分支（return），不立刻 stopAll', () => {
 });
 
 console.log('\n[4] 奔月基线背包读数：失败要重试');
-t('基线读数最多重试 3 次', () => {
-    assert.ok(/for \(let r = 1; r <= 3; r\+\+\) \{\n\s*st\.boxBefore = await readBymjBox\(page\);/.test(BYMJ), '没有重试循环');
+t('基线读数最多重试 5 次（11-24 用户要求 3→5）', () => {
+    assert.ok(/for \(let r = 1; r <= 5; r\+\+\) \{\n\s*st\.boxBefore = await readBymjBox\(page\);/.test(BYMJ), '没有重试循环');
 });
 t('重试之间会等页面就绪（不是死循环）', () => {
-    assert.ok(/背包读取失败（第\$\{r\}\/3次），等页面就绪后重试/.test(BYMJ), '重试没有等待/日志');
+    assert.ok(/背包读取失败（第\$\{r\}\/5次），等页面就绪后重试/.test(BYMJ), '重试没有等待/日志');
 });
-t('最终仍失败时日志写明「重试 3 次仍失败」', () => {
-    assert.ok(/读取失败（重试 3 次仍失败）/.test(BYMJ), '失败日志没写清重试情况');
+t('最终仍失败时日志写明「重试 5 次仍失败」', () => {
+    assert.ok(/读取失败（重试 5 次仍失败）/.test(BYMJ), '失败日志没写清重试情况');
 });
 
 console.log('\n[5] farm 自愈必须先回广州（2026-11-23 coldwind8 卡威尼斯 1h40m 事故）');

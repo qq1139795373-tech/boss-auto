@@ -659,17 +659,17 @@ async function runAccount(account) {
         // ★ 2026-11-23：冷6 / 冷2 都在这里读到「读取失败」——当时页面正好是一层加载壳
         //   （紧接着就是「回城失败」「白屏恢复 reload」）。基线丢了，后面领奖只能靠 toast，
         //   toast 一错过就变成「到账未证实」。所以读失败要等页面就绪后重试，别一次定生死。
-        for (let r = 1; r <= 3; r++) {
+        for (let r = 1; r <= 5; r++) {
             st.boxBefore = await readBymjBox(page);
             if (st.boxBefore !== null) break;
-            if (r < 3) {
-                log(`[基线] 背包读取失败（第${r}/3次），等页面就绪后重试...`);
+            if (r < 5) {
+                log(`[基线] 背包读取失败（第${r}/5次），等页面就绪后重试...`);
                 await sleep(2500);
                 await page.keyboard.press('Escape').catch(() => {});
                 await sleep(800);
             }
         }
-        log(`[基线] 背包「奔月副本箱」= ${st.boxBefore === null ? '读取失败（重试 3 次仍失败）' : st.boxBefore + ' 个'}`);
+        log(`[基线] 背包「奔月副本箱」= ${st.boxBefore === null ? '读取失败（重试 5 次仍失败）' : st.boxBefore + ' 个'}`);
         await sleep(1000);
 
         if (!(await enterDungeon(page))) return st;

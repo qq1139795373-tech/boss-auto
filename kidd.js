@@ -616,10 +616,10 @@ async function clearRoom(page, tag) {
             // 「真空房间」和「怪还没渲染出来」必须分开。
             // 2026-10-29 实证：东线「西库尽头」进房后第一次读就是 0 只怪，旧代码 `return kills`
             // 立刻当空房 → 东线只记 8 间 / 24 杀（总 48/51）；同代码 10-28 同一间读到 3 只。
-            // 现在连续 3 次都读不到才认定空房（真空房多花约 4.5 秒，可接受）。
+            // 现在连续 5 次都读不到才认定空房（真空房多花约 7.5 秒，可接受；11-24 用户要求 3→5）。
             emptyReads++;
-            if (emptyReads >= 3) return kills;
-            console.log(`[${tag}] 房间没读到怪，等渲染（第${emptyReads}/3次）...`);
+            if (emptyReads >= 5) return kills;
+            console.log(`[${tag}] 房间没读到怪，等渲染（第${emptyReads}/5次）...`);
             await sleep(1500);
             continue;
         }
