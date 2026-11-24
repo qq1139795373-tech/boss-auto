@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       tasks_mode:
-        description: '任务流程：auto按北京时间（00:00 签到/竞技场/奔月/镇妖塔/海盗王/钓鱼/附魔/秘宝/基德/炼器窟/每日任务，18:00 山寨/邮件，周二六 20:00 攻城），或强制 dawn/dusk/gongcheng/skip'
+        description: '任务流程：auto按北京时间（00:00 签到/竞技场/奔月/镇妖塔/海盗王/钓鱼/附魔/秘宝/基德/炼器窟/每日任务，18:00 山寨/邮件，周二六 19:55 出发攻城·20:00 开怪），或强制 dawn/dusk/gongcheng/skip'
         type: string
         default: 'auto'
       gongcheng_wait:
-        description: '周二/六 18:00 那趟是否等 20:00 攻城：留空=看仓库变量 GONGCHENG_WAIT(没设就等)；填 false 强制不等'
+        description: '周二/六 18:00 那趟是否等到 19:55 出发打攻城（20:00 开怪）：留空=看仓库变量 GONGCHENG_WAIT(没设就等)；填 false 强制不等'
         type: string
         default: ''
       gc_mode:
