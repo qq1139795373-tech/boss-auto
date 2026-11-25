@@ -1,3 +1,4 @@
+const { LOGIN_URL } = require('./game-url.js');
 const { chromium } = require('playwright');
 // 出航复用 daily.js：它已处理任务页残留/已在目标城/区域横滚/暂无地图/海盗/自动航行，
 // 自带一套出航实现曾在 2026-10-28 大号上卡死 5 分钟且传送兜底也到不了伦敦。
@@ -42,7 +43,7 @@ async function gotoGame(page, retries = 3) {
     // runner到游戏服务器慢时，等load事件会30s超时；domcontentloaded不等全量资源，失败重试
     for (let i = 1; i <= retries; i++) {
         try {
-            await page.goto('http://yiyu.yiyutx.top/yysh/#/pages/login/login', {
+            await page.goto(LOGIN_URL, {
                 waitUntil: 'domcontentloaded',
                 timeout: 60000,
             });

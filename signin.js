@@ -1,3 +1,4 @@
+const { LOGIN_URL } = require('./game-url.js');
 const { chromium } = require('playwright');
 // 只读可见节点的页面文本（避免 display:none 残留节点造成的幽灵文案）
 const { visibleText } = require('./dungeon-recover.js');
@@ -22,7 +23,7 @@ async function sleep(ms) {
 async function gotoGame(page, retries = 3) {
     for (let i = 1; i <= retries; i++) {
         try {
-            await page.goto('http://yiyu.yiyutx.top/yysh/#/pages/login/login', {
+            await page.goto(LOGIN_URL, {
                 waitUntil: 'domcontentloaded',
                 timeout: 60000,
             });

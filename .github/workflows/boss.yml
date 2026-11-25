@@ -21,6 +21,12 @@ permissions:
   contents: read
   actions: read
 
+# 登录域名统一在 game-url.js 里取（脚本已不再硬编码）。换域名时最省事的做法：
+#   仓库 Settings → Secrets and variables → Actions → Variables 加一条 GAME_URL=http://新域名，
+#   下次派发即生效，不用改代码、不用等 CI。没设这个变量 → 用 game-url.js 的 DEFAULT_BASE。
+env:
+  GAME_URL: ${{ vars.GAME_URL }}
+
 jobs:
   # ★ 情侣迷宫：和 multi-boss 同一套脚本（qllm-run.js / qllm-daily.js），分支差异只在配对怎么填。
   #   为什么必须排在本分支 boss 之前：情侣迷宫要队长建队、邀请、队员在线准备，两个号在同一个

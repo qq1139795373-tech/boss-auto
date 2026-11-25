@@ -1,3 +1,4 @@
+const { LOGIN_URL } = require('./game-url.js');
 const { chromium } = require('playwright');
 const drain = require('./dungeon-recover.js');
 
@@ -72,7 +73,7 @@ async function sleep(ms) {
 async function gotoGame(page, retries = 3) {
     for (let i = 1; i <= retries; i++) {
         try {
-            await page.goto('http://yiyu.yiyutx.top/yysh/#/pages/login/login', {
+            await page.goto(LOGIN_URL, {
                 waitUntil: 'domcontentloaded',
                 timeout: 60000,
             });

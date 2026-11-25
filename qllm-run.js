@@ -43,7 +43,7 @@ const daily = require('./daily.js');
 const { evTo, createBagReader } = require('./bag-read.js');
 const acct = require('./acct-lock.js');
 
-const URL = 'http://yiyu.yiyutx.top/yysh/#/pages/login/login';
+const { LOGIN_URL: URL } = require('./game-url.js');
 const pass = require('./account-pass.js');
 const LEADER = process.env.LEADER || 'coldwind0';        // 笑嘻L 132 —— 建队 + 进本 + 杀怪
 const MEMBER = process.env.MEMBER || 'coldwind8';        // 笑嘻嘻 132 —— 接受邀请 + 准备 + 领奖
