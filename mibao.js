@@ -2,6 +2,8 @@ const { LOGIN_URL } = require('./game-url.js');
 const { chromium } = require('playwright');
 // 副本内自恢复（先扫荡/领奖再退本）
 const drain = require('./dungeon-recover.js');
+// 进游戏的强点击 + 进主界面判定（2026-11-25 统一到 daily.js）
+const daily = require('./daily.js');
 
 const ACCOUNT = process.env.GAME_ACCOUNT;
 const PASSWORD = process.env.GAME_PASSWORD;
@@ -339,8 +341,8 @@ async function teleportToDest(page) {
         await sleep(500);
         await page.keyboard.press('Escape');
         await sleep(1000);
-        await clickText(page, '进入游戏');
-        await sleep(3000);
+        // 传送兜底也要真进主界面：原来只点一次，点了没反应就接着点传送面板，兜底整条失效
+        await daily.enterMain(page, { rounds: 4, pauseMs: 3000, log: (m) => log(m) });
 
         // 重登可能落回副本房间，先退出再开传送面板
         await exitDungeonIfInside(page);
@@ -614,22 +616,11 @@ async function run() {
         }
 
         // 2. 进入游戏（含选角处理）
-        for (let i = 0; i < 10; i++) {
-            await clickText(page, '进入游戏');
-            await sleep(5000);
-            let t = await getPageText(page);
-            if (t.includes('选择角色') || t.includes('Lv.')) {
-                log('在选角界面，点击进入游戏选角色...');
-                await clickText(page, '进入游戏');
-                await sleep(5000);
-                t = await getPageText(page);
-            }
-            if (t.includes('你看到') || t.includes('当前城市')) {
-                log('进入游戏成功');
-                break;
-            }
-            log('进入游戏未成功，重试...');
-            await sleep(2000);
+        // 统一走 daily.enterMain：强点击（坐标→合成事件→force），判定只认「你看到/当前城市」。
+        if (await daily.enterMain(page, { rounds: 10, pauseMs: 5000, log: (m) => log(m) })) {
+            log('进入游戏成功');
+        } else {
+            log('进入游戏失败：10 轮强点击仍未到主界面');
         }
         await sleep(3000);
         await page.keyboard.press('Escape');

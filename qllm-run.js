@@ -167,13 +167,9 @@ async function login(page, acc) {
         await sleep(3000);
         let t = await txt(page);
         if (t.includes('进入游戏') || t.includes('你看到') || t.includes('当前城市')) {
-            for (let i = 0; i < 8; i++) {
-                await daily.clickText(page, '进入游戏', 2000).catch(() => { });
-                await sleep(3800);
-                t = await txt(page);
-                if (t.includes('你看到') || t.includes('当前城市')) return true;
-            }
-            return true;
+            // 进游戏统一走 daily.enterMain：原来 8 轮 clickText 后无条件 return true，
+            // 没进游戏也算登录成功，情侣副本会拿一个没进游戏的页面去点组队。
+            return await daily.enterMain(page, { rounds: 8, pauseMs: 3800, log: (m) => log(acc, m) });
         }
         log(acc, `登录重试 ${a}`);
     }

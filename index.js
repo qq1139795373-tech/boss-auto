@@ -379,8 +379,8 @@ async function teleportToDest(page) {
         }
         await closePopup(page);
         await sleep(1000);
-        await clickText(page, '进入游戏');
-        await sleep(3000);
+        // 传送兜底也要真进主界面：原来只点一次，点了没反应照样往下点传送面板
+        await daily.enterMain(page, { rounds: 4, pauseMs: 3000 });
         console.log('传送兜底: 重新登录完成');
 
         // 打开传送面板并验证：区域标签出现才算真打开（坐标点击被遮罩吃掉会假成功）
