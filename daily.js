@@ -334,8 +334,8 @@ async function clickSailBtn(page) {
 
     let hit = await readHit();
     // 半渲染（文本里有「你看到：」，但 DOM 里主视图那行还没渲染出可点节点）→ 等，别急着点顶部那个假的
-    for (let i = 0; i < 3 && (!hit || hit.main === 0); i++) {
-        console.log(`  [出航] 主视图还没渲染出「出航」按钮，等 2.5s 重读（第 ${i + 1}/3 次）`);
+    for (let i = 0; i < 5 && (!hit || hit.main === 0); i++) {
+        console.log(`  [出航] 主视图还没渲染出「出航」按钮，等 2.5s 重读（第 ${i + 1}/5 次）`);
         await sleep(2500);
         hit = await readHit();
     }
@@ -712,16 +712,16 @@ async function openDailyList(page) {
 
 // 点开某条每日任务的详情（按行号），解析进度段；返回 {rowNo,name,city,area,x,n,full} 或 null
 async function readTaskDetail(page, rowNo, taskName) {
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 5; i++) {
         await clickRow(page, rowNo, taskName);
-        await sleep(1500);
+        await sleep(2000);
         if ((await getPageText(page)).includes('任务进度')) break;
         // 兜底：行号定位失败（如行10）时用真实点击名字文本
         await page.getByText(taskName, { exact: false }).first().click({ force: true, timeout: 2000 }).catch(() => {});
-        await sleep(1500);
+        await sleep(2000);
         if ((await getPageText(page)).includes('任务进度')) break;
         await clickLeaf(page, taskName);
-        await sleep(1500);
+        await sleep(2000);
     }
     await sleep(1200);
     const txt = await getPageText(page);
@@ -1149,9 +1149,9 @@ async function runTask(page, task) {
     console.log(`[${task.name}] ${where} ${task.x}/${task.n}，点寻路...`);
     // 点任务行开详情（按行号，重试3次），确认出现「任务进度」再点寻路
     let opened = false;
-    for (let r = 0; r < 3 && !opened; r++) {
+    for (let r = 0; r < 5 && !opened; r++) {
         await clickRow(page, task.rowNo, task.name);
-        await sleep(1500);
+        await sleep(2000);
         opened = (await getPageText(page)).includes('任务进度');
     }
     if (!opened) {
@@ -1160,9 +1160,9 @@ async function runTask(page, task) {
         //   野区不是「做不了」，是「详情页打不开」：回城刷新后同一条任务一次就过。
         console.log(`[${task.name}] 点不开任务详情（多为人在野区）→ 回城刷新后重试`);
         await recoverByReturnToCity(page);
-        for (let r = 0; r < 3 && !opened; r++) {
+        for (let r = 0; r < 5 && !opened; r++) {
             await clickRow(page, task.rowNo, task.name);
-            await sleep(1500);
+            await sleep(2000);
             opened = (await getPageText(page)).includes('任务进度');
         }
         if (!opened) {
@@ -1201,9 +1201,9 @@ async function runTask(page, task) {
             await clickExact(page, '取消', 1500);
             await backToMain(page);
             await openDailyList(page);
-            for (let r = 0; r < 3; r++) {
+            for (let r = 0; r < 5; r++) {
                 await clickRow(page, task.rowNo, task.name);
-                await sleep(1500);
+                await sleep(2000);
                 if ((await getPageText(page)).includes('任务进度')) break;
             }
             clicked = (await clickExact(page, '寻路', 3000)) || (await clickLeaf(page, '寻路'));
@@ -1214,9 +1214,9 @@ async function runTask(page, task) {
                 await backToMain(page);
                 await backToCity(page);
                 await openDailyList(page);
-                for (let r = 0; r < 3; r++) {
+                for (let r = 0; r < 5; r++) {
                     await clickRow(page, task.rowNo, task.name);
-                    await sleep(1500);
+                    await sleep(2000);
                     if ((await getPageText(page)).includes('任务进度')) break;
                 }
                 clicked = (await clickExact(page, '寻路', 3000)) || (await clickLeaf(page, '寻路'));
@@ -1251,9 +1251,9 @@ async function runTask(page, task) {
             await backToMain(page);
             await openDailyList(page);
             let reop = false;
-            for (let r = 0; r < 3 && !reop; r++) {
+            for (let r = 0; r < 5 && !reop; r++) {
                 await clickRow(page, task.rowNo, task.name);
-                await sleep(1500);
+                await sleep(2000);
                 reop = (await getPageText(page)).includes('任务进度');
             }
             if (!reop) { console.log(`[${task.name}] 重开后点不开详情`); break; }

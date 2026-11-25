@@ -272,13 +272,13 @@ async function backToCityView(page, opts = {}) {
     for (let i = 0; i < 5; i++) {
         if ((await txt()).includes('当前城市')) return true;
         await page.keyboard.press('Escape').catch(() => { });
-        await sleep(1200);
+        await sleep(2000);
         if ((await txt()).includes('当前城市')) return true;
         await Promise.race([
             page.mouse.click(14, 26),                                   // 左上返回箭头
             new Promise((_, rej) => setTimeout(() => rej(new Error('click-timeout')), 8000)),
         ]).catch(() => { });
-        await sleep(1500);
+        await sleep(2000);
     }
     const ok = (await txt()).includes('当前城市');
     if (!ok) log('::warning::领奖后没回到城市主视图 → 读不了包裹，本次跳过背包对账');
@@ -312,10 +312,11 @@ async function recoverDungeon(page, opts = {}) {
     await dismissPopups(page, { log });
 
     // ---- 1) 扫荡：炼器窟有，基德没有。扫荡入口进本后异步渲染，先等一会 ----
+    //  11-25：等渲染的重读统一 2 秒 × 5 次（原来 1.5 秒 × 4 次，约 6 秒 → 现在约 10 秒）
     let swept = false;
     t = await visibleText(page);
-    for (let i = 0; i < 4 && !t.includes('扫荡'); i++) {
-        await sleep(1500);
+    for (let i = 0; i < 5 && !t.includes('扫荡'); i++) {
+        await sleep(2000);
         t = await visibleText(page);
     }
     if (t.includes('扫荡') && !t.includes('扫荡收获')) {
@@ -339,7 +340,7 @@ async function recoverDungeon(page, opts = {}) {
     // ---- 2) 领奖：循环到「领取奖励」消失或已离开副本页 ----
     let claimed = false;
     let claimToasts = [];      // 领奖过程中抓到的明细原文（到账的第一手证据）
-    for (let round = 1; round <= 4; round++) {
+    for (let round = 1; round <= 5; round++) {
         t = await visibleText(page);
         if (!t.includes('副本条件')) { claimed = true; break; }   // 已退出副本 = 领到了
         if (!t.includes('领取奖励')) break;                       // 没有可领的
@@ -348,9 +349,9 @@ async function recoverDungeon(page, opts = {}) {
             log(`${tag}：领取奖励点不到`);
             break;
         }
-        await sleep(1500);
+        await sleep(2000);
         claimToasts = claimToasts.concat((await dismissPopups(page, { log })) || []);
-        await sleep(1500);
+        await sleep(2000);
         t = await visibleText(page);
         if (!t.includes('副本条件') || !t.includes('领取奖励')) { claimed = true; break; }
         log(`${tag}：第 ${round} 轮领奖后仍在副本页（「领取奖励」还在）`);
@@ -378,13 +379,13 @@ async function recoverDungeon(page, opts = {}) {
     // 注意：退出副本后今天这 1 次机会就没了（进本状态持久，退了也进不来），
     // 所以走到这里说明这个副本已经被判定为「本次没法打完/没东西可领」，日志里说清楚。
     log(`${tag}：副本里没有可领的奖励了（多半没通关），退出副本 —— 今天这 1 次机会作废`);
-    for (let i = 1; i <= 3; i++) {
+    for (let i = 1; i <= 5; i++) {
         await clickByText(page, '退出副本');
-        await sleep(1500);
+        await sleep(2000);
         let tt = await visibleText(page);
         if (tt.includes('退出副本') && tt.includes('确定')) {
             await clickByText(page, '确定', { exact: true });
-            await sleep(1500);
+            await sleep(2000);
             tt = await visibleText(page);
         }
         if (!tt.includes('副本条件')) {

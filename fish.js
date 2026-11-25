@@ -130,15 +130,15 @@ async function exitDungeonIfInside(page) {
     } catch (e) {
         console.log('副本内处理异常:', e.message);
     }
-    for (let i = 1; i <= 3; i++) {
+    for (let i = 1; i <= 5; i++) {
         if (!(await clickText(page, '退出副本', 2000))) {
             await jsClick(page, '退出副本');
         }
-        await sleep(1500);
+        await sleep(2000);
         let t = await getPageText(page);
         if (t.includes('副本条件') && t.includes('确定')) {
             await clickExact(page, '确定', 2000);
-            await sleep(1500);
+            await sleep(2000);
             t = await getPageText(page);
         }
         if (!(t.includes('副本条件') && t.includes('回到起点'))) {
@@ -633,11 +633,11 @@ async function rebuildDock(page) {
 
 // 回到码头视图：返回箭头(goBack) → 兜底刷新重进
 async function backToDock(page) {
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 5; i++) {
         let t = await getPageText(page);
         if (atDockView(t)) return true;
         await page.goBack().catch(() => {});
-        await sleep(1500);
+        await sleep(2000);
         t = await getPageText(page);
         if (atDockView(t)) return true;
         if (t.includes('请输入账号密码')) {
@@ -682,7 +682,7 @@ async function ensureDock(page) {
 
 // 关闭包裹回游戏视图（左上角返回/历史后退/Escape，逐个尝试）
 async function closeBag(page) {
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 5; i++) {
         const t = await getPageText(page);
         if (t.includes('鱼老板') || t.includes('当前城市：')) return true;
         // 左上角返回键（按class启发式找页头左上的返回元素）
@@ -694,11 +694,11 @@ async function closeBag(page) {
             });
             if (el) el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
         }).catch(() => {});
-        await sleep(1200);
+        await sleep(2000);
         let t2 = await getPageText(page);
         if (!(t2.includes('鱼老板') || t2.includes('当前城市：'))) {
             await page.evaluate(() => history.back()).catch(() => {});
-            await sleep(1500);
+            await sleep(2000);
         }
         t2 = await getPageText(page);
         if (!(t2.includes('鱼老板') || t2.includes('当前城市：'))) {
@@ -967,7 +967,7 @@ async function readBossSilver(page, tries = 3) {
 // 退出山寨页回主视图（关详情框 → 类名返回箭头(shanzhai.js同款) → 坐标(18,30) → goBack 逐级兜底）
 // 「练功房」是山寨页顶标签，切到仓库子标签也不消失，作为在/不在山寨页的信号
 async function exitShanzhai(page) {
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 5; i++) {
         let t = await getPageText(page);
         if (t.includes('物品详情')) {
             await page.keyboard.press('Escape');
@@ -979,7 +979,7 @@ async function exitShanzhai(page) {
             const c = document.querySelector('.van-nav-bar__arrow, .van-icon-arrow-left, [class*="back"]');
             if (c) c.click();
         }).catch(() => {});
-        await sleep(1500);
+        await sleep(2000);
         t = await getPageText(page);
         if (!t.includes('练功房')) return !t.includes('请输入账号密码');
         await page.mouse.click(18, 30).catch(() => {});

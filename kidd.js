@@ -730,9 +730,10 @@ async function runArm(page, arm, tagPrefix = '') {
 async function trySweep(page) {
     let t0 = await getPageText(page);
     let waited = 0;
-    for (let i = 0; i < 4 && !t0.includes('扫荡'); i++) {
-        await sleep(1500);
-        waited += 1.5;
+    // 11-25：等渲染的重读统一 2 秒 × 5 次（原来 1.5 秒 × 4 次）
+    for (let i = 0; i < 5 && !t0.includes('扫荡'); i++) {
+        await sleep(2000);
+        waited += 2;
         t0 = await getPageText(page);
     }
     if (t0.includes('扫荡') && waited > 0) console.log(`等待${waited}秒后扫荡入口出现`);
@@ -956,13 +957,13 @@ async function run() {
             return;
         }
 
-        // 进入副本 → 确定，轮询最多45秒等房间标志，最多3轮
+        // 进入副本 → 确定，轮询最多75秒等房间标志，最多5轮
         console.log('进入副本...');
         let entered = false;
-        for (let round = 1; round <= 3 && !entered; round++) {
+        for (let round = 1; round <= 5 && !entered; round++) {
             if (round > 1) console.log(`第${round}轮重新点击进入副本...`);
             await clickText(page, '进入副本', 3000);
-            await sleep(1500);
+            await sleep(2000);
             await clickExact(page, '确定');
             for (let w = 0; w < 15; w++) {
                 await sleep(1000);
@@ -1103,7 +1104,7 @@ async function run() {
             // 领奖循环：一层层关弹窗，直到「领取奖励」消失或已离开副本页。
             // 只点一次「确定」在弹窗叠层时会半途而废（炼器窟 boss(0) 实证）。
             let got = false;
-            for (let round = 1; round <= 4; round++) {
+            for (let round = 1; round <= 5; round++) {
                 pageText = await getPageText(page);
                 if (!pageText.includes('副本条件')) { got = true; break; }
                 if (!pageText.includes('领取奖励')) { got = true; break; }
@@ -1112,10 +1113,10 @@ async function run() {
                     console.log('「领取奖励」点不到');
                     break;
                 }
-                await sleep(1500);
+                await sleep(2000);
                 // 点「确定」的同时抓奖励明细（toast 是点完确定才弹、只活一两秒，见 dungeon-recover.js）
                 await drain.dismissPopups(page, { log: console.log });
-                await sleep(1500);
+                await sleep(2000);
             }
             const toast = (await toastP) || '';
             if (toast) {
@@ -1200,13 +1201,13 @@ async function run() {
                 let t = await getPageText(page);
                 if (t.includes('领取奖励')) {
                     console.log('异常兜底：页面仍有「领取奖励」→ 尽力领一次');
-                    for (let round = 1; round <= 3; round++) {
+                    for (let round = 1; round <= 5; round++) {
                         t = await getPageText(page);
                         if (!t.includes('领取奖励')) break;
                         if (!(await drain.clickByText(page, '领取奖励'))) { console.log('异常兜底：「领取奖励」点不到'); break; }
-                        await sleep(1500);
+                        await sleep(2000);
                         await drain.dismissPopups(page, { log: console.log });
-                        await sleep(1500);
+                        await sleep(2000);
                     }
                     t = await getPageText(page);
                     console.log(t.includes('领取奖励') ? '::warning::兜底领奖后「领取奖励」仍在' : '异常兜底领奖完成（入口已消失或已退出副本）');

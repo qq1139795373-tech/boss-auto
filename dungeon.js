@@ -327,11 +327,11 @@ async function clickLeaf(page, text) {
 
 // 打完一条线回枢纽：回到起点→矿洞入口→往北→枢纽广场，带回退验证
 async function backToHub(page) {
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 5; i++) {
         const txt = await getPageText(page);
         if (txt.includes('矿洞入口')) break;
         await clickLeaf(page, '回到起点');
-        await sleep(1500);
+        await sleep(2000);
     }
     if (!(await getPageText(page)).includes('矿洞入口')) {
         console.log('回到起点未到达矿洞入口，当前:', (await getPageText(page)).substring(0, 150));
@@ -341,7 +341,7 @@ async function backToHub(page) {
     for (let i = 0; i < 5 && !(await atHub(page)); i++) {
         if (!(await exitLabel(page, '北'))) break;
         await clickExit(page, '北');
-        await sleep(1500);
+        await sleep(2000);
     }
     return await atHub(page);
 }
@@ -478,12 +478,13 @@ async function runArm(page, arm, tagPrefix = '') {
 //              所以不必再校验副本条件，也绝不能因为弹窗关不掉就回头走 4 线（白跑 8 层×4 线）。
 //   ok=false → 根本没扫荡成（无入口/点击失败/无结果）→ 走原 4 线手动流程。
 async function trySweep(page) {
-    // 副本页是异步渲染的：刚进本时「扫荡」链接可能还没出来，先轮询等一会儿（最多约6秒）
+    // 副本页是异步渲染的：刚进本时「扫荡」链接可能还没出来，先轮询等一会儿（最多约10秒）
+    //  11-25：等渲染的重读统一 2 秒 × 5 次
     let t0 = await getPageText(page);
     let waited = 0;
-    for (let i = 0; i < 4 && !t0.includes('扫荡'); i++) {
-        await sleep(1500);
-        waited += 1.5;
+    for (let i = 0; i < 5 && !t0.includes('扫荡'); i++) {
+        await sleep(2000);
+        waited += 2;
         t0 = await getPageText(page);
     }
     if (t0.includes('扫荡') && waited > 0) console.log(`等待${waited}秒后扫荡入口出现`);
@@ -718,13 +719,13 @@ async function run() {
 
         // 进入副本 → 确定。进本是异步的，固定等2.5秒就下结论会在高峰期误报：
         // 实测点击已生效却被判「未进入」，把号留在副本里毁掉后续全部步骤。
-        // 改为轮询最多45秒等房间标志（副本条件/回到起点），仍没进再补点，最多3轮
+        // 改为轮询最多75秒等房间标志（副本条件/回到起点），仍没进再补点，最多5轮
         console.log('进入副本...');
         let entered = false;
-        for (let round = 1; round <= 3 && !entered; round++) {
+        for (let round = 1; round <= 5 && !entered; round++) {
             if (round > 1) console.log(`第${round}轮重新点击进入副本...`);
             await clickText(page, '进入副本', 3000);
-            await sleep(1500);
+            await sleep(2000);
             await clickExact(page, '确定');
             for (let w = 0; w < 15; w++) {
                 await sleep(1000);
@@ -866,7 +867,7 @@ async function run() {
             // 领奖要循环：可能还有「扫荡收获」压在下面，一层层关，直到「领取奖励」消失
             // 或已经离开副本页。只点一次「确定」在弹窗叠层时会半途而废（boss(0) 实证）。
             let got = false;
-            for (let round = 1; round <= 4; round++) {
+            for (let round = 1; round <= 5; round++) {
                 pageText = await getPageText(page);
                 if (!pageText.includes('副本条件')) { got = true; break; }
                 if (!pageText.includes('领取奖励')) { got = true; break; }
@@ -875,10 +876,10 @@ async function run() {
                     console.log('「领取奖励」点不到');
                     break;
                 }
-                await sleep(1500);
+                await sleep(2000);
                 // 点「确定」的同时抓奖励明细（toast 是点完确定才弹、只活一两秒，见 dungeon-recover.js）
                 await drain.dismissPopups(page, { log: console.log });
-                await sleep(1500);
+                await sleep(2000);
             }
             claimToast = (await toastP) || '';
             if (claimToast) {

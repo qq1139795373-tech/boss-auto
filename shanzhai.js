@@ -415,7 +415,7 @@ async function plantAll(page) {
 // 兼容「1天0时」这种跨天写法：榴莲基础 24h 未浇水时可能直接显示天。
 // 读不到（已成熟显示「可收 剩N」/ 页面没渲染）返回 null。
 async function readGrowMinutes(page) {
-    for (let i = 1; i <= 3; i++) {
+    for (let i = 1; i <= 5; i++) {
         const t = await getPageText(page);
         const re = /生长\s*(?:(\d+)\s*天)?\s*(\d+)\s*时\s*(?:(\d+)\s*分)?/g;
         const mins = [];
@@ -424,7 +424,7 @@ async function readGrowMinutes(page) {
             mins.push((+(m[1] || 0)) * 1440 + (+m[2]) * 60 + (+(m[3] || 0)));
         }
         if (mins.length) return Math.min(...mins);
-        await sleep(1200);
+        await sleep(2000);
     }
     return null;
 }

@@ -183,7 +183,7 @@ async function closeResult(page) {
 }
 
 async function exitArena(page) {
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 5; i++) {
         let t = await getPageText(page);
         if (!atArena(t) && (t.includes('当前城市') || t.includes('你看到'))) {
             return true;

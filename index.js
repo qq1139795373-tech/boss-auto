@@ -385,7 +385,7 @@ async function teleportToDest(page) {
 
         // 打开传送面板并验证：区域标签出现才算真打开（坐标点击被遮罩吃掉会假成功）
         let panelOpen = false;
-        for (let i = 0; i < 3 && !panelOpen; i++) {
+        for (let i = 0; i < 5 && !panelOpen; i++) {
             let ok = await clickText(page, '传送', 2000);
             if (!ok) {
                 await clickText(page, '城内地图');
@@ -394,7 +394,7 @@ async function teleportToDest(page) {
                 await sleep(3000);
                 ok = await clickText(page, '传送');
             }
-            await sleep(1500);
+            await sleep(2000);
             const pt = await getPageText(page);
             panelOpen = pt.includes('地中海') && pt.includes('印度洋');
             if (!panelOpen) {
