@@ -183,7 +183,13 @@ async function login(page) {
         const ins = await page.$$('input');
         if (ins.length < 2) {
             const t = await txt(page);
-            if (t.includes('进入游戏') || t.includes('你看到') || t.includes('当前城市')) return true;
+            // ★ 2026-11-25：原来把「进入游戏」也当登录成功，人停在选角页就 return true，
+            //   后面所有步骤都对着没进游戏的页面跑（奔月那边就是这么丢掉背包基线的）。
+            if (t.includes('你看到') || t.includes('当前城市')) return true;
+            if (t.includes('进入游戏')) {
+                log('已登录但停在选角页 → 点「进入游戏」进主界面');
+                return await daily.enterMain(page, { rounds: 8, pauseMs: 4000, log: (m) => log(m) });
+            }
             await gotoGame(page); await sleep(3000); continue;
         }
         await ins[0].fill(ACC); await ins[1].fill(PASSWORD);
