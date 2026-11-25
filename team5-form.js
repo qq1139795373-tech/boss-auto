@@ -28,7 +28,7 @@ const daily = require('./daily.js');
 const acct = require('./acct-lock.js');
 const pass = require('./account-pass.js');
 
-const URL = 'http://yiyu.yiyutx.top/yysh/#/pages/login/login';
+const { LOGIN_URL: URL } = require('./game-url.js');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const txt = (p) => daily.getPageText(p);
 const flat = (s) => (s || '').replace(/\s+/g, ' ').trim();

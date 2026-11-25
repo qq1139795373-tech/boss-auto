@@ -30,7 +30,7 @@ const { createBagReader, evTo } = require('./bag-read.js');
 const acct = require('./acct-lock.js');
 const pass = require('./account-pass.js');
 
-const URL = 'http://yiyu.yiyutx.top/yysh/#/pages/login/login';
+const { LOGIN_URL: URL } = require('./game-url.js');
 const ACC = process.env.GAME_ACCOUNT || process.env.ACCOUNT || 'coldwind';
 // ★ 密码按账号解析，缺了在 main() 里 exit 2（11-22）：原来缺 GAME_PASSWORD 时是空串，
 //   会往密码框里填 ""，报错变成「登录失败」看不出原因。大号小号密码不同，这里不做任何默认值。

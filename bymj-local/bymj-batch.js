@@ -21,7 +21,7 @@ const drain = require('../dungeon-recover.js');
 const { createBagReader, evTo } = require('../bag-read.js');
 const acct = require('../acct-lock.js');
 
-const URL = 'http://yiyu.yiyutx.top/yysh/#/pages/login/login';
+const { LOGIN_URL: URL } = require('../game-url.js');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // 页面文本也套硬超时：page.evaluate 不受 setDefaultTimeout 约束，超时会整趟静默挂死（11-19 22:25 实证）
 const txt = (page) => Promise.race([daily.getPageText(page), evTo(12000)]);
