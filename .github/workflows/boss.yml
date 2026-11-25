@@ -15,6 +15,10 @@ on:
         description: '攻城验证（非活动日也能用）：view=只读攻城页(不出航/不花铜贝) | test=走到城门刷新但不出手；留空=正常流程'
         type: string
         default: ''
+      couple_now:
+        description: '补跑当天 06:00 那趟情侣副本：true=不在 06:00-08:59 也真跑（同时关掉这趟的 Run Boss / Run Farm）。定时派发不受影响'
+        type: boolean
+        default: false
 
 # job-gate.js 要通过 REST API 查「另一个分支那个 run 里的 job 是否结束」，只需要 actions: read。
 permissions:
@@ -74,10 +78,14 @@ jobs:
       # 先判窗口再装依赖：四趟派发都会拉起本 job，只有 06:00 那趟该真跑。
       - id: win
         name: 判断是否在 06:00-08:59
+        env:
+          # couple_now=true 时绕开窗口，只用于「当天 06:00 那趟没跑成、当天补跑」。
+          # 定时派发（cron-job.org 直调 API）不带任何 inputs，本变量为空，行为与原来一致。
+          COUPLE_NOW: ${{ inputs.couple_now }}
         run: |
-          ok=$(node -e "process.stdout.write(require('./qllm-daily.js').shouldRunCouple() ? 'yes' : 'no')")
+          ok=$(node -e "const f = process.env.COUPLE_NOW === 'true'; process.stdout.write((f || require('./qllm-daily.js').shouldRunCouple()) ? 'yes' : 'no')")
           echo "run=$ok" >> "$GITHUB_OUTPUT"
-          echo "情侣迷宫窗口=06:00-08:59 → 本趟[$ok]"
+          echo "情侣迷宫窗口=06:00-08:59 → 本趟[$ok]（couple_now=${COUPLE_NOW:-未设}）"
 
       - name: Setup
         if: steps.win.outputs.run == 'yes'
@@ -103,6 +111,8 @@ jobs:
           # 属于 multi-boss 那一侧四个小号。本 job 万一被改到大号之外的配对（比如冷0+冷8），
           # 会在登录之前被拒掉并 warning —— 那两个号此刻正被多本分支的 matrix/couple 使用。
           QLLM_RESERVED: 'coldwind0,coldwind1,coldwind2,coldwind8'
+          # 补跑当天那趟：qllm-daily.js 自己也判窗口，QLLM_FORCE=1 才算真放行
+          QLLM_FORCE: ${{ inputs.couple_now && '1' || '' }}
         if: steps.win.outputs.run == 'yes'
         run: node qllm-daily.js
 
@@ -137,7 +147,7 @@ jobs:
 
       - name: 随机错峰 + 让 form 先组队
         # 攻城验证模式不需要错峰：不出航、不抢怪，直接登录拿结果
-        if: ${{ inputs.gc_mode == '' }}
+        if: ${{ inputs.gc_mode == '' && !inputs.couple_now }}
         env:
           # 11:30 那趟让路：multi-boss 的 form job 要登大号组 5 人队，本 job 若同时登大号会互顶
           # → 少一个队员（11-23 实测只组到 4/5）。
@@ -167,7 +177,7 @@ jobs:
 
       - name: Run Boss
         # gc_mode 非空 = 只做攻城验证，不浪费 runner 去打 boss
-        if: ${{ inputs.gc_mode == '' }}
+        if: ${{ inputs.gc_mode == '' && !inputs.couple_now }}
         env:
           GAME_ACCOUNT: ${{ secrets.GAME_ACCOUNT }}
           GAME_PASSWORD: ${{ secrets.GAME_PASSWORD }}
@@ -176,7 +186,7 @@ jobs:
       - name: Run Farm
         # 旧版是 success()：boss 失败就整天不刷怪。现在只要没被取消就刷，
         # 打 boss 失败不等于刷怪没意义（11-22 与 multi-boss 统一口径）。
-        if: ${{ inputs.gc_mode == '' && !cancelled() }}
+        if: ${{ inputs.gc_mode == '' && !cancelled() && !inputs.couple_now }}
         env:
           GAME_ACCOUNT: ${{ secrets.GAME_ACCOUNT }}
           GAME_PASSWORD: ${{ secrets.GAME_PASSWORD }}
