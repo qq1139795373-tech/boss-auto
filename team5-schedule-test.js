@@ -45,23 +45,48 @@ t('窗口内没有任何一分钟落在 11:56 之后（给 boss 至少留 34 分
     }
 });
 
-console.log('\n[3b] 组队重试轮数（失败重试两次 = 共 3 轮，非法值回退默认）');
-t('默认 3 轮', () => assert.strictEqual(envInt(undefined, 3, 1, 5), 3));
-t('空串 / 非数字 → 回退默认 3', () => {
-    assert.strictEqual(envInt('', 3, 1, 5), 3);
-    assert.strictEqual(envInt('abc', 3, 1, 5), 3);
-    assert.strictEqual(envInt('null', 3, 1, 5), 3);
+console.log('\n[3b] 组队重试轮数（失败重试四次 = 共 5 轮，非法值回退默认）');
+t('默认 5 轮', () => assert.strictEqual(envInt(undefined, 5, 1, 5), 5));
+t('空串 / 非数字 → 回退默认 5', () => {
+    assert.strictEqual(envInt('', 5, 1, 5), 5);
+    assert.strictEqual(envInt('abc', 5, 1, 5), 5);
+    assert.strictEqual(envInt('null', 5, 1, 5), 5);
 });
-t('越界（0 / 6 / 负数）→ 回退默认 3', () => {
-    assert.strictEqual(envInt('0', 3, 1, 5), 3);
-    assert.strictEqual(envInt('6', 3, 1, 5), 3);
-    assert.strictEqual(envInt('-2', 3, 1, 5), 3);
+t('越界（0 / 6 / 负数）→ 回退默认 5', () => {
+    assert.strictEqual(envInt('0', 5, 1, 5), 5);
+    assert.strictEqual(envInt('6', 5, 1, 5), 5);
+    assert.strictEqual(envInt('-2', 5, 1, 5), 5);
 });
 t('合法值 1 / 5 原样生效', () => {
-    assert.strictEqual(envInt('1', 3, 1, 5), 1);
-    assert.strictEqual(envInt('5', 3, 1, 5), 5);
+    assert.strictEqual(envInt('1', 5, 1, 5), 1);
+    assert.strictEqual(envInt('5', 5, 1, 5), 5);
 });
-t('★ 默认必须是 3（用户要求：失败后再试两次才放弃）', () => assert.strictEqual(TEAM5_ATTEMPTS, 3));
+t('★ 默认必须是 5（用户 11-24：只有三次重试的统一加到 5 次）', () => assert.strictEqual(TEAM5_ATTEMPTS, 5));
+
+console.log('\n[3c] 登录必须真进主界面（11-25 冷1 卡选角页 → 组队死锁 4/5）');
+{
+    const fs = require('fs');
+    const path = require('path');
+    const SRC = fs.readFileSync(path.join(__dirname, 'team5-form.js'), 'utf8');
+    t('点击「进入游戏」走 daily.clickEnterGame（坐标/合成事件/force 三层），不再用 clickText', () => {
+        assert.ok(/daily\.clickEnterGame\(page\)/.test(SRC), '没有用强点击');
+        assert.ok(!/daily\.clickText\(page, '进入游戏'/.test(SRC), '仍在用会静默失效的 clickText');
+    });
+    t('enterMain 存在且失败时返回 false（不许假装成功）', () => {
+        const m = SRC.match(/async function enterMain\(page\)[\s\S]*?\n}\n/);
+        assert.ok(m, '没有 enterMain 函数');
+        assert.ok(/return false;/.test(m[0]), 'enterMain 不会返回 false');
+    });
+    t('login 里旧的「点 8 次 clickText 然后 return true」已移除', () => {
+        const m = SRC.match(/async function login\(page, acc, pwd\)[\s\S]*?\n}\n/);
+        assert.ok(m, '没有 login 函数');
+        assert.ok(!/for \(let i = 0; i < 8; i\+\+\)/.test(m[0]), '旧的 8 次循环还在（点不进去也当成功）');
+        assert.ok(/enterMain\(page\)/.test(m[0]), 'login 没有调到 enterMain');
+    });
+    t('登录失败的号要从 P 里剔除（不留着空点邀请）', () => {
+        assert.ok(/if \(!ok\) \{[\s\S]{0,200}delete P\[a\]/.test(SRC), '登录失败没有清掉页面');
+    });
+}
 
 console.log('\n[4] bjNow 时区换算');
 t('UTC 03:40 → 北京 11:40', () => {

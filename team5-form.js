@@ -19,7 +19,7 @@
 //   CI 里两份来源都能拿到：secrets.GAME_ACCOUNT/GAME_PASSWORD=大号，secrets.GAME_ACCOUNTS_JSON=小号表。
 //
 // 用法（boss-auto 目录）：
-//   node team5-form.js                     组队并复核 5/5（仅在 11:15-11:55 北京时间执行，失败重试到 3 轮）
+//   node team5-form.js                     组队并复核 5/5（仅在 11:15-11:55 北京时间执行，失败重试到 5 轮）
 //   TEAM5_FORCE=1 node team5-form.js       跳过时间窗口（本地验证用）
 //   DROP_MEMBERS=1 node team5-form.js      组完关掉 4 个队员，复核队伍是否还在（验证离线保留）
 // 退出码：0=5/5 成立（或不在窗口内主动跳过）；2=没组满 / 关键步骤失败
@@ -50,10 +50,9 @@ const nickOf = (a) => NICK[a] || a;
 // 而且 0:00 副本会拆队）。
 //
 // ★ 时间账（11-23 深夜按用户要求放宽：boss 时段 11:30-12:30 共 60 分钟，比原先算的宽裕）：
-//   组队本体实测 165s；失败重试最多 3 轮（见 TEAM5_ATTEMPTS），最坏 ~5 分钟；
-//   前置 CI 冷启动（checkout + setup-node + npm install + playwright install）90~180s。
-//   11:30 派发 → form 约 11:32~11:34 启动 → 11:35~11:38 到 5/5（重试全用完也不晚于 11:43）
-//   → matrix 各号登录 + 0~299s 随机错峰，最早 11:36、最晚 11:44 跑到 index.js。
+//   组队本体实测 165s（一次成）/ 3 轮没满约 7.7 分钟（11-25 实测 463s）；
+//   默认 5 轮全用完 ~11.4 分钟（见 TEAM5_ATTEMPTS），前置 CI 冷启动 90~180s。
+//   11:30 派发 → form 约 11:32~11:34 启动 → 最坏 11:45 收工，仍早于 12:30 boss 时段结束。
 //   到 12:30 收摊，可用 46~54 分钟。
 //   上限放到 11:55 是为了「迟到派发也有救」：11:55 启动 → 约 11:58 组完 → 仍有 30 分钟打 boss，
 //   比直接放弃这一段加成划算。再晚（12:00 之后）就没意义了，所以窗口到 11:55 为止。
@@ -63,15 +62,17 @@ const nickOf = (a) => NICK[a] || a;
 const WINDOW_START_MIN = 11 * 60 + 15;
 const WINDOW_END_MIN = 11 * 60 + 55;
 
-// 组队最多试几轮（含第一轮）。用户 11-23 23:03：失败重试两次，还不成才放着照打 boss。
-// 上限 5 是为了防止误配成很大的值把 form job 撑爆（job timeout 25 分钟兜底）。
+// 组队最多试几轮（含第一轮）。
+// 11-23 用户：失败重试两次，还不成才放着照打 boss（当时默认 3）；
+// 11-24 用户：「类似于这种只有三次重试的加到5次」→ 默认改 5 轮。
+// 上限 5 也是 envInt 的硬顶（防止误配成很大的值把 form job 撑爆，job timeout 25 分钟兜底）。
 function envInt(v, dflt, lo, hi) {
     const n = Number(String(v === undefined ? '' : v).trim());
     if (!Number.isFinite(n)) return dflt;
     const i = Math.trunc(n);
     return i < lo || i > hi ? dflt : i;
 }
-const TEAM5_ATTEMPTS = envInt(process.env.TEAM5_ATTEMPTS, 3, 1, 5);
+const TEAM5_ATTEMPTS = envInt(process.env.TEAM5_ATTEMPTS, 5, 1, 5);
 const TEAM5_RETRY_PAUSE_MS = envInt(process.env.TEAM5_RETRY_PAUSE_MS, 5000, 0, 60000);
 
 function bjNow(nowMs) {
@@ -164,27 +165,49 @@ async function clickHard(page, s, exact = true) {
     if (r) await sleep(2400);
     return r;
 }
+// 从「进入游戏」点到真正进主界面。
+// 11-25 血案：笑呵呵(coldwind1) 登录后停在选角页，旧实现用 daily.clickText 连点 8 次
+// 全部点空（按钮在遮罩/自绘层下，Playwright 报成功但页面没动），而且第 8 次之后
+// 直接 `return true` —— 日志写着「登录成功」，后面 3 轮邀请「同意」也点不到，
+// 组队永远 4/5，还查不出原因。这里两层修正：
+//   1) 点击走 daily.clickEnterGame（坐标点击 → 合成事件 → force 三层兜底）；
+//   2) 成功判据只认「你看到 / 当前城市」，进不去就返回 false，绝不假装成功。
+// 选角页要点两次：第一次把登录页切到选角，第二次才是真进游戏。
+async function enterMain(page) {
+    for (let i = 0; i < 10; i++) {
+        const how = await daily.clickEnterGame(page).catch(() => null);
+        await sleep(4000);
+        let t = await txt(page);
+        if (t.includes('你看到') || t.includes('当前城市')) return true;
+        if (t.includes('选择角色')) {
+            await daily.clickEnterGame(page).catch(() => null);
+            await sleep(4000);
+            t = await txt(page);
+            if (t.includes('你看到') || t.includes('当前城市')) return true;
+        }
+        if (!how) console.log(`[login] 第 ${i + 1} 轮没找到「进入游戏」按钮（页面：${flat(t).slice(0, 60)}）`);
+    }
+    return false;
+}
 async function login(page, acc, pwd) {
     for (let a = 1; a <= 10; a++) {
         const ins = await page.$$('input');
         if (ins.length < 2) {
             const t = await txt(page);
-            if (t.includes('进入游戏') || t.includes('你看到') || t.includes('当前城市')) return true;
+            if (t.includes('你看到') || t.includes('当前城市')) return true;
+            // 原来这里看到「进入游戏」就 return true —— 停在选角页会被当成已登录。
+            if (t.includes('进入游戏') && await enterMain(page)) return true;
             await page.goto(URL, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => { });
             await sleep(3000); continue;
         }
         await ins[0].fill(acc); await ins[1].fill(pwd);
         await page.getByText('登录').first().click().catch(() => { });
         await sleep(3000);
-        let t = await txt(page);
+        const t = await txt(page);
         if (t.includes('进入游戏') || t.includes('你看到') || t.includes('当前城市')) {
-            for (let i = 0; i < 8; i++) {
-                await daily.clickText(page, '进入游戏', 2000).catch(() => { });
-                await sleep(4000);
-                t = await txt(page);
-                if (t.includes('你看到') || t.includes('当前城市')) return true;
-            }
-            return true;
+            if (t.includes('你看到') || t.includes('当前城市')) return true;
+            if (await enterMain(page)) return true;
+            return false;
         }
     }
     return false;
@@ -297,6 +320,13 @@ async function main() {
         await sleep(2800);
         const ok = await login(page, a, AUTH[a].password);
         log(a, `${nickOf(a)} 登录${ok ? '成功' : '失败'}`);
+        if (!ok) {
+            // 没进主界面就拿不到队伍按钮，留着只会让后面「邀请/同意」空点、白耗两分钟
+            log(a, '停在选角/登录页没进去 → 本号不参与组队');
+            await page.close().catch(() => { });
+            delete P[a];
+            return;
+        }
         await sleep(2200);
         await page.keyboard.press('Escape').catch(() => { });
         await sleep(800);
@@ -374,7 +404,7 @@ async function main() {
             }
         }
     };
-    // 5) 每一轮：邀请 → 队员同意 → 复核人数。不满 5 人就再来一轮（默认 3 轮，可用环境变量调）。
+    // 5) 每一轮：邀请 → 队员同意 → 复核人数。不满 5 人就再来一轮（默认 5 轮，可用环境变量调）。
     //    重试能救的是「邀请没点到 / 队员接受慢」这类偶发失败；救不了「这个号正被另一条分支的
     //    runner 登录着」——那种情况邀请列表里根本点不中，几轮都组不满，最后照常去打 boss。
     let panel = '';
