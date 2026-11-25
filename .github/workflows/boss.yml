@@ -274,15 +274,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ★ 刷怪闸门（11-25）：必须放在 Job 最前面，用「Job 启动这一刻的北京小时」判断。
-      #   00:00 趟的 dawn 要跑 60 分钟，farm 真正开始时已经 01:0x，按那时的钟点判断会漏掉这一趟。
-      #   开关 = 仓库变量 SKIP_FARM_HOURS（逗号分隔北京小时，如 0,1,2,5,6,7）；
-      #   空 / 未设 = 每趟都刷怪，即一直以来的行为。
-      - name: 判断本趟是否刷怪
-        env:
-          SKIP_FARM_HOURS: ${{ vars.SKIP_FARM_HOURS }}
-        run: node farm-gate.js
-
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -340,7 +331,7 @@ jobs:
         run: node index.js
 
       - name: Run Farm
-        if: ${{ inputs.gc_mode == '' && !inputs.force && hashFiles('.skip-run') == '' && env.BOSS_SKIP_RUN != '1' && hashFiles('.farm-skip') == '' && env.FARM_SKIP != '1' }}
+        if: ${{ inputs.gc_mode == '' && !inputs.force && hashFiles('.skip-run') == '' && env.BOSS_SKIP_RUN != '1' }}
         run: node farm.js
 
       - name: Upload Screenshots
