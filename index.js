@@ -2,6 +2,8 @@ const { LOGIN_URL } = require('./game-url.js');
 const { chromium } = require('playwright');
 // 只读可见节点的页面文本（避免 display:none 残留节点造成的幽灵文案）
 const { visibleText } = require('./dungeon-recover.js');
+// 进入游戏按钮的强点击（坐标 → 合成事件 → force）：getByText 点击在选角页会静默失效
+const daily = require('./daily.js');
 
 const ACCOUNT = process.env.GAME_ACCOUNT;
 const PASSWORD = process.env.GAME_PASSWORD;
@@ -520,17 +522,29 @@ async function run() {
 
         await closePopup(page);
         await sleep(1000);
-        await clickText(page, '进入游戏');
-        await sleep(3000);
 
+        // 进入游戏：选角页这个按钮常被遮罩/自绘层盖住，getByText().click() 会「报成功但页面没动」
+        // ——11-25 冷6 就这样连点两次仍停在选角页，整趟世界 boss 被跳过。
+        // 改用 daily.clickEnterGame（坐标点击 → 合成事件 → force）循环 10 轮，
+        // 成功判据只认「你看到 / 当前城市」，不再靠一次点击就下结论。
         let pageText = await getPageText(page);
-        if (pageText.includes('选择角色') || pageText.includes('Lv.')) {
-            console.log('在选角界面，再次点击进入游戏...');
-            await clickText(page, '进入游戏');
-            await sleep(3000);
+        let entered = pageText.includes('你看到') || pageText.includes('当前城市');
+        for (let i = 0; i < 10 && !entered; i++) {
+            const how = await daily.clickEnterGame(page).catch(() => null);
+            await sleep(4000);
             pageText = await getPageText(page);
+            entered = pageText.includes('你看到') || pageText.includes('当前城市');
+            // 选角页要点两次：第一次把登录页切到选角，第二次才是真进游戏
+            if (!entered && (pageText.includes('选择角色') || pageText.includes('Lv.'))) {
+                console.log(`在选角界面（第 ${i + 1} 轮），再点一次进入游戏...`);
+                await daily.clickEnterGame(page).catch(() => null);
+                await sleep(4000);
+                pageText = await getPageText(page);
+                entered = pageText.includes('你看到') || pageText.includes('当前城市');
+            }
+            if (!how && !entered) console.log(`进入游戏第 ${i + 1} 轮 → 没找到「进入游戏」按钮`);
         }
-        if (!(pageText.includes('你看到') || pageText.includes('当前城市'))) {
+        if (!entered) {
             console.log('ERROR: 未进入游戏主界面，跳过本次boss');
             console.log('::error::Run Boss 未进入游戏主界面，本次boss已跳过');
             await page.screenshot({ path: 'boss-login-fail.png' }).catch(() => {});

@@ -152,6 +152,36 @@ async function clickLeaf(page, text) {
     }, text);
 }
 
+// 点「进入游戏」：登录页/选角页这个按钮经常被 uni-toast 遮罩或自绘层挡住，
+// Playwright 的 getByText().click() 会「点成功但没反应」——不是抛错，静默失效。
+// 2026-11-25 实测：笑呵呵(coldwind1) 登录后停在选角页，连点 8 次「进入游戏」无效，
+// 组队只到 4/5；同一时刻 farm.js 用的坐标点击能进。所以这里收成三层兜底：
+// 坐标点击（取最后一个叶子节点中心，选角页按钮后渲染）→ 合成事件 → force。
+// 返回命中的方式字符串，没找到按钮返回 null（调用方据此判断要不要重试）。
+async function clickEnterGame(page) {
+    const pos = await page.evaluate(() => {
+        const all = [...document.querySelectorAll('body *')].filter(el => {
+            const s = (el.textContent || '').trim();
+            const r = el.getBoundingClientRect();
+            return el.children.length === 0 && r.width > 0 && r.height > 0 && s === '进入游戏';
+        });
+        if (!all.length) return null;
+        const r = all[all.length - 1].getBoundingClientRect();
+        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+    }).catch(() => null);
+    if (pos) {
+        await page.mouse.click(pos.x, pos.y).catch(() => { });
+        return `坐标(${pos.x},${pos.y})`;
+    }
+    if (await clickLeaf(page, '进入游戏').catch(() => false)) return '合成事件';
+    try {
+        await page.getByText('进入游戏', { exact: false }).first().click({ force: true, timeout: 5000 });
+        return 'force';
+    } catch {
+        return null;
+    }
+}
+
 // 选海域标签：.region-bar 是横向滚动，最右「新大陆」默认被裁掉，找不到就横滚再找
 // 返回 true=已切到该海域 / 'nomap'=该号没有这个海域的海图（点标签即弹「暂无地图，查看失败」）/ false=点不到
 async function selectRegion(page, region) {
@@ -2031,7 +2061,7 @@ async function run() {
 if (require.main === module) run();
 
 module.exports = {
-    sleep, gotoGame, getPageText, clickText, clickLeaf, clickExact,
+    sleep, gotoGame, getPageText, clickText, clickLeaf, clickExact, clickEnterGame,
     selectRegion, sailTo, sailFailReason, currentCity,
     teleportToDest,
     openDailyList, parseDailyTasks, clickRow, atCity, onMainPage, backToMain, backToCity,
