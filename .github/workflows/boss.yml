@@ -31,6 +31,10 @@ on:
         description: '攻城验证（只验证脚本能否跑通，非活动日也能用）：view=只读攻城页(不出航/不花铜贝) | test=走到城门刷新但不出手；留空=正常流程'
         type: string
         default: ''
+      couple_now:
+        description: '补跑当天 06:00 那趟情侣副本：true=不在 06:00-08:59 也真跑（同时关掉这趟的 Run Boss / Run Farm）。定时派发不受影响'
+        type: boolean
+        default: false
 
 # job-gate.js 要通过 REST API 查「另一个分支那个 run 里的 job 是否结束」，只需要 actions: read。
 # 显式声明而不是吃仓库默认值：默认值可能被仓库设置改成只读/只写，改了这边不会跟着坏。
@@ -214,10 +218,14 @@ jobs:
       #   判定源用 qllm-daily.js 导出的 shouldRunCouple()，不在这里重写一份口径（避免两处不一致）。
       - id: win
         name: 判断是否在 06:00-08:59
+        env:
+          # couple_now=true 时绕开窗口，只用于「当天 06:00 那趟没跑成、当天补跑」。
+          # 定时派发（cron-job.org 直调 API）不带任何 inputs，本变量为空，行为与原来一致。
+          COUPLE_NOW: ${{ inputs.couple_now }}
         run: |
-          ok=$(node -e "process.stdout.write(require('./qllm-daily.js').shouldRunCouple() ? 'yes' : 'no')")
+          ok=$(node -e "const f = process.env.COUPLE_NOW === 'true'; process.stdout.write((f || require('./qllm-daily.js').shouldRunCouple()) ? 'yes' : 'no')")
           echo "run=$ok" >> "$GITHUB_OUTPUT"
-          echo "情侣迷宫窗口=06:00-08:59 → 本趟[$ok]"
+          echo "情侣迷宫窗口=06:00-08:59 → 本趟[$ok]（couple_now=${COUPLE_NOW:-未设}）"
 
       - name: 校验账号表（每项必须有 account + password）
         if: steps.win.outputs.run == 'yes'
@@ -244,6 +252,8 @@ jobs:
           # 属于 master 分支那一对的号：大号跑 dawn 11 步、冷6 陪大号打情侣副本，都不归本分支。
           # 本 job 万一被配到这两号会直接跳过该对并 warning（见 qllm-daily.js 的 reservedHits）。
           QLLM_RESERVED: 'coldwind,coldwind6'
+          # 补跑当天那趟：qllm-daily.js 自己也判窗口，QLLM_FORCE=1 才算真放行
+          QLLM_FORCE: ${{ inputs.couple_now && '1' || '' }}
         if: steps.win.outputs.run == 'yes'
         run: node qllm-daily.js
 
@@ -291,7 +301,7 @@ jobs:
       - name: 随机错峰 + 跨分支避让
         # 攻城验证模式不需要错峰：不出航、不抢怪，各号同时登录反而更快拿到结果
         # （避让也一起跳过：gc_mode 下不跑 dawn 链，不碰情侣副本）
-        if: ${{ inputs.gc_mode == '' }}
+        if: ${{ inputs.gc_mode == '' && !inputs.couple_now }}
         env:
           # 冷6 的伴侣是大号，那对由 master 的 couple job 在 06:00 打。
           # 这里不再写「等到几点」——写死的钟点会被 runner 排队和游戏卡顿顶穿（用户 23:35）。
@@ -322,7 +332,7 @@ jobs:
 
       - name: Run Boss
         # gc_mode 非空 = 只做攻城验证，不浪费 runner 去打 boss
-        if: ${{ inputs.gc_mode == '' && hashFiles('.skip-run') == '' && env.BOSS_SKIP_RUN != '1' }}
+        if: ${{ inputs.gc_mode == '' && !inputs.couple_now && hashFiles('.skip-run') == '' && env.BOSS_SKIP_RUN != '1' }}
         env:
           BOSS_FORCE: ${{ inputs.force }}
           NAV_DEST: ${{ inputs.nav_dest }}
@@ -331,7 +341,7 @@ jobs:
         run: node index.js
 
       - name: Run Farm
-        if: ${{ inputs.gc_mode == '' && !inputs.force && hashFiles('.skip-run') == '' && env.BOSS_SKIP_RUN != '1' }}
+        if: ${{ inputs.gc_mode == '' && !inputs.force && !inputs.couple_now && hashFiles('.skip-run') == '' && env.BOSS_SKIP_RUN != '1' }}
         run: node farm.js
 
       - name: Upload Screenshots
