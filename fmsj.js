@@ -456,7 +456,7 @@ async function reconcile(page, bagBefore, toastOk) {
         log('✔ 领奖到账（背包增量）: ' + hit.map((n) => `${n} +${delta[n]}（需 +${FMSJ_REWARDS[n]}）`).join('，'));
         return true;
     }
-    if (toastOk) { log('（明细原文已确认到账，背包增量没体现属正常：宝箱可能直接进系统）'); return null; }
+    if (toastOk) { log('（明细原文已确认到账，背包增量没体现属正常：宝箱可能已被开启/使用）'); return null; }
     log('::warning::背包增量不足（' + names.map((n) => `${n} +${delta[n]}`).join('，') + '）');
     return false;
 }

@@ -173,14 +173,17 @@ function envKeyFor(acc) {
     return 'GAME_PASSWORD_' + String(acc).toUpperCase().replace(/[^A-Z0-9_]/g, '_');
 }
 
-// 纯函数：把 qllm-run.js MODE=full 的退出码翻译成三种去向。
+// 纯函数：把 qllm-run.js MODE=full 的退出码翻译成四种去向。
 //   0 = 正常跑完（怪清完、队长领奖了）→ 必须接着跑第二段（队员单独领奖）
 //   3 = 今日已完成（入口页剩余 0 次）→ 跳过第二段，白登录一次没有必要
+//   7 = 怪清完了但**队长领奖失败**（11-25 新增）→ 报 error，但**仍然跑第二段**：
+//       条件队伍共享，队员那一侧还有机会领到，不能因为队长没领就放弃。
 //   其他 = 失败 → 不跑第二段（队员没进过本，没有奖可领）
 // 抽成纯函数是为了能离线单测：真跑一次要登录两个号、耗 10 分钟，不适合每次都验证。
 function classifyFirstStage(code) {
     if (code === 3) return 'already-done';
     if (code === 0) return 'ok';
+    if (code === 7) return 'leader-claim-fail';
     return 'fail';
 }
 
@@ -257,11 +260,28 @@ async function runPair(pair, pwdTable) {
         console.log(`[qllm-daily] ::error::${tag} 第一段失败 exit=${c1}，跳过第二段（队员侧没进本，领不了奖）`);
         return false;
     }
+    if (verdict === 'leader-claim-fail') {
+        // 怪清完了、队长没领到：不放弃，继续跑第二段（条件队伍共享，队员那侧可能还能领）
+        console.log(`[qllm-daily] ::error::${tag} 队长领奖失败 exit=${c1}（怪已清完，继续跑第二段让队员试）`);
+    }
 
     console.log(`[qllm-daily] === ${tag} 第二段：队员单独领奖（MODE=memberclaim，约 20~90 秒）`);
     const c2 = await runQllm({ ...baseEnv, MODE: 'memberclaim', MEMBER: pair.member });
+    // ★ 11-25：第二段的返回码必须细分，否则「登录停在选角页」「没点到领取奖励」都会被
+    //   原来的 `c2 !== 0` 之外的写法洗成「✓ 两段完成」（21:19 那次冷8 就是这么漏掉的）：
+    //     0 = 领到    5 = 已出本（可能今天领过，不算失败但明说）
+    //     4 = 登录没进主界面 / 不在副本也不在城市    6 = 在副本里但没点到「领取奖励」
+    if (c2 === 5) {
+        console.log(`[qllm-daily] ::warning::${tag} 第二段：队员登录后已出本，本次没有可领的奖（若今天没领过，说明副本被结算/踢出）`);
+        return verdict === 'ok';
+    }
     if (c2 !== 0) {
-        console.log(`[qllm-daily] ::error::${tag} 第二段失败 exit=${c2}（怪已清完，明天这次奖励没领到）`);
+        console.log(`[qllm-daily] ::error::${tag} 第二段失败 exit=${c2}（怪已清完，这次队员的奖励没领到：4=没进游戏/不在副本，6=没点到领取奖励）`);
+        return false;
+    }
+    if (verdict === 'leader-claim-fail') {
+        // 队长没领到、队员领到了 → 这一对不算全成功，必须报出来
+        console.log(`[qllm-daily] ::warning::${tag} 队员已领到奖，但队长那一侧领奖失败`);
         return false;
     }
     console.log(`[qllm-daily] ✓ ${tag} 两段完成`);

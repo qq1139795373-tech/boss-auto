@@ -37,6 +37,10 @@ try { pass.assertSameClass(ACCOUNTS); }
 catch (e) { console.log('::error::' + e.message); process.exit(2); }
 const PASSWORD = pass.resolveOrExit(ACCOUNTS[0]).password;
 const MAX_SEC = Number(process.env.MAX_SEC || 3300);
+// ★ 奔月秘境通关奖励（11-19 22:58 逐副本点详情页实抓，表在 hdwang-local/hdwang-batch.js:36）：
+//   奔月副本箱 ×1 / 浴火之蝶 ×1 / 藏宝图碎片 ×10。三者任一数量达标即算到账。
+//   箱子是主证据（回城后读背包比 +1），明细原文是第二证据 —— 两条独立，缺一条不影响另一条。
+const BYMJ_REWARDS = { '奔月副本箱': 1, '浴火之蝶': 1, '藏宝图碎片': 10 };
 const CLAIM = process.env.CLAIM !== '0';
 const TEAM_NAME = process.env.BYMJ_TEAM || '一起战斗吧！';
 
@@ -411,6 +415,16 @@ async function enterDungeon(page) {
         if (!(await clickHard(page, '查看队伍', true))) { st.reason = 'no-teamview'; return false; }
         let tt = await txt(page);
         log('队伍面板: ' + tt.replace(/\s+/g, ' ').slice(0, 160));
+        // ★ 11-25 修：面板刚弹出时整块还是「加载中」，既没有「退出」也没有「解散」，
+        //   原来在这里直接判 error 退出（冷8 今天 72s 就这么废掉了当天那次奔月）。
+        //   现在等它加载完再判，最多再读 4 次（每次 1.5s）。
+        for (let w = 0; w < 4 && !tt.includes('退出') && !tt.includes('解散'); w++) {
+            if (!tt.includes('加载中') && !tt.includes('队伍列表')) break;   // 不是加载态，等也没用
+            log(`队伍面板还在加载，等一下（${w + 1}/4）`);
+            await sleep(1500);
+            tt = await txt(page);
+            log('队伍面板: ' + tt.replace(/\s+/g, ' ').slice(0, 160));
+        }
         let left = false;
         if (tt.includes('退出')) {
             log('是队员 → 退出');
@@ -588,6 +602,11 @@ async function claim(page) {
         return { ok: false, reason: 'no-button' };
     }
     log(`点「领取奖励」（当前条件 ${condStr(conds(t))}）`);
+    // ★ 2026-11-25：明细 toast 只活 1~2 秒，**必须在点「领取奖励」之前把轮询挂上**。
+    //   11-17 那句「这个副本根本不弹领奖明细」是读数时机问题：旧代码点完之后才去页面文本里
+    //   match（现在的兜底那行），toast 早消失了。hdwang 表里奔月的奖励是
+    //   「奔月副本箱 ×1 / 浴火之蝶 ×1 / 藏宝图碎片 ×10」，明细本来是弹的。
+    const toastP = drain.readRewardToast(page, 9000).catch(() => '');
     await clickLeaf(page, '领取奖励', true);
     await sleep(2500);
     let clicked = '';
@@ -607,8 +626,21 @@ async function claim(page) {
         }
     }
     t = await txt(page);
-    const toast = (t.match(/领奖明细[^]{0,300}/) || [''])[0].replace(/\s+/g, ' ').slice(0, 300);
+    const toastRaw = (await toastP) || '';
+    const toast = (toastRaw || (t.match(/领奖明细[^]{0,300}/) || [''])[0]).replace(/\s+/g, ' ').slice(0, 300);
     if (toast) log('领奖明细: ' + toast);
+    // ★ 明细原文判据（2026-11-25，与基德/炼器窟/附魔秘境/海盗王同一口径）：
+    //   按「物品名 ×数量」解析，任一到账物数量 ≥ 期望值即算到账，不写死「0→1」。
+    const toastItems = {};
+    if (toast) {
+        const flatToast = toast.replace(/\s+/g, '');
+        for (const n of Object.keys(BYMJ_REWARDS)) {
+            const m = flatToast.match(new RegExp(n + '[×*x](\\d+)'));
+            if (m) toastItems[n] = Number(m[1]);
+        }
+    }
+    const hitItems = Object.keys(toastItems).filter((n) => toastItems[n] >= BYMJ_REWARDS[n]);
+    if (hitItems.length) log('✔ 领奖到账（明细原文）: ' + hitItems.map((n) => `${n}×${toastItems[n]}（需 ${BYMJ_REWARDS[n]}）`).join('，'));
     await sleep(2500);
     t = await txt(page);
     // 领奖成功的真实形态（2026-11-16 coldwind1/2 实证）：点完「领取奖励 → 确定」后，
@@ -618,11 +650,13 @@ async function claim(page) {
     // ★ 到账只认硬证据：toast「领奖明细」，或入口/页面明确写「今日已完成」。
     //   「点完确定就被传出副本回城」只是现象，条件不足被踢出副本也会这样，
     //   不能当成功判据（2026-11-16 四个号全靠这条已导致一次误报）。
-    let done = t.includes('今日已完成') || !!toast;
-    let why = toast ? '有「领奖明细」' : (done ? '页面显示「今日已完成」' : '');
-    // ★ 硬证据（2026-11-17 coldwind1 实证）：这个游戏领奖后**根本不弹「领奖明细」**。
-    //   冷1 今天跑完点确定被传回长安、无 toast，但背包「奔月副本箱」是 2 个（11-16 + 今天各 1）→ 实际都到账。
-    //   只认 toast 会把已到账的记成 unverified。回城后查背包箱数，比进本前多 1 个即确认到账。
+    let done = t.includes('今日已完成') || hitItems.length > 0;
+    let why = hitItems.length ? `明细原文 ${hitItems.map((n) => `${n}×${toastItems[n]}`).join('、')}`
+        : (done ? '页面显示「今日已完成」' : '');
+    // ★ 硬证据（2026-11-17 coldwind1 实证，2026-11-25 修正）：11-17 记的是「领奖后根本不弹领奖明细」，
+    //   实际是**读数太晚**——旧代码点完「确定」才去页面文本里 match，toast 早消失了。现在点领奖之前
+    //   就挂了 readRewardToast 轮询，明细能抓到。冷1 那天点确定被传回长安、无 toast，但背包箱子是 2 个
+    //   （11-16 + 当天各 1）→ 确实到账。所以两条证据并行：明细原文，或回城后箱数比进本前多。
     if (!done && backToTown) {
         const after = await readBymjBox(page);
         const hasBase = st.boxBefore !== null && st.boxBefore !== undefined;

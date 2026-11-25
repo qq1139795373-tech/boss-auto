@@ -18,10 +18,13 @@ const ROOT = __dirname;
 const FILES = [
     'index.js', 'arena.js', 'dungeon.js', 'kidd.js', 'fish.js', 'gongcheng.js',
     'mail.js', 'mibao.js', 'signin.js', 'fmsj.js', 'team5-form.js', 'farm.js', 'shanzhai.js',
+    'qllm-run.js',
     'bymj-local/bymj-batch.js', 'hdwang-local/hdwang-batch.js',
 ];
 // 必须保留 enterMain 兜底的脚本（都有一段独立 login）
-const NEED_ENTER_MAIN = ['fmsj.js', 'bymj-local/bymj-batch.js', 'hdwang-local/hdwang-batch.js'];
+// ★ 11-25 补 qllm-run.js：它同样有一支「无表单」分支，21:19 情侣补跑就栽在这里
+//   （冷8 停在选角页被当登录成功 → 判「不在副本内」→ return 0 → 上层报「两段完成」）。
+const NEED_ENTER_MAIN = ['fmsj.js', 'bymj-local/bymj-batch.js', 'hdwang-local/hdwang-batch.js', 'qllm-run.js'];
 
 // 规则①：同一行同时出现「进入游戏」和 return true → 假成功
 function offenders(src) {
@@ -65,13 +68,35 @@ console.log('[2] 正式脚本里不允许「进入游戏 = 登录成功」');
     if (!hit) ok('全部生产脚本 0 命中');
 }
 
-console.log('[3] 三个脚本的 login 必须保留 enterMain（选角页兜底）');
+console.log('[3] 各脚本的 login 必须保留 enterMain（选角页兜底）');
 {
     for (const f of NEED_ENTER_MAIN) {
         const p = path.join(ROOT, f);
         const src = fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '';
         /daily\.enterMain\s*\(/.test(src) ? ok(`${f} 有 daily.enterMain`) : bad(`${f} 缺 daily.enterMain`);
     }
+}
+
+console.log('[4] 情侣第二段不许把「没领到」洗成成功（21:19 冷8 事故）');
+{
+    // 规则③：qllm-run.js 的「不在副本内 / 已出本」那支不能 return 0
+    const q1 = path.join(ROOT, 'qllm-run.js');
+    const src1 = fs.existsSync(q1) ? fs.readFileSync(q1, 'utf8') : '';
+    const badLine = src1.split(/\r?\n/).find((l) => /不在副本内|已出本/.test(l) && /return\s+0/.test(l) && !/^\s*(\/\/|\*)/.test(l));
+    badLine ? bad('qllm-run.js 仍把「不在副本内」当成功：' + badLine.trim().slice(0, 100))
+        : ok('qllm-run.js 的「不在副本内」不再 return 0');
+    // 规则④：qllm-daily.js 必须区分第二段返回码，并保留队长领奖失败分支
+    const q2 = path.join(ROOT, 'qllm-daily.js');
+    const src2 = fs.existsSync(q2) ? fs.readFileSync(q2, 'utf8') : '';
+    if (!src2) { console.log('  - qllm-daily.js 不存在（跳过）'); }
+    else {
+        /c2\s*===\s*5/.test(src2) ? ok('qllm-daily.js 有「已出本」分支') : bad('qllm-daily.js 缺 c2 === 5 分支');
+        /leader-claim-fail/.test(src2) ? ok('qllm-daily.js 有「队长领奖失败」分支') : bad('qllm-daily.js 缺 leader-claim-fail');
+    }
+    // 证伪：把旧写法塞回去必须被扫出
+    const fakeOld = "if (!inDungeon(t)) { log('队员', '不在副本内（可能已退出）'); return 0; }";
+    const hit = fakeOld.split(/\r?\n/).some((l) => /不在副本内|已出本/.test(l) && /return\s+0/.test(l));
+    hit ? ok('证伪：旧写法「不在副本内 → return 0」会被扫出') : bad('证伪失败：旧写法没被扫出');
 }
 
 console.log(`\n结果：通过 ${pass} 项，失败 ${fail} 项`);

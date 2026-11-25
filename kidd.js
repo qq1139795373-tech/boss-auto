@@ -48,9 +48,11 @@ const RESCAN_MIN_LEFT = 8;
 //   `获得经验*1333332，铜币*50000，藏宝图碎片*15`，与副本详情页「通关奖励」一致）。
 //   ① 主判据 = 领奖明细 toast 里 `藏宝图碎片×N`，N ≥ 15 即到账（一次给 15/16/20 都认，
 //      **绝不写死「0→1」**）；
-//   ② 补充 = 进本前读背包基线、领奖后读一次比增量（≥ 期望值即到账）；
-//      但 11-19 23:00 实测：包裹九个页签里都没有「藏宝图碎片」（只有普通/高级藏宝图），
-//      碎片不进包裹 → 这条对基德基本用不上，只在别处给同名道具时才有意义。
+//   ② 补充 = 进本前读背包基线、领奖后读一次比增量（≥ 期望值即到账）。
+//      ★ 藏宝图碎片**在包裹里读得到**（11-25 海盗王日志实证：
+//        `[对账] 浴火之蝶 134→135(+1) / 藏宝图碎片 528→533(+5)`）。
+//        11-19 那句「九个页签都没有碎片」是旧版读数（列表视图滚不动 → 只读到第一屏）的漏读，
+//        并不是碎片真的不在包裹里 —— 不能拿它当借口跳过基德的对账，碎片 +15 就是这条的硬证据。
 //   ③ 经验/铜贝读不到数量，只作 toast 文本证据，不参与数值对账。
 const KIDD_REWARDS = { '藏宝图碎片': 15 };
 
@@ -619,11 +621,12 @@ async function clearRoom(page, tag) {
             // 「真空房间」和「怪还没渲染出来」必须分开。
             // 2026-10-29 实证：东线「西库尽头」进房后第一次读就是 0 只怪，旧代码 `return kills`
             // 立刻当空房 → 东线只记 8 间 / 24 杀（总 48/51）；同代码 10-28 同一间读到 3 只。
-            // 现在连续 5 次都读不到才认定空房（真空房多花约 7.5 秒，可接受；11-24 用户要求 3→5）。
+            // 现在连续 5 次都读不到才认定空房（真空房多花约 9.5 秒，可接受；11-24 用户要求 3→5，
+            // 11-25 用户要求把等待从 1.5s 放到 2s：多等 2 秒换来「怪刚刷出来就读到」，比错判空房少打一只划算）。
             emptyReads++;
             if (emptyReads >= 5) return kills;
             console.log(`[${tag}] 房间没读到怪，等渲染（第${emptyReads}/5次）...`);
-            await sleep(1500);
+            await sleep(2000);
             continue;
         }
         emptyReads = 0;
@@ -895,7 +898,7 @@ async function run() {
             const names0 = Object.keys(KIDD_REWARDS);
             console.log('[基线] ' + names0.map((n) => `${n}=${bagBefore[n] === null ? '缺失(0)' : bagBefore[n]}`).join(' / '));
             if (names0.every((n) => bagBefore[n] === null)) {
-                console.log('[基线] 包裹里没有该条目（基德碎片实测不进包裹，属正常）→ 以领奖明细原文为准');
+                console.log('[基线] 包裹里读不到该条目（数量为 0 时包裹不显示）→ 领奖后按增量核对');
             }
         } else if (inDungeon) {
             console.log('[基线] 续打（已在副本内），读不到背包基线 → 本次只用领奖明细/次数判据');
@@ -1155,27 +1158,35 @@ async function run() {
 
         // ★ 背包差值对账（补充证据，11-19 用户指定）：开打前基线 vs 领奖后，只看**增量**。
         //   基线的 0 / 1 / 7 都无所谓；一次给 15 / 16 / 20 都算到账，**不写死「0→1」**。
-        //   ★ 实测（11-19 23:00 冷1 逐页签 dump）：包裹九个页签（装备/药水/道具/宝箱/材料/宝石/
-        //     附魔卡/宠物/其他）里**都没有「藏宝图碎片」**，只有「普通藏宝图 10 / 高级藏宝图 2」，
-        //     说明碎片不进包裹（大概率直接进藏宝图系统）。所以这条只作补充：
-        //     明细原文（toast）已确认到账时直接跳过；读不到也绝不推翻 toast 结论。
-        if (bagBefore && !NO_CLAIM && !toastConfirmed) {
-            const need = KIDD_REWARDS;
-            const names = Object.keys(need);
-            const after = await readBagItems(page, names);
-            const show = (v) => (v === null || v === undefined ? '缺失(0)' : v);
-            const num = (v) => (v === null || v === undefined ? 0 : v);   // 背包里没有该条目 = 数量 0
-            const delta = {};
-            for (const n of names) delta[n] = num(after[n]) - num(bagBefore[n]);
-            console.log('[对账] ' + names.map((n) => `${n} ${show(bagBefore[n])}→${show(after[n])}(${delta[n] >= 0 ? '+' : ''}${delta[n]})`).join(' / '));
-            const hit = names.filter((n) => delta[n] >= need[n]);
-            if (hit.length) {
-                console.log('✔ 领奖到账（背包增量）: ' + hit.map((n) => `${n} +${delta[n]}（需 +${need[n]}）`).join('，'));
-            } else if (names.every((n) => delta[n] === 0)) {
-                console.log('（背包里读不到「藏宝图碎片」—— 11-19 实测碎片不进包裹，此条对基德不可用，以明细原文为准）');
-            } else {
-                console.log('::warning::背包增量不足（' + names.map((n) => `${n} +${delta[n]}`).join('，')
-                    + '，需 ' + names.map((n) => `${n} +${need[n]}`).join('，') + '）');
+        //   ★ 藏宝图碎片在包裹「材料」页里读得到（11-25 海盗王日志实证 528→533(+5)），
+        //     所以基德这一条是真能对上的，不是摆设。11-19 那次 dump 读不到是旧版读数只看到了第一屏。
+        if (bagBefore && !NO_CLAIM) {
+            // ★ 11-25 修：必须先回城市主视图。包裹按钮只在主视图上有，领完奖人停在「基德的宝藏」
+            //   入口页时读包裹会全返回 null（null 当 0 算）→ 拿基线的 528 去减 0 = 负数，
+            //   打成「背包增量不足」的假告警。
+            if (await drain.backToCityView(page, { txt: getPageText, log: console.log })) {
+                const need = KIDD_REWARDS;
+                const names = Object.keys(need);
+                const after = await readBagItems(page, names);
+                const show = (v) => (v === null || v === undefined ? '缺失(0)' : v);
+                const num = (v) => (v === null || v === undefined ? 0 : v);   // 背包里没有该条目 = 数量 0
+                const delta = {};
+                for (const n of names) delta[n] = num(after[n]) - num(bagBefore[n]);
+                console.log('[对账] ' + names.map((n) => `${n} ${show(bagBefore[n])}→${show(after[n])}(${delta[n] >= 0 ? '+' : ''}${delta[n]})`).join(' / '));
+                const hit = names.filter((n) => delta[n] >= need[n]);
+                // 两次都没读到（包裹没打开 / 数量真的是 0）→ 才算「无法对账」
+                const seen = names.filter((n) => bagBefore[n] !== null || after[n] !== null);
+                if (hit.length) {
+                    console.log('✔ 领奖到账（背包增量）: ' + hit.map((n) => `${n} +${delta[n]}（需 +${need[n]}）`).join('，'));
+                } else if (!seen.length) {
+                    console.log('（基线、回读都没读到「藏宝图碎片」→ 本次无法用背包对账，以明细原文为准）');
+                } else if (toastConfirmed) {
+                    // 明细原文已是硬证据时，增量没体现只作说明，不推翻结论（碎片可能刚被合成藏宝图用掉）
+                    console.log('（明细原文已确认到账，但背包没见 +' + need[names[0]] + '—— 可能碎片已被合成/使用，以明细为准）');
+                } else {
+                    console.log('::warning::背包增量不足（' + names.map((n) => `${n} +${delta[n]}`).join('，')
+                        + '，需 ' + names.map((n) => `${n} +${need[n]}`).join('，') + '）');
+                }
             }
         }
 

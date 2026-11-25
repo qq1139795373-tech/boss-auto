@@ -32,6 +32,13 @@ const ARMS = [
 // 只用于「数量对账」诊断与补扫判断，**绝不作为领奖门槛**（2026-11-15：
 // 副本限时 60 分钟，领奖是大头，宁可少杀也必须领到）。
 const DUNGEON_EXPECT = 96;
+// ★ 领奖到账判据（2026-11-25 与基德/附魔秘境/海盗王统一口径）：两条证据分开算。
+//   ① 主判据 = 领奖明细 toast 原文里的「炼器窟补给箱×N」，N ≥ 1 即到账
+//      （toast 原文形如 `获得经验*10000，铜贝*20000，炼器窟补给箱*1`）；
+//   ② 补充 = 进本前读背包基线、领奖后比**增量**（≥ 期望值即到账）。
+//   补给箱名来自 11-19 22:58 逐副本点详情页实抓（hdwang-batch.js 的 DUNGEON_REWARDS 表）。
+//   经验/铜贝读不到数量（状态页只有经验、无货币），只作明细文本证据，不参与数值对账。
+const DUNGEON_REWARDS = { '炼器窟补给箱': 1 };
 // 剩余多少分钟才允许回扫补怪（4 线手动清约 6~8 分钟 + 留给领奖）
 const RESCAN_MIN_LEFT = 15;
 
@@ -379,11 +386,11 @@ async function clearRoom(page, tag) {
             // 「本层真的没怪」和「怪还没渲染出来」必须分开。
             // kidd.js 2026-10-29 实证：基德东线首读 0 只就当空房 → 只记 8 间/24 杀（总 48/51）。
             // 炼器窟每层固定 3 只，正常路径第一读就有怪，所以全清时零额外开销；
-            // 只有真的读不到（页面还没渲染）才会在这里多等，最多 5 次 ≈7.5 秒（11-24 用户要求 3→5）。
+            // 只有真的读不到（页面还没渲染）才会在这里多等，最多 5 次 ≈9.5 秒（11-24 用户要求 3→5，11-25 间隔 1.5s→2s）。
             emptyReads++;
             if (emptyReads >= 5) return kills;
             console.log(`[${tag}] 房间没读到怪，等渲染（第${emptyReads}/5次）...`);
-            await sleep(1500);
+            await sleep(2000);
             continue;
         }
         emptyReads = 0;
@@ -521,10 +528,37 @@ async function trySweep(page) {
     return { ok: true, popupStuck: false };
 }
 
+// ★ 领奖对账（补充证据，11-19 用户指定口径；11-25 炼器窟补齐）：进本前基线 vs 领奖后，只看**增量**。
+//   基线的 0/1/7 都无所谓；一次给 1 个补给箱就算到账，不写死「0→1」。
+//   toast 已确认到账时增量没体现只作说明（箱子可能已被开启/使用），绝不推翻 toast 结论。
+async function reconcileClaim(page, bagBefore, toastConfirmed) {
+    const need = DUNGEON_REWARDS;
+    const names = Object.keys(need);
+    const after = await bag.readBagItems(page, names);
+    const show = (v) => (v === null || v === undefined ? '缺失(0)' : v);
+    const num = (v) => (v === null || v === undefined ? 0 : v);
+    const delta = {};
+    for (const n of names) delta[n] = num(after[n]) - num(bagBefore[n]);
+    console.log('[对账] ' + names.map((n) => `${n} ${show(bagBefore[n])}→${show(after[n])}(${delta[n] >= 0 ? '+' : ''}${delta[n]})`).join(' / '));
+    const hit = names.filter((n) => delta[n] >= need[n]);
+    if (hit.length) {
+        console.log('✔ 领奖到账（背包增量）: ' + hit.map((n) => `${n} +${delta[n]}（需 +${need[n]}）`).join('，'));
+        return true;
+    }
+    if (toastConfirmed) {
+        console.log('（明细原文已确认到账，背包增量没体现属正常：补给箱可能已被开启/使用）');
+        return null;
+    }
+    console.log('::warning::背包增量不足（' + names.map((n) => `${n} +${delta[n]}`).join('，')
+        + '，需 ' + names.map((n) => `${n} +${need[n]}`).join('，') + '）');
+    return false;
+}
+
 async function run() {
     const browser = await chromium.launch({ headless: true });
     const context = await browser.newContext();
     const page = await context.newPage();
+    let bagBefore = null;          // 领奖对账基线（进本前背包里的补给箱数），null = 没读
 
     try {
         await gotoGame(page);
@@ -621,6 +655,17 @@ async function run() {
                 await browser.close();
                 return;
             }
+        }
+
+        // ★ 领奖对账基线（11-25）：进本前在城里读一次背包，领奖后比**增量**。
+        //   续打（登录时已在副本里）读不到基线 → 只说明一行，降级用领奖明细判据，不会误判。
+        const rewardNames = Object.keys(DUNGEON_REWARDS);
+        if (!inDungeon && !NO_CLAIM && !DRY) {
+            bagBefore = await bag.readBagItems(page, rewardNames);
+            const show0 = (v) => (v === null || v === undefined ? '缺失(0)' : v);
+            console.log('[基线] ' + rewardNames.map((n) => `${n}=${show0(bagBefore[n])}`).join(' / '));
+        } else if (inDungeon) {
+            console.log('[基线] 续打（已在副本内），读不到背包基线 → 本次只用领奖明细判据');
         }
 
         if (!inDungeon) {
@@ -806,6 +851,8 @@ async function run() {
 
         // 领取奖励（只在4线全部走完后）
         pageText = await getPageText(page);
+        let toastConfirmed = false;   // 领奖明细里已看到本副本奖励项（硬证据）
+        let claimToast = '';          // 领奖明细原文（打印 + 解析用）
         if (NO_CLAIM) {
             const ci = pageText.indexOf('副本条件');
             const cj = pageText.indexOf('回到起点', ci);
@@ -813,6 +860,9 @@ async function run() {
             console.log('条件行:', ci >= 0 ? pageText.substring(ci, cj > ci ? cj : ci + 120) : '(未见)');
             await page.screenshot({ path: 'dungeon-no-claim.png' }).catch(() => {});
         } else if (allArmsDone && pageText.includes('领取奖励')) {
+            // ★ 领奖明细 toast 只活 1~2 秒，**必须在点「领取奖励」之前就挂轮询**（11-19 实证：
+            //   点完 sleep(1500) 再去读，toast 早没了 → 只能拿「次数已用尽」这种弱证据）。
+            const toastP = drain.readRewardToast(page, 9000).catch(() => '');
             // 领奖要循环：可能还有「扫荡收获」压在下面，一层层关，直到「领取奖励」消失
             // 或已经离开副本页。只点一次「确定」在弹窗叠层时会半途而废（boss(0) 实证）。
             let got = false;
@@ -829,6 +879,28 @@ async function run() {
                 // 点「确定」的同时抓奖励明细（toast 是点完确定才弹、只活一两秒，见 dungeon-recover.js）
                 await drain.dismissPopups(page, { log: console.log });
                 await sleep(1500);
+            }
+            claimToast = (await toastP) || '';
+            if (claimToast) {
+                console.log('领奖明细：' + claimToast);
+                // ★ 明细原文就是最硬的证据：按「物品名 ×数量」解析，数量 ≥ 期望值即到账。
+                const flatToast = claimToast.replace(/\s+/g, '');
+                const gotItems = {};
+                for (const n of Object.keys(DUNGEON_REWARDS)) {
+                    const m = flatToast.match(new RegExp(n + '[×*x](\\d+)'));
+                    if (m) gotItems[n] = Number(m[1]);
+                }
+                const hit = Object.keys(gotItems).filter((n) => gotItems[n] >= DUNGEON_REWARDS[n]);
+                if (hit.length) {
+                    toastConfirmed = true;
+                    console.log('✔ 领奖到账（明细原文）: ' + hit.map((n) => `${n}×${gotItems[n]}（需 ${DUNGEON_REWARDS[n]}）`).join('，'));
+                } else if (Object.keys(gotItems).length) {
+                    console.log('::warning::明细里数量不足: ' + Object.keys(gotItems).map((n) => `${n}×${gotItems[n]}（需 ${DUNGEON_REWARDS[n]}）`).join('，'));
+                } else {
+                    console.log('（明细里没有本副本奖励项，可能只结算了经验/铜贝）');
+                }
+            } else {
+                console.log('::warning::没抓到领奖明细 toast（只活 1~2 秒），改用背包增量对账');
             }
             pageText = await getPageText(page);
             if (got && !pageText.includes('副本条件')) {
@@ -848,6 +920,19 @@ async function run() {
         } else {
             console.log('未看到领取奖励入口，页面:', pageText.substring(0, 300));
             await page.screenshot({ path: 'dungeon-claim-fail.png' }).catch(() => {});
+        }
+
+        // ★ 领奖对账（11-25，与附魔秘境/海盗王同一口径）：明细原文 + 背包增量双证据。
+        //   增量必须在**回到城市主视图之后**读——包裹按钮只在主视图上有，停在副本入口页/铁匠铺
+        //   浮层上读包裹会全返回 null，得出「增量不足」的假结论。
+        if (!NO_CLAIM && !DRY && bagBefore && allArmsDone) {
+            try {
+                if (await drain.backToCityView(page, { txt: getPageText, log: console.log })) {
+                    await reconcileClaim(page, bagBefore, toastConfirmed);
+                }
+            } catch (e) {
+                console.log(`::warning::领奖对账异常（${e.message}）→ 不影响领奖结论`);
+            }
         }
 
     } catch (e) {

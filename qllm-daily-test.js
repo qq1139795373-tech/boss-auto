@@ -131,6 +131,11 @@ t('1 / 2 / null / 负数 → fail（不跑第二段）', () => {
     assert.strictEqual(daily.classifyFirstStage(null), 'fail');
     assert.strictEqual(daily.classifyFirstStage(-1), 'fail');
 });
+t('★ 7 → leader-claim-fail（怪清完但队长没领到：要报错，但仍跑第二段）', () => {
+    assert.strictEqual(daily.classifyFirstStage(7), 'leader-claim-fail');
+    assert.notStrictEqual(daily.classifyFirstStage(7), 'fail', '不能当普通失败跳过第二段（队员那侧可能还能领）');
+    assert.notStrictEqual(daily.classifyFirstStage(7), 'ok', '不能当成功（队长确实没领到）');
+});
 t('★ already-done 不能被当成失败（否则每天红叉）', () => {
     assert.notStrictEqual(daily.classifyFirstStage(3), 'fail');
 });

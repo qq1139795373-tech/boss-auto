@@ -167,9 +167,14 @@ async function closeSweepPopup(page, opts = {}) {
 // 关键时序（用户 2026-10-29 纠正）：奖励明细 toast 是**点完「确定」之后**才弹的，只活一两秒。
 // 而点完「确定」还要等 1.2 秒复核弹窗关没关 —— 先点再读会漏掉它。
 // 所以这里在点「确定」的同时就把抓 toast 的轮询挂上，点完直接取结果。
+//
+// ★ 2026-11-25：返回值从「关了几个弹窗」改成**抓到的明细原文数组**（'' 之外的都是真抓到的）。
+//   原来只打印不返回，recoverDungeon 那条自恢复路径（fish/mibao/farm/zhenyaota 共用）
+//   领完奖只剩「离开副本页」这一个页面证据，拿不到明细原文去证明到账。
+//   所有现有调用方都忽略返回值，改签名不影响它们。
 async function dismissPopups(page, opts = {}) {
     const log = opts.log || (() => { });
-    let n = 0;
+    const toasts = [];
     for (let i = 0; i < 5; i++) {
         const t = await visibleText(page);
         const sweep = t.includes('扫荡收获');
@@ -182,12 +187,11 @@ async function dismissPopups(page, opts = {}) {
             const toastP = readRewardToast(page, opts.toastMs || 4000);   // 先挂上轮询
             await clickAndVerify(page, '确定', '是否领取奖励', { tries: 2 });
             const rw = await toastP;
-            if (rw) log(`领奖明细：${rw}`);
+            if (rw) { log(`领奖明细：${rw}`); toasts.push(rw); }
         }
-        n++;
         await sleep(800);
     }
-    return n;
+    return toasts;
 }
 
 // 领奖瞬间游戏会弹一个一闪而过的「提示」toast，内容就是这次到底给了什么，例如：
@@ -255,6 +259,32 @@ async function claimEvidence(page) {
     return claimEvidenceIn(await visibleText(page));
 }
 
+// ★ 领奖后回城市主视图。包裹按钮**只在城市主视图里**（bag-read.js 第一条判据就是页面要有
+//   「当前城市」），领完奖停在副本入口页/铁匠铺浮层上直接读包裹 → 全返回 null →
+//   得出「增量不足」的假结论（fmsj.js 11-22 写对账时差点埋进去的坑）。
+//   只认页面出现「当前城市」，Escape 与左上返回箭头交替试，最多 5 轮。
+async function backToCityView(page, opts = {}) {
+    const log = opts.log || (() => { });
+    const txt = opts.txt || (() => visibleText(page));
+    // 注意：这里**绝不点「退出副本」**。本函数也被「领奖失败」的路径调用，那时若退本，
+    // 当天那 1 次机会就白扔了（副本每天只 1 次，进本状态持久）。回不了城就返回 false，
+    // 由调用方跳过背包对账并打 warning —— 少一条对账证据，好过毁掉一次机会。
+    for (let i = 0; i < 5; i++) {
+        if ((await txt()).includes('当前城市')) return true;
+        await page.keyboard.press('Escape').catch(() => { });
+        await sleep(1200);
+        if ((await txt()).includes('当前城市')) return true;
+        await Promise.race([
+            page.mouse.click(14, 26),                                   // 左上返回箭头
+            new Promise((_, rej) => setTimeout(() => rej(new Error('click-timeout')), 8000)),
+        ]).catch(() => { });
+        await sleep(1500);
+    }
+    const ok = (await txt()).includes('当前城市');
+    if (!ok) log('::warning::领奖后没回到城市主视图 → 读不了包裹，本次跳过背包对账');
+    return ok;
+}
+
 function identify(t) {
     if (/玄铁矿工|翡翠采掘者|血晶守卫|猫眼猎手|矿采场|赤晶|北幽猫|翠晶/.test(t)) return '炼器窟';
     if (/基德|暗仓|奴隶仓|枢纽广场|金库|机关厅|兽栏/.test(t)) return '基德的宝藏';
@@ -308,6 +338,7 @@ async function recoverDungeon(page, opts = {}) {
 
     // ---- 2) 领奖：循环到「领取奖励」消失或已离开副本页 ----
     let claimed = false;
+    let claimToasts = [];      // 领奖过程中抓到的明细原文（到账的第一手证据）
     for (let round = 1; round <= 4; round++) {
         t = await visibleText(page);
         if (!t.includes('副本条件')) { claimed = true; break; }   // 已退出副本 = 领到了
@@ -318,13 +349,20 @@ async function recoverDungeon(page, opts = {}) {
             break;
         }
         await sleep(1500);
-        await dismissPopups(page, { log });        // 关「扫荡收获」→ 点「确定」并顺手抓奖励明细
+        claimToasts = claimToasts.concat((await dismissPopups(page, { log })) || []);
         await sleep(1500);
         t = await visibleText(page);
         if (!t.includes('副本条件') || !t.includes('领取奖励')) { claimed = true; break; }
         log(`${tag}：第 ${round} 轮领奖后仍在副本页（「领取奖励」还在）`);
     }
-    if (claimed) log(`${tag}：奖励已领取，副本结束`);
+    const claimToast = claimToasts[claimToasts.length - 1] || '';   // 交回给调用方（fish/mibao/farm/zhenyaota）
+    if (claimed) {
+        // ★ 2026-11-25：把「到账」和「页面说走完了」分开。这里有明细原文才算到账；
+        //   没有就明确写「未经证实」，不能让一句「奖励已领取」冒充到账证据。
+        const last = claimToasts[claimToasts.length - 1];
+        if (last) log(`${tag}：奖励已领取，到账证据（明细原文）：${last}`);
+        else log(`${tag}：::warning::奖励已领取，但没抓到明细原文 → 只有页面证据（「领取奖励」消失 / 已离开副本页），到账未经证实`);
+    }
     // 领完检查一次入口页：还是「剩余1次」= 这一次没结算掉，得说清楚
     t = await visibleText(page);
     const ev = claimEvidenceIn(t);
@@ -333,7 +371,7 @@ async function recoverDungeon(page, opts = {}) {
 
     t = await visibleText(page);
     if (!t.includes('副本条件') && !t.includes('退出副本')) {
-        return { inDungeon: true, kind, swept, claimed, exited: true };
+        return { inDungeon: true, kind, swept, claimed, exited: true, toast: claimToast };
     }
 
     // ---- 3) 退本：没有可领的了才走这里 ----
@@ -350,7 +388,7 @@ async function recoverDungeon(page, opts = {}) {
             tt = await visibleText(page);
         }
         if (!tt.includes('副本条件')) {
-            return { inDungeon: true, kind, swept, claimed, exited: true };
+            return { inDungeon: true, kind, swept, claimed, exited: true, toast: claimToast };
         }
         log(`${tag}：第 ${i} 次退出副本未生效，重试...`);
     }
@@ -359,7 +397,7 @@ async function recoverDungeon(page, opts = {}) {
     }
     const left = await visibleText(page);
     log(`${tag}：退出副本失败，仍在: ${left.replace(/\s+/g, ' ').substring(0, 200)}`);
-    return { inDungeon: true, kind, swept, claimed, exited: false };
+    return { inDungeon: true, kind, swept, claimed, exited: false, toast: claimToast };
 }
 
 // ============================ 血池为 0 的补给 ============================
@@ -941,7 +979,7 @@ async function healBlood(page, opts = {}) {
 
 module.exports = {
     recoverDungeon, closeSweepPopup, clickAndVerify, clickByText, clickTextReal, visibleText, dismissPopups,
-    readRewardToast, claimEvidence, claimEvidenceIn, remainTimes, sleep,
+    readRewardToast, claimEvidence, claimEvidenceIn, remainTimes, sleep, backToCityView,
     readBlood, inFightPanel, healBlood, bloodAction, bloodItemGone, ensureListView,
     openBagPanel, closeBagPanel, gotoPotionTab, useStaminaItem,
     // 药水页细分步骤（探针用）
