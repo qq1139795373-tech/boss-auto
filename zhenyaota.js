@@ -231,22 +231,13 @@ async function login(page) {
         await sleep(2000);
     }
 
-    for (let i = 0; i < 10; i++) {
-        await clickText(page, '进入游戏');
-        await sleep(5000);
-        let t = await getPageText(page);
-        if (t.includes('选择角色') || t.includes('Lv.')) {
-            await clickText(page, '进入游戏');
-            await sleep(5000);
-            t = await getPageText(page);
-        }
-        if (t.includes('你看到') || t.includes('当前城市')) {
-            log('进入游戏成功');
-            return true;
-        }
-        log(`进入游戏未成功，重试(${i + 1}/10)...`);
-        await sleep(2000);
+    // 统一走 daily.enterMain：强点击（坐标→合成事件→force）+ 判定只认「你看到/当前城市」。
+    // 原来 10 轮 clickText('进入游戏')，点了没反应也算点过，卡在选角页就整趟空转。
+    if (await daily.enterMain(page, { rounds: 10, pauseMs: 5000, log: (m) => log(m) })) {
+        log('进入游戏成功');
+        return true;
     }
+    log('进入游戏失败：10 轮强点击仍未到主界面');
     return false;
 }
 

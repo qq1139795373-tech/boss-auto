@@ -155,13 +155,9 @@ async function login(page, account) {
         let t = await txt(page);
         if (t.includes('进入游戏') || t.includes('你看到') || t.includes('当前城市')) {
             log('登录成功');
-            for (let i = 0; i < 8; i++) {
-                await daily.clickText(page, '进入游戏', 2000).catch(() => {});
-                await sleep(4000);
-                t = await txt(page);
-                if (t.includes('你看到') || t.includes('当前城市')) return true;
-            }
-            return true;
+            // 进游戏统一走 daily.enterMain：原来 8 轮 clickText 后无条件 return true，
+            // 没进游戏也算登录成功，奔月整趟对着空页面点房间。
+            return await daily.enterMain(page, { rounds: 8, pauseMs: 4000, log: (m) => log(m) });
         }
         log(`登录重试 ${a}`);
     }

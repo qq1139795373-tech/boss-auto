@@ -2,6 +2,8 @@ const { LOGIN_URL } = require('./game-url.js');
 const { chromium } = require('playwright');
 // 副本内自恢复（先扫荡/领奖再退本）
 const drain = require('./dungeon-recover.js');
+// 进游戏的强点击 + 进主界面判定（2026-11-25 统一到 daily.js，五个脚本共用一份）
+const daily = require('./daily.js');
 // 体力宝补给（威尼斯商店，钓鱼前顺路检查；用户 2026-11-20）
 const { createStaminaSupply } = require('./stamina-supply.js');
 
@@ -511,8 +513,8 @@ async function teleportToDest(page) {
         }
         await closePopup(page);
         await sleep(1000);
-        await clickText(page, '进入游戏');
-        await sleep(3000);
+        // 传送兜底也要进主界面：原来只点一次，点了没反应就接着点传送面板，兜底整条失效
+        await daily.enterMain(page, { rounds: 4, pauseMs: 3000 });
 
         // 重登可能落回副本房间，先退出再开传送面板
         await exitDungeonIfInside(page);
@@ -1380,30 +1382,19 @@ async function run() {
             await sleep(2000);
         }
 
-        for (let i = 0; i < 10; i++) {
-            await clickText(page, '进入游戏');
-            await sleep(5000);
-            let pageText = await getPageText(page);
-            if (pageText.includes('选择角色') || pageText.includes('Lv.')) {
-                console.log('在选角界面，点击进入游戏选角色...');
-                await clickText(page, '进入游戏');
-                await sleep(5000);
-                pageText = await getPageText(page);
-            }
-            if (pageText.includes('你看到') || pageText.includes('当前城市')) {
-                console.log('进入游戏成功');
-                break;
-            }
-            console.log('进入游戏未成功，重试...');
-            await sleep(2000);
-        }
+        // 进游戏统一走 daily.enterMain：强点击（坐标→合成事件→force）+ 判定只认「你看到/当前城市」。
+        // 原来这 10 轮都是 clickText('进入游戏')，点了没反应也算点过，卡在选角页时判不出来，
+        // 后面所有步骤都对着一个没进游戏的页面操作，整趟白跑还被记成「跑过了」。
+        const entered = await daily.enterMain(page, { rounds: 10, pauseMs: 5000 });
+        if (entered) console.log('进入游戏成功');
+        else console.log('进入游戏失败：10 轮强点击仍未到主界面');
 
         await sleep(5000);
         await page.keyboard.press('Escape');
         await sleep(2000);
 
         let pageText = await getPageText(page);
-        if (pageText.includes('请输入账号密码') || pageText.includes('选择角色')) {
+        if (!entered || pageText.includes('请输入账号密码') || pageText.includes('选择角色')) {
             console.log('ERROR: 未进入游戏主界面，退出');
             console.log('::error::登录失败：未进入游戏主界面，钓鱼已跳过');
             await page.screenshot({ path: 'login-fail.png' }).catch(() => {});

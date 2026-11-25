@@ -339,8 +339,8 @@ async function teleportToDest(page) {
         await sleep(500);
         await page.keyboard.press('Escape');
         await sleep(1000);
-        await clickText(page, '进入游戏');
-        await sleep(3000);
+        // 传送兜底也要进主界面：原来只点一次，点了没反应就接着点传送面板，兜底整条失效
+        await daily.enterMain(page, { rounds: 4, pauseMs: 3000 });
 
         let ok = await clickText(page, '传送', 2000);
         if (!ok) {
@@ -862,30 +862,19 @@ async function run() {
             await sleep(2000);
         }
 
-        for (let i = 0; i < 10; i++) {
-            await clickText(page, '进入游戏');
-            await sleep(5000);
-            let pageText = await getPageText(page);
-            if (pageText.includes('选择角色') || pageText.includes('Lv.')) {
-                log('在选角界面，点击进入游戏选角色...');
-                await clickText(page, '进入游戏');
-                await sleep(5000);
-                pageText = await getPageText(page);
-            }
-            if (pageText.includes('你看到') || pageText.includes('当前城市')) {
-                log('进入游戏成功');
-                break;
-            }
-            log('进入游戏未成功，重试...');
-            await sleep(2000);
-        }
+        // 进游戏统一走 daily.enterMain：强点击（坐标→合成事件→force）+ 判定只认「你看到/当前城市」。
+        // 原来这 10 轮都是 clickText('进入游戏')，点了没反应也算点过，卡在选角页时判不出来，
+        // 后面所有步骤都对着一个没进游戏的页面操作，整趟白跑还被记成「跑过了」。
+        const entered = await daily.enterMain(page, { rounds: 10, pauseMs: 5000 });
+        if (entered) log('进入游戏成功');
+        else log('进入游戏失败：10 轮强点击仍未到主界面');
 
         await sleep(5000);
         await page.keyboard.press('Escape');
         await sleep(2000);
 
         let pageText = await getPageText(page);
-        if (pageText.includes('请输入账号密码') || pageText.includes('选择角色')) {
+        if (!entered || pageText.includes('请输入账号密码') || pageText.includes('选择角色')) {
             log('ERROR: 未进入游戏主界面，退出');
             await page.screenshot({ path: 'gongcheng-fail.png' }).catch(() => {});
             await browser.close();

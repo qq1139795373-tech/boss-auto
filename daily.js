@@ -182,6 +182,45 @@ async function clickEnterGame(page) {
     }
 }
 
+// 进主界面：所有脚本共用的一处（2026-11-25 统一）。
+// 原来 arena/dungeon/kidd/fish/gongcheng 各自写 8~10 轮 clickText('进入游戏')，与组队 4/5
+// 是同一个失效模式：按钮点了没反应、Playwright 却报成功；而且循环结束后的失败判定只认
+// 「请输入账号密码 / 选择角色」，卡在「进入游戏」按钮页时判不出来 → 后面所有步骤都对着一个
+// 没进游戏的页面操作，整趟白跑（还会把「失败」记成「跑过了」）。
+// 判定只认「你看到 / 当前城市」；返回 true=已进主界面，false=用完轮数仍未进。
+// opts: rounds 轮数 / pauseMs 每轮等待 / log 日志函数 / readText 读页面文本 / click 点按钮（后两个只为单测注入）
+async function enterMain(page, opts = {}) {
+    const rounds = opts.rounds || 10;
+    // pauseMs 允许传 0（单测用），所以不能用 || 兜底
+    const pause = opts.pauseMs === undefined || opts.pauseMs === null ? 4000 : opts.pauseMs;
+    const log = opts.log || console.log;
+    const readText = opts.readText || ((p) => getPageText(p));
+    const click = opts.click || ((p) => clickEnterGame(p));
+    let miss = 0;   // 连续「找不到按钮」的次数：页面根本没有这个按钮时早点收手，别白等 10 轮
+    for (let i = 1; i <= rounds; i++) {
+        let t = await readText(page);
+        if (t.includes('你看到') || t.includes('当前城市')) return true;
+        const how = await click(page);
+        log(`[enterMain] 第 ${i}/${rounds} 轮点「进入游戏」（${how || '没找到按钮'}）`);
+        miss = how ? 0 : miss + 1;
+        await sleep(pause);
+        t = await readText(page);
+        if (!(t.includes('你看到') || t.includes('当前城市')) &&
+            (t.includes('选择角色') || t.includes('Lv.'))) {
+            const how2 = await click(page);
+            log(`[enterMain] 停在选角页，再点一次（${how2 || '没找到按钮'}）`);
+            await sleep(pause);
+            t = await readText(page);
+        }
+        if (t.includes('你看到') || t.includes('当前城市')) return true;
+        if (miss >= 3) {
+            log('[enterMain] 连续 3 轮找不到「进入游戏」按钮，页面不在登录/选角流程，收手');
+            return false;
+        }
+    }
+    return false;
+}
+
 // 选海域标签：.region-bar 是横向滚动，最右「新大陆」默认被裁掉，找不到就横滚再找
 // 返回 true=已切到该海域 / 'nomap'=该号没有这个海域的海图（点标签即弹「暂无地图，查看失败」）/ false=点不到
 async function selectRegion(page, region) {
@@ -2061,7 +2100,7 @@ async function run() {
 if (require.main === module) run();
 
 module.exports = {
-    sleep, gotoGame, getPageText, clickText, clickLeaf, clickExact, clickEnterGame,
+    sleep, gotoGame, getPageText, clickText, clickLeaf, clickExact, clickEnterGame, enterMain,
     selectRegion, sailTo, sailFailReason, currentCity,
     teleportToDest,
     openDailyList, parseDailyTasks, clickRow, atCity, onMainPage, backToMain, backToCity,

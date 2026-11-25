@@ -183,13 +183,9 @@ async function login(page) {
         let t = await txt(page);
         if (t.includes('进入游戏') || t.includes('你看到') || t.includes('当前城市')) {
             log('登录成功');
-            for (let i = 0; i < 8; i++) {
-                await clickHard(page, '进入游戏', true).catch(() => { });
-                await sleep(4000);
-                t = await txt(page);
-                if (t.includes('你看到') || t.includes('当前城市')) return true;
-            }
-            return true;
+            // 进游戏统一走 daily.enterMain：原来 8 轮点击后无条件 return true，
+            // 没进游戏也算登录成功，海盗王整趟对着空页面点怪。
+            return await daily.enterMain(page, { rounds: 8, pauseMs: 4000, log: (m) => log(m) });
         }
         log(`登录重试 ${a}`);
     }
