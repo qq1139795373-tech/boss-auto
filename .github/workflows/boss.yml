@@ -131,8 +131,6 @@ jobs:
       #   开关 = 仓库变量 SKIP_FARM_HOURS（逗号分隔北京小时，如 0,1,2,5,6,7）；
       #   空 / 未设 = 每趟都刷怪，即一直以来的行为。
       - name: 判断本趟是否刷怪
-        # 这一步只是为了省 runner 时间，不能因为它失败把整趟任务带走：万一写错就退回「照常刷怪」
-        continue-on-error: true
         env:
           SKIP_FARM_HOURS: ${{ vars.SKIP_FARM_HOURS }}
         run: node farm-gate.js
