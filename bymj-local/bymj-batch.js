@@ -146,7 +146,16 @@ async function login(page, account) {
         const ins = await page.$$('input');
         if (ins.length < 2) {
             const t = await txt(page);
-            if (t.includes('进入游戏') || t.includes('你看到') || t.includes('当前城市')) return true;
+            // ★ 2026-11-25 实证（CI 补跑冷号）：这里原来把「进入游戏」也当登录成功，
+            //   人明明停在**选角页**就 return true，没点进主界面。后果是紧接着的背包基线
+            //   （bag-read 要求页面有「当前城市」）连挂 5 次、每次都 0.7s 秒回，
+            //   基线丢了 → 领奖对账没有比较值 → 这游戏又不弹「领奖明细」→ 必然「到账未证实」。
+            //   所以「进入游戏」只能算**已登录**，必须再走 daily.enterMain 点进主界面。
+            if (t.includes('你看到') || t.includes('当前城市')) return true;
+            if (t.includes('进入游戏')) {
+                log('已登录但停在选角页 → 点「进入游戏」进主界面');
+                return await daily.enterMain(page, { rounds: 6, pauseMs: 3500, log: (m) => log(m) });
+            }
             await gotoGame(page); await sleep(3000); continue;
         }
         await ins[0].fill(account); await ins[1].fill(PASSWORD);
@@ -372,7 +381,10 @@ async function dfs(page, x, y, depth) {
 // 进本：长安 → 广场 → 嫦娥仙子 → 奔月秘境 → 建队（如需）→ 进入副本
 async function enterDungeon(page) {
     let t = await txt(page);
-    if (t.includes('副本条件') && t.includes('回到起点')) { log('已在副本内（续跑）'); return true; }
+    if (t.includes('副本条件') && t.includes('回到起点')) {
+        log('已在副本内（续跑）；本趟没有进本前背包基线，领奖只认「领奖明细」/「今日已完成」');
+        return true;
+    }
 
     if (!t.includes('当前城市：长安')) {
         log('不在长安，出航…');
@@ -611,13 +623,21 @@ async function claim(page) {
     // ★ 硬证据（2026-11-17 coldwind1 实证）：这个游戏领奖后**根本不弹「领奖明细」**。
     //   冷1 今天跑完点确定被传回长安、无 toast，但背包「奔月副本箱」是 2 个（11-16 + 今天各 1）→ 实际都到账。
     //   只认 toast 会把已到账的记成 unverified。回城后查背包箱数，比进本前多 1 个即确认到账。
-    if (!done && backToTown && st.boxBefore !== null && st.boxBefore !== undefined) {
+    if (!done && backToTown) {
         const after = await readBymjBox(page);
+        const hasBase = st.boxBefore !== null && st.boxBefore !== undefined;
         if (after !== null) {
             st.boxAfter = after;
-            log(`[对账] 背包「奔月副本箱」${st.boxBefore} → ${after}`);
-            if (after > st.boxBefore) { done = true; why = `背包箱数 ${st.boxBefore}→${after}`; }
-            else log('::warning::箱数没有增加 → 这次领奖可能没到账（或箱子被用掉了一个）');
+            if (!hasBase) {
+                // ★ 2026-11-25：基线丢了也别放弃读数——至少把回城后的实际箱数记下来，
+                //   人肉一看就知道该不该补，比一句「读不到」有用。但没有基线就证不了 +1，
+                //   仍按未证实处理（不冒充成功）。
+                log(`[对账] 没有进本前基线，回城后背包「奔月副本箱」= ${after} 个（无法做 +1 对比）`);
+            } else {
+                log(`[对账] 背包「奔月副本箱」${st.boxBefore} → ${after}`);
+                if (after > st.boxBefore) { done = true; why = `背包箱数 ${st.boxBefore}→${after}`; }
+                else log('::warning::箱数没有增加 → 这次领奖可能没到账（或箱子被用掉了一个）');
+            }
         } else {
             log('[对账] 背包读数失败，退回只看 toast');
         }
@@ -659,13 +679,31 @@ async function runAccount(account) {
             st.boxBefore = await readBymjBox(page);
             if (st.boxBefore !== null) break;
             if (r < 5) {
-                log(`[基线] 背包读取失败（第${r}/5次），等页面就绪后重试...`);
-                await sleep(2500);
-                await page.keyboard.press('Escape').catch(() => {});
-                await sleep(800);
+                // ★ 2026-11-25：光按 Escape 救不回来——人停在选角页时 Escape 什么也不做，
+                //   5 次重试全在同一个空页面上打转。先确认「是否在主界面」，不在就先点进游戏。
+                const pt = await txt(page).catch(() => '');
+                const atMain = pt.includes('当前城市');
+                log(`[基线] 背包读取失败（第${r}/5次）${atMain ? '' : '，页面不在主界面'}，重试...`);
+                if (!atMain) {
+                    const ok = await daily.enterMain(page, { rounds: 3, pauseMs: 2500, log: (m) => log('[基线] ' + m) }).catch(() => false);
+                    log(`[基线] 进主界面${ok ? '成功' : '失败'}`);
+                    if (!ok) { await page.keyboard.press('Escape').catch(() => {}); }
+                    await sleep(1200);
+                } else {
+                    await sleep(2500);
+                    await page.keyboard.press('Escape').catch(() => {});
+                    await sleep(800);
+                }
             }
         }
         log(`[基线] 背包「奔月副本箱」= ${st.boxBefore === null ? '读取失败（重试 5 次仍失败）' : st.boxBefore + ' 个'}`);
+        if (st.boxBefore === null) {
+            // ★ 2026-11-25：读不到时必须把当时的页面留下来，否则事后只能猜。
+            //   已知两种形态：① 登录后停在选角页/被弹窗挡着（没有「当前城市」）；
+            //   ② 登录时人还在上一趟没退出的副本里（有「副本条件」，本来就开不了包裹）。
+            const pt = (await txt(page).catch(() => '')).replace(/\s+/g, ' ');
+            log(`::warning::[基线] 读不到背包 → 本趟没有对账基准，领奖只能认「领奖明细」；页面: ${pt.slice(0, 180)}`);
+        }
         await sleep(1000);
 
         if (!(await enterDungeon(page))) return st;
