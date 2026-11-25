@@ -85,14 +85,17 @@ function createBagReader({ getPageText, log = console.log } = {}) {
         return !bagStillOpen(still);
     }
 
-    // 返回 { 物品名: 数量 }；读不到是 null（数量 0 时背包里没有这一条）。
+    // 返回 { items: {物品名: 数量}, opened, tabs: {物品名: 页签} }；读不到是 null（数量 0 时背包里没有这一条）。
+    // ★ tabs 是 11-25 加的：以前只知道数量、不知道该物品在哪个页签，被问到「X 在背包哪里」只能猜。
+    //   现在命中时顺手记下页签名（材料/道具/宝箱/其他），readBagItemsVerbose 会把 tabs 一起交出去。
     async function read(page, names) {
         const out = {};
+        const tabOf = {};
         for (const n of names) out[n] = null;
         let opened = false;
         try {
             let t = await txt(page);
-            if (!t.includes('当前城市')) return { items: out, opened };
+            if (!t.includes('当前城市')) return { items: out, opened, tabs: tabOf };
 
             let cdp = null;
             try { cdp = await page.context().newCDPSession(page); } catch (e) { log('CDP 会话建不起来，滚动只剩 wheel 兜底'); }
@@ -102,11 +105,11 @@ function createBagReader({ getPageText, log = console.log } = {}) {
             await sleep(900);
             let bag = await rectOf(page, '包裹');
             if (!bag) { await page.mouse.wheel(0, 420).catch(() => { }); await sleep(1200); bag = await rectOf(page, '包裹'); }
-            if (!bag) return { items: out, opened };
+            if (!bag) return { items: out, opened, tabs: tabOf };
             await Promise.race([page.mouse.click(bag.x, bag.y), evTo(8000)]).catch(() => { });
             await sleep(2500);
             t = await txt(page);
-            if (!t.includes('包裹')) return { items: out, opened };
+            if (!t.includes('包裹')) return { items: out, opened, tabs: tabOf };
             opened = true;
 
             // ① 先切「网格」视图：一屏 12~16 格，比列表少滚一半以上
@@ -114,7 +117,9 @@ function createBagReader({ getPageText, log = console.log } = {}) {
             if (gridBtn) { await Promise.race([page.mouse.click(gridBtn.x, gridBtn.y), evTo(8000)]).catch(() => { }); await sleep(1200); }
 
             const pending = new Set(names);
-            // 材料页优先（浴火之蝶 / 藏宝图碎片都在这里，位置在页尾），再兜道具/宝箱/其他
+            // 材料页优先（浴火之蝶 / 藏宝图碎片都在这里，位置在页尾），再兜道具/宝箱/其他。
+            // ★ 实测归属（11-25 用户截图「一只玫瑰 549」）：一只玫瑰在**道具页**，不在材料页；
+            //   所以四个页签都要扫，不能只扫材料页。数量为 0 时包裹里不显示该条目 → 读不到即 0（用户 11-25 确认）。
             for (const tab of ['材料', '道具', '宝箱', '其他']) {
                 if (!pending.size) break;
                 const p = await rectOf(page, tab);
@@ -148,7 +153,7 @@ function createBagReader({ getPageText, log = console.log } = {}) {
                         return res;
                     }, [...pending]), evTo(8000)]).catch(() => ({}));
                     for (const nm of Object.keys(found || {})) {
-                        if (found[nm] >= 0 && pending.has(nm)) { out[nm] = found[nm]; pending.delete(nm); }
+                        if (found[nm] >= 0 && pending.has(nm)) { out[nm] = found[nm]; pending.delete(nm); tabOf[nm] = tab; }
                     }
                     if (screen > 0 && /已加载全部数据/.test(await txt(page))) break;   // 到底了，别空滚
                 }
@@ -158,12 +163,13 @@ function createBagReader({ getPageText, log = console.log } = {}) {
         } finally {
             if (opened) { try { await closeBag(page); } catch (e) { } await sleep(600); }
         }
-        return { items: out, opened };
+        return { items: out, opened, tabs: tabOf };
     }
 
     // 只关心数量的调用方（基德/海盗王）：直接拿 { 名称: 数量 }，null 当 0 算差值。
     const readBagItems = async (page, names) => (await read(page, names)).items;
     // 需要区分「包裹没打开=读失败」和「打开但没有这条=真的 0」的调用方（奔月箱）：用这个。
+    // 11-25 起还会带 tabs（每样物品命中的页签），用于回答「这东西在背包哪一页」。
     const readBagItemsVerbose = (page, names) => read(page, names);
 
     return { readBagItems, readBagItemsVerbose, scrollBagList, closeBag, bagStillOpen };

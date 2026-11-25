@@ -42,6 +42,7 @@ const { chromium } = require('playwright');
 const daily = require('./daily.js');
 const { evTo, createBagReader } = require('./bag-read.js');
 const acct = require('./acct-lock.js');
+const drain = require('./dungeon-recover.js');   // 只借 readRewardToast：领奖明细 toast 抓取
 
 const { LOGIN_URL: URL } = require('./game-url.js');
 const pass = require('./account-pass.js');
@@ -52,6 +53,12 @@ const MEMBER = process.env.MEMBER || 'coldwind8';        // 笑嘻嘻 132 ——
 //   一份 GAME_PASSWORD 不可能同时登对两个号 → 优先读 GAME_PASSWORD_LEADER / GAME_PASSWORD_MEMBER，
 //   两边都落到公用 GAME_PASSWORD 且类别不同时直接报错退出，不用错密码硬登。
 const MODE = process.env.MODE || 'team';
+// ★ 情侣迷宫通关奖励（qllm-probe.js 抓详情页原文）：经验 8888 / 银贝 99 / **一只玫瑰 ×9**。
+//   到账判据（2026-11-25 与基德/炼器窟/附魔秘境统一口径）= 领奖明细 toast 里「一只玫瑰×N」，
+//   N ≥ 1 即到账，打印实际数量，不写死 9（一次给 9 就记 9）。
+//   背包增量这条在本脚本**只能人工核**（MODE=bag）：队长进本前停在「情侣迷宫」入口浮层、
+//   队员领奖时人在副本里，两边都没有「城市主视图」可读包裹 → 没有基线就没法比增量，不硬造。
+const QLLM_REWARDS = { '一只玫瑰': 9 };
 // memberclaim 只登队员一个号（队长把怪打完、领完奖下线了），此时不为队长要密码
 const NEED_LEADER = MODE !== 'memberclaim';
 // leave 只登队长一个号（队长解散队伍，队员自动离队），此时不为队员要密码
@@ -159,7 +166,17 @@ async function login(page, acc) {
         const ins = await page.$$('input');
         if (ins.length < 2) {
             const t = await txt(page);
-            if (t.includes('进入游戏') || t.includes('你看到') || t.includes('当前城市')) return true;
+            // ★ 11-25 修（与 bymj/fmsj/hdwang 同一处假成功）：这里原来把「进入游戏」也算登录成功
+            //   直接 return true —— 那是**选角页上的按钮**，人根本没进主界面。
+            //   后果实证（21:19 情侣补跑）：队员冷8 停在选角页被当成功 → inDungeon 判 false →
+            //   打「不在副本内（可能已退出）」然后 return 0 → qllm-daily 报「✓ 两段完成」，
+            //   实际「一只玫瑰×9」没领，失败被记成成功。
+            if (t.includes('你看到') || t.includes('当前城市')) return true;
+            if (t.includes('进入游戏')) {
+                if (await daily.enterMain(page, { rounds: 8, pauseMs: 3800, log: (m) => log(acc, m) })) return true;
+                log(acc, '选角页点不进主界面，重新进站再试');
+                await gotoGame(page); await sleep(2500); continue;
+            }
             await gotoGame(page); await sleep(2500); continue;
         }
         await ins[0].fill(acc); await ins[1].fill(pw);
@@ -640,12 +657,25 @@ async function claimReward(page, who) {
         const t = flat(await txt(page));
         if (/领取奖励/.test(t)) {
             log(who, '点「领取奖励」');
+            // ★ 明细 toast 只活 1~2 秒 → 必须在点「领取奖励」之前把轮询挂上
+            const toastP = drain.readRewardToast(page, 9000).catch(() => '');
             if (await clickHard(page, '领取奖励', false)) {
                 await sleep(2600);
                 for (const w of ['确定', '确认']) { if (await clickLeaf(page, w, true)) { await sleep(1800); break; } }
+                const toast = (await toastP) || '';
                 const after = flat(await txt(page));
                 log(who, '领奖后: ' + after.slice(0, 260));
-                return !/领取奖励/.test(after) || /获得/.test(after);
+                let rose = null;
+                if (toast) {
+                    log(who, '领奖明细: ' + toast);
+                    const m = toast.replace(/\s+/g, '').match(/一只玫瑰[×*x](\d+)/);
+                    if (m) rose = Number(m[1]);
+                    if (rose !== null) log(who, `✔ 领奖到账（明细原文）: 一只玫瑰×${rose}（需 ${QLLM_REWARDS['一只玫瑰']}）`);
+                    else log(who, '::warning::明细里没有「一只玫瑰」→ 这次可能只结算了经验/银贝');
+                } else {
+                    log(who, '::warning::没抓到领奖明细 toast（只活 1~2 秒）→ 到账只有页面证据（领取奖励消失）');
+                }
+                return rose !== null || !/领取奖励/.test(after) || /获得/.test(after);
             }
         }
         await sleep(1500);
@@ -672,21 +702,37 @@ async function main() {
             await p.keyboard.press('Escape').catch(() => { });
             await sleep(1200);
             const bg = createBagReader({ getPageText: daily.getPageText, log: (m) => log('队员', m) });
-            const r = await bg.readBagItems(p, ['一只玫瑰', '浴火之蝶', '藏宝图碎片']);
-            log('队员', '背包读数: ' + JSON.stringify(r));
+            const names = ['一只玫瑰', '浴火之蝶', '藏宝图碎片'];
+            const r = await bg.readBagItemsVerbose(p, names);
+            log('队员', '包裹打开: ' + r.opened);
+            log('队员', '背包读数: ' + JSON.stringify(r.items));
+            // ★ 11-25：把命中的页签一并打出来 —— 回答「一只玫瑰在背包哪一页」这类问题，
+            //   以前只知道数量不知道页签，只能靠猜。读不到就是 null（数量 0 时包裹里没有该条目）。
+            log('队员', '所在页签: ' + names.map((n) => `${n}=${r.items[n] === null ? '未读到' : (r.tabs[n] || '?')}`).join(' / '));
             return 0;
         }
         // MODE=memberclaim：队员单独上号领奖（用户 21:02「另一个号只需要上号领取奖励」）
         if (MODE === 'memberclaim') {
             const p = await (await browserA.newContext()).newPage();
             await gotoGame(p); await sleep(2500);
-            if (!(await login(p, MEMBER))) return 1;
+            // ★ 11-25：登录失败必须给非 0 退出码。原来 return 1 会被上层当失败（对），
+            //   但「不在副本内」那支 return 0 是**假成功**（见下）。
+            if (!(await login(p, MEMBER))) { log('队员', '::error::登录没进主界面 → 本次没领到奖'); return 4; }
             await sleep(3500);
             await p.keyboard.press('Escape').catch(() => { });
             await sleep(1500);
             let t = flat(await txt(p));
             log('队员', '登录后: ' + t.slice(0, 220));
-            if (!inDungeon(t)) { log('队员', '不在副本内（可能已退出）'); return 0; }
+            if (!inDungeon(t)) {
+                // ★ 11-25 修：这一支原来 `return 0` —— qllm-daily 看到 0 就打「✓ 两段完成」，
+                //   于是「登录停在选角页」被记成「奖领到了」。现在区分两种：
+                //   5 = 已出本回城（可能今天已领过，不算失败但要明说）；4 = 既不在副本也不在城市（异常）。
+                const inCity = t.includes('当前城市');
+                log('队员', inCity
+                    ? '已出本（回城）→ 本次没有可领的奖（若今天没领过，说明中队被踢/副本已结算）'
+                    : '::error::既不在副本也不在城市主视图 → 没领到奖');
+                return inCity ? 5 : 4;
+            }
             log('队员', '条件: 银锁:' + condLeft(t));
             // 页面可能是缓存 → 点「回到起点」强制刷新一次
             if (condLeft(t) !== 0) {
@@ -697,7 +743,9 @@ async function main() {
             }
             const ok = await claimReward(p, '队员');
             log('队员', '领奖结果: ' + ok + '｜' + flat(await txt(p)).slice(0, 200));
-            return 0;
+            // ★ 11-25：原来这里无条件 return 0 —— claimReward 没点到也报「两段完成」。
+            //   现在 ok=false 返回 6，让 qllm-daily 明确报失败，不把没领到洗成完成。
+            return ok ? 0 : 6;
         }
         // MODE=leave：只把残留的情侣队伍解散掉（队长解散，队员自动离队），不进本、不领奖。
         // 为什么需要：一次中途失败会在服务器上留下「2 人且队员已准备」的队伍，
@@ -917,10 +965,12 @@ async function main() {
         }
         // 全图清完才领奖；条件没归零说明银锁没打死，也照常试一次（按钮不出现会自动跳过）
         log('队长', `探索结束：走过 ${visited.size} 间房｜银锁:${condLeft(flat(await txt(pageA)))}`);
-        await claimReward(pageA, '队长');
+        // ★ 11-25：原来这里丢弃 claimReward 的返回值、无条件 return 0 —— 队长没领到也报成功。
+        //   现在领奖失败返回 7（qllm-daily 会报 error 但**仍然跑第二段**，队员那侧可能还能领）。
+        const leaderClaimed = await claimReward(pageA, '队长');
         log('队长', '最终: ' + flat(await txt(pageA)).slice(0, 300));
         log('队员', '最终: ' + flat(await txt(pageB)).slice(0, 200));
-        return 0;
+        return leaderClaimed ? 0 : 7;
     } finally {
         await browserA.close().catch(() => { });
         await browserB.close().catch(() => { });
