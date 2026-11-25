@@ -399,15 +399,15 @@ async function claim(page) {
     // ★ 领奖明细 toast 只活 1~2 秒，必须在点「领取奖励」之前挂好轮询（11-19 实证：点完再读什么都抓不到）
     const toastP = drain.readRewardToast(page, 9000).catch(() => '');
     let got = false;
-    for (let round = 1; round <= 4; round++) {
+    for (let round = 1; round <= 5; round++) {
         pageText = await txt(page);
         if (!pageText.includes('副本条件')) { got = true; break; }
         if (!pageText.includes('领取奖励')) { got = true; break; }
         log(`领取奖励（第 ${round} 轮）...`);
         if (!(await drain.clickByText(page, '领取奖励'))) { log('「领取奖励」点不到'); break; }
-        await sleep(1500);
+        await sleep(2000);
         await drain.dismissPopups(page, { log: log });
-        await sleep(1500);
+        await sleep(2000);
     }
     const toast = (await toastP) || '';
     let toastOk = false;
@@ -464,17 +464,17 @@ async function reconcile(page, bagBefore, toastOk) {
 // 领完奖退回的是「附魔秘境入口页」（铁匠铺里的浮层），下一步是威尼斯的秘宝抽奖，
 // 所以必须退回主视图，否则后面那步会对着浮层找按钮。
 async function backToCityView(page) {
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 5; i++) {
         if ((await txt(page)).includes('当前城市')) return true;
         await page.keyboard.press('Escape').catch(() => { });
-        await sleep(1200);
+        await sleep(2000);
         if ((await txt(page)).includes('当前城市')) return true;
         for (const w of ['返回', '关闭']) {
-            if (await clickLeaf(page, w, true).catch(() => false)) { await sleep(1500); break; }
+            if (await clickLeaf(page, w, true).catch(() => false)) { await sleep(2000); break; }
         }
         if ((await txt(page)).includes('当前城市')) return true;
         await Promise.race([page.mouse.click(14, 26), evTo(8000)]).catch(() => { });   // 左上返回箭头
-        await sleep(1500);
+        await sleep(2000);
     }
     const t = await txt(page);
     if (!t.includes('当前城市')) log('::warning::领奖后没退回主视图，页面: ' + flat(t).slice(0, 200));
@@ -631,12 +631,12 @@ async function main() {
                 const t = await txt(page);
                 if (t.includes('领取奖励')) {
                     log('异常兜底：页面仍有「领取奖励」→ 尽力领一次');
-                    for (let i = 0; i < 3; i++) {
+                    for (let i = 0; i < 5; i++) {
                         if (!(await txt(page)).includes('领取奖励')) break;
                         if (!(await drain.clickByText(page, '领取奖励'))) break;
-                        await sleep(1500);
+                        await sleep(2000);
                         await drain.dismissPopups(page, { log: log });
-                        await sleep(1500);
+                        await sleep(2000);
                     }
                     log('异常兜底结束（入口' + ((await txt(page)).includes('领取奖励') ? '仍在 → 未领到' : '已消失 → 已领') + '）');
                 }

@@ -134,10 +134,10 @@ function pickCity(lv) {
 async function readLevel(page, attempts = 3) {
     for (let a = 1; a <= attempts; a++) {
         // 不在城内主界面时点「状态」会点空（战场/城门列表/副本都没有这个入口）
-        for (let i = 0; i < 3; i++) {
+        for (let i = 0; i < 5; i++) {
             if ((await getPageText(page)).includes('出航')) break;
             await clickExact(page, '取消', 800);
-            await sleep(1200);
+            await sleep(2000);
         }
         if (!(await clickText(page, '状态', 3000))) {
             log(`主页未见「状态」入口（第${a}/${attempts}次），等页面就绪...`);
@@ -147,8 +147,8 @@ async function readLevel(page, attempts = 3) {
         await sleep(2500);
         let t = await getPageText(page);
         let m = t.match(/等级[:：]?\s*(\d+)/);
-        for (let c = 0; c < 4 && !m; c++) {
-            await sleep(1500);
+        for (let c = 0; c < 5 && !m; c++) {
+            await sleep(2000);
             t = await getPageText(page);
             m = t.match(/等级[:：]?\s*(\d+)/);
         }
@@ -797,12 +797,12 @@ async function checkEventPage(page) {
 // 人在副本里时先退本：副本页面是「副本 / 退出副本 / 剩余N分钟」，没有「出航」「传送」，
 // 攻城前的导航必然失败（10-24 20:34 实证）。
 async function leaveDungeon(page) {
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 5; i++) {
         const t = await getPageText(page);
         if (!t.includes('退出副本')) return true;
         log('检测到在副本内，先退出副本');
         await clickText(page, '退出副本', 3000);
-        await sleep(1500);
+        await sleep(2000);
         await clickText(page, '确定', 2000);
         await sleep(2500);
         if ((await getPageText(page)).includes('出航')) { log('已退出副本，回到城内'); return true; }

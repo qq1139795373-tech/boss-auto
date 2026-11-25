@@ -408,15 +408,15 @@ async function exitDungeonIfInside(page) {
     } catch (e) {
         console.log('副本内处理异常:', e.message);
     }
-    for (let i = 1; i <= 3; i++) {
+    for (let i = 1; i <= 5; i++) {
         if (!(await clickText(page, '退出副本', 2000))) {
             await jsClick(page, '退出副本');
         }
-        await sleep(1500);
+        await sleep(2000);
         let t = await getPageText(page);
         if (t.includes('副本条件') && t.includes('确定')) {
             await clickExact(page, '确定', 2000);
-            await sleep(1500);
+            await sleep(2000);
             t = await getPageText(page);
         }
         if (!(t.includes('副本条件') && t.includes('回到起点'))) {

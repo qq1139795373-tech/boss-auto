@@ -157,6 +157,10 @@ function auditBymj(src) {
     }
     if (!/领奖到账（明细原文）/.test(src)) out.push('没有「✔ 领奖到账（明细原文）」判定');
     if (!/\[对账\]/.test(src)) out.push('没有背包箱数对账');
+    // ★ 11-25 补：对账不能再被 !done 掐掉（明细一确认就整段跳过 → 日志里永远没有 [对账]）
+    if (/if\s*\(\s*!done\s*&&\s*backToTown\s*\)/.test(src)) {
+        out.push('箱数对账被 `!done` 门槛掐掉 → 明细一确认就永远不打 [对账]（假对账）');
+    }
     return out;
 }
 
@@ -232,6 +236,15 @@ console.log('=== 证伪：把旧写法塞回去必须被扫出 ===');
             const p7 = auditBymj(b7);
             if (p7.some((s) => s.includes('readRewardToast'))) ok('奔月去掉明细轮询会被查出');
             else bad('证伪失败：奔月没有明细轮询居然通过了');
+        }
+        // ⑧ 奔月：把箱数对账重新挂回 `!done` 门槛（11-25 修掉的假对账）
+        const b8 = bSrc.replace('if (backToTown) {\n        const after = await readBymjBox(page);',
+            'if (!done && backToTown) {\n        const after = await readBymjBox(page);');
+        if (b8 === bSrc) bad('证伪用例构造失败：找不到奔月的对账门槛行');
+        else {
+            const p8 = auditBymj(b8);
+            if (p8.some((s) => s.includes('!done'))) ok('奔月对账挂回 !done 会被查出');
+            else bad('证伪失败：假对账门槛塞回去居然通过了');
         }
     }
 }

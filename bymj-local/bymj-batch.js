@@ -417,11 +417,11 @@ async function enterDungeon(page) {
         log('队伍面板: ' + tt.replace(/\s+/g, ' ').slice(0, 160));
         // ★ 11-25 修：面板刚弹出时整块还是「加载中」，既没有「退出」也没有「解散」，
         //   原来在这里直接判 error 退出（冷8 今天 72s 就这么废掉了当天那次奔月）。
-        //   现在等它加载完再判，最多再读 4 次（每次 1.5s）。
-        for (let w = 0; w < 4 && !tt.includes('退出') && !tt.includes('解散'); w++) {
+        //   现在等它加载完再判：最多再读 5 次，每次 2 秒（用户 11-25：这种等待重读一律 2s×5）。
+        for (let w = 0; w < 5 && !tt.includes('退出') && !tt.includes('解散'); w++) {
             if (!tt.includes('加载中') && !tt.includes('队伍列表')) break;   // 不是加载态，等也没用
-            log(`队伍面板还在加载，等一下（${w + 1}/4）`);
-            await sleep(1500);
+            log(`队伍面板还在加载，等一下（${w + 1}/5）`);
+            await sleep(2000);
             tt = await txt(page);
             log('队伍面板: ' + tt.replace(/\s+/g, ' ').slice(0, 160));
         }
@@ -657,7 +657,10 @@ async function claim(page) {
     //   实际是**读数太晚**——旧代码点完「确定」才去页面文本里 match，toast 早消失了。现在点领奖之前
     //   就挂了 readRewardToast 轮询，明细能抓到。冷1 那天点确定被传回长安、无 toast，但背包箱子是 2 个
     //   （11-16 + 当天各 1）→ 确实到账。所以两条证据并行：明细原文，或回城后箱数比进本前多。
-    if (!done && backToTown) {
+    // ★ 2026-11-25 第二次修：这一段原来挂在 `!done` 上，明细一确认就整段跳过 → 日志里永远没有
+    //   `[对账]` 行、汇总只剩 `奔月箱:8->?`。现在只要回城就读一次：明细已确认时箱数没增加
+    //   只作说明（箱子可能已被开启/用掉），不推翻结论；明细没确认时才按硬证据判。
+    if (backToTown) {
         const after = await readBymjBox(page);
         const hasBase = st.boxBefore !== null && st.boxBefore !== undefined;
         if (after !== null) {
@@ -670,8 +673,11 @@ async function claim(page) {
             } else {
                 log(`[对账] 背包「奔月副本箱」${st.boxBefore} → ${after}`);
                 if (after > st.boxBefore) { done = true; why = `背包箱数 ${st.boxBefore}→${after}`; }
+                else if (done) log('（明细原文已确认到账，箱数没增加 → 箱子可能已被开启/用掉，不推翻结论）');
                 else log('::warning::箱数没有增加 → 这次领奖可能没到账（或箱子被用掉了一个）');
             }
+        } else if (done) {
+            log('[对账] 明细已确认到账，但回城后背包读数失败（本次没有箱数佐证）');
         } else {
             log('[对账] 背包读数失败，退回只看 toast');
         }
