@@ -1,0 +1,43 @@
+name: Dispatch Guard
+
+# 派发兜底（2026-11-26 建立）
+#
+# 事故：11-26 00:00:30 与 00:00:35，cron-job.org 两次 POST
+#   https://api.github.com/repos/qq1139795373-tech/boss-auto/actions/workflows/boss.yml/dispatches
+#   都被 GitHub 返回 500 Internal Server Error（截图实证）。cron-job.org 不重试，
+#   master 与 multi-boss 两条链同时丢失 → 当天 dawn 整套（副本 / 镇妖塔 / 每日任务 / 钓鱼）
+#   一次没跑，而 GitHub 上连 run 记录都没有，事后只看 Actions 列表根本查不出原因。
+#
+# 这个守卫不碰 boss.yml，只在旁边看门：每 30 分钟问一次 GitHub
+#   「今天这一波到底有没有 run」，缺了才补发；已经有了就什么都不做（幂等）。
+#
+# 注意：GitHub 的 schedule 只对默认分支（master）生效，所以这份守卫放 master，
+#   由它同时照看 master 与 multi-boss 两条链（REFS 在 dispatch-guard.js 里）。
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 单测（判定逻辑先自证）
+        run: node dispatch-guard-test.js
+
+      - name: 检查并补发缺失波次
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node dispatch-guard.js
