@@ -18,6 +18,11 @@ on:
   schedule:
     - cron: '*/30 * * * *'
   workflow_dispatch:
+    inputs:
+      selftest:
+        description: '自检：用 GITHUB_TOKEN 派发本守卫自身，验证 actions:write 权限真的够（不碰 boss 链）'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -40,4 +45,5 @@ jobs:
       - name: 检查并补发缺失波次
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GUARD_SELFTEST: ${{ inputs.selftest == true && '1' || '0' }}
         run: node dispatch-guard.js

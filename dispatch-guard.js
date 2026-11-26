@@ -109,8 +109,8 @@ function listCreatedAts(repo, ref) {
     return out ? out.split('\n').filter(Boolean) : [];
 }
 
-function dispatch(repo, ref) {
-    gh(['api', '--method', 'POST', `repos/${repo}/actions/workflows/${WORKFLOW}/dispatches`,
+function dispatch(repo, ref, workflow) {
+    gh(['api', '--method', 'POST', `repos/${repo}/actions/workflows/${workflow || WORKFLOW}/dispatches`,
         '-f', `ref=${ref}`]);
 }
 
@@ -122,6 +122,21 @@ function main(argv) {
     const nowText = `${String(bj.hour).padStart(2, '0')}:${String(bj.min).padStart(2, '0')}`;
 
     const due = dueWaves(now);
+    const selftest = process.env.GUARD_SELFTEST === '1';
+
+    // 自检：验证 GITHUB_TOKEN 真的有 actions:write，能派发 workflow。
+    // 目标选 Dispatch Guard 自身（再跑一遍守卫，不在窗口就空转退出），绝不碰 boss 链：
+    // 这一步是为了不给线上留一条「看起来在守、实际派不出去」的假防线。
+    if (selftest) {
+        if (!repo) {
+            console.error('[guard] 缺 GITHUB_REPOSITORY（形如 owner/repo）');
+            return 2;
+        }
+        dispatch(repo, 'master', 'dispatch-guard.yml');
+        console.log('[guard] 自检通过：已用 GITHUB_TOKEN 派发 Dispatch Guard 自身（不碰 boss 链）');
+        return 0;
+    }
+
     if (!due.length) {
         console.log(`[guard] 北京 ${nowText} 不在任何波次的补发检查窗口内 → 退出`);
         return 0;
