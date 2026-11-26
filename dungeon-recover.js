@@ -265,7 +265,14 @@ async function claimEvidence(page) {
 //   只认页面出现「当前城市」，Escape 与左上返回箭头交替试，最多 5 轮。
 async function backToCityView(page, opts = {}) {
     const log = opts.log || (() => { });
-    const txt = opts.txt || (() => visibleText(page));
+    // txt 的契约是 **(page) => Promise<页面文本>**，调用时必须把 page 带上。
+    // ★ 11-26 踩坑（炼器窟/基德的背包对账从来没真正跑起来）：dungeon.js / kidd.js 传的是
+    //   `txt: getPageText`，而 getPageText(page) 是两参形态；旧写法按零参调用 `await txt()`
+    //   → getPageText(undefined) → 内部 page.evaluate 立刻抛
+    //   「Cannot read properties of undefined (reading 'evaluate')」，被调用方的 try 兜住，
+    //   整段对账跳进 catch，只留一条 warning。现在统一在这里补 page。
+    //   （零参闭包也兼容：多传一个参数给箭头函数是无害的。）
+    const txt = () => (opts.txt ? opts.txt(page) : visibleText(page));
     // 注意：这里**绝不点「退出副本」**。本函数也被「领奖失败」的路径调用，那时若退本，
     // 当天那 1 次机会就白扔了（副本每天只 1 次，进本状态持久）。回不了城就返回 false，
     // 由调用方跳过背包对账并打 warning —— 少一条对账证据，好过毁掉一次机会。
