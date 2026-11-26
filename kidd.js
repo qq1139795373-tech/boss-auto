@@ -578,6 +578,22 @@ async function northToHubClearing(page) {
 //   现在按「同一只怪累计刀数 / 累计时间」判：没到 STUCK_BLADES 刀、STUCK_MS 毫秒就继续打它，
 //   到了才算是真打不动，跳过并告警。房间另有 40 次尝试与 ROOM_MAX_MS 兜底。
 const ROOM_MAX_MS = Number(process.env.KIDD_ROOM_MAX_MS || 720000);
+
+// 房间读不到怪时，允许连读几次空才认定这一间收工。
+//   ★ 2026-11-26 用户问「为什么只有基德老在等渲染」→ 查下来不是渲染慢，是这里的收工判据：
+//     每间房打完最后一只后，页面就是空的，但 clearRoom 没法知道「空了 = 清完了」，
+//     只能靠「连续读空 N 次」来确认，于是每间房固定白等 (N-1)×2 秒。
+//     11-22 那趟实测：36 次空读 = 17 间房 × 约 2 次（当时 1.5s×3 档），占整趟 275 秒的两成；
+//     11-24/25 把上限从 3 提到 5、间隔 1.5→2 秒之后，每间房变成 4 次 × 2 秒 = 8 秒，翻了一倍多。
+//   ★ 两种「读不到怪」必须分开，它们的可信度完全不同：
+//     ① 刚进房就读不到（本房还没杀过怪，kills===0）→ 页面可能还没换/还没渲染出来，
+//        10-29 东线就是首读 0 只当空房，只记 8 间 / 24 杀（总 48/51）→ 这里必须留足 5 次；
+//     ② 本房已经杀过怪（kills>0）→ 怪不会复活，读到空就是清完了，只需排除最后一刀之后
+//        结算面板收起、房间列表重绘的那一下抖动 → 2 次（即 2 秒）足够。
+function emptyReadLimit(kills) {
+    return kills > 0 ? 2 : 5;
+}
+
 async function clearRoom(page, tag) {
     let kills = 0;
     let emptyReads = 0;
@@ -621,11 +637,11 @@ async function clearRoom(page, tag) {
             // 「真空房间」和「怪还没渲染出来」必须分开。
             // 2026-10-29 实证：东线「西库尽头」进房后第一次读就是 0 只怪，旧代码 `return kills`
             // 立刻当空房 → 东线只记 8 间 / 24 杀（总 48/51）；同代码 10-28 同一间读到 3 只。
-            // 现在连续 5 次都读不到才认定空房（真空房多花约 9.5 秒，可接受；11-24 用户要求 3→5，
-            // 11-25 用户要求把等待从 1.5s 放到 2s：多等 2 秒换来「怪刚刷出来就读到」，比错判空房少打一只划算）。
+            // 上限不再写死 5：刚进房 5 次（防上面那种漏读），本房已杀过怪 2 次（清完后的确认，见 emptyReadLimit）。
             emptyReads++;
-            if (emptyReads >= 5) return kills;
-            console.log(`[${tag}] 房间没读到怪，等渲染（第${emptyReads}/5次）...`);
+            const limit = emptyReadLimit(kills);
+            if (emptyReads >= limit) return kills;
+            console.log(`[${tag}] 房间没读到怪，等渲染（第${emptyReads}/${limit}次）...`);
             await sleep(2000);
             continue;
         }

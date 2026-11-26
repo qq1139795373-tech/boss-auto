@@ -351,6 +351,13 @@ async function backToHub(page) {
 //   异常一路冒泡跳过「对账 / 领取奖励」整段 —— 明明已经打了 90+ 只，却把奖励丢掉。
 //   领奖是大头（用户 11-15/11-21 两次强调），所以改成：同一只怪连续 3 次打不死 → 本轮跳过它，
 //   继续清同房间其它怪；15 次仍清不完 → 告警并带着缺口返回，由上层照常对账 + 领奖。
+// 房间读不到怪时，允许连读几次空才认定这一间收工。与 kidd.js / emptyReadLimit 逐字同源。
+//   刚进房（kills===0）→ 5 次：页面可能还没换、还没渲染，留足余量；
+//   本房已杀过怪（kills>0）→ 2 次：怪不会复活，读到空就是清完了，只需排除结算后重绘抖动。
+function emptyReadLimit(kills) {
+    return kills > 0 ? 2 : 5;
+}
+
 async function clearRoom(page, tag) {
     let kills = 0;
     let emptyReads = 0;
@@ -385,11 +392,11 @@ async function clearRoom(page, tag) {
         if (!mobs.length) {
             // 「本层真的没怪」和「怪还没渲染出来」必须分开。
             // kidd.js 2026-10-29 实证：基德东线首读 0 只就当空房 → 只记 8 间/24 杀（总 48/51）。
-            // 炼器窟每层固定 3 只，正常路径第一读就有怪，所以全清时零额外开销；
-            // 只有真的读不到（页面还没渲染）才会在这里多等，最多 5 次 ≈9.5 秒（11-24 用户要求 3→5，11-25 间隔 1.5s→2s）。
+            // 上限按「本房杀没杀过怪」分档（见 emptyReadLimit）：刚进房 5 次，清完后只需 2 次确认。
             emptyReads++;
-            if (emptyReads >= 5) return kills;
-            console.log(`[${tag}] 房间没读到怪，等渲染（第${emptyReads}/5次）...`);
+            const limit = emptyReadLimit(kills);
+            if (emptyReads >= limit) return kills;
+            console.log(`[${tag}] 房间没读到怪，等渲染（第${emptyReads}/${limit}次）...`);
             await sleep(2000);
             continue;
         }
