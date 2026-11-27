@@ -99,14 +99,31 @@ function hasRunSince(createdAts, targetEpoch, nowEpoch) {
     return false;
 }
 
+let execFile = execFileSync;
+// 仅单测用：注入假 gh，好让「取数口径」这一层也能被测到。
+function __setExec(fn) { execFile = fn; }
+
 function gh(args, opts) {
-    return execFileSync('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], ...opts }).trim();
+    return execFile('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], ...opts }).trim();
 }
+
+// jq 必须写成 .workflow_runs[].created_at 这种**直接取值**，不能写 "\(.created_at)" 插值串：
+// JS 单引号串会把 \( 的反斜杠吃掉，交给 gh 的表达式变成 "(.created_at)"，gh 原样输出字面量，
+// new Date 全 NaN → hasRunSince 恒 false → 每个进入窗口的轮次都误补发一对，
+// 同一批账号叠两趟 farm 相互顶号（2026-11-27 03:43 线上实证，与 11:30 那趟叠了 5 小时 43 分）。
+const RUNS_JQ = '.workflow_runs[].created_at';
 
 function listCreatedAts(repo, ref) {
     const out = gh(['api', `repos/${repo}/actions/runs?branch=${encodeURIComponent(ref)}&per_page=50`,
-        '--jq', '.workflow_runs[] | "\(.created_at)"']);
-    return out ? out.split('\n').filter(Boolean) : [];
+        '--jq', RUNS_JQ]);
+    const rows = (out || '').split('\n').map((s) => s.trim()).filter(Boolean);
+    const valid = rows.filter((s) => !Number.isNaN(new Date(s).getTime()));
+    // 读到了行却一条都解析不出时间 = 取数口径坏了。宁可抛出去让 main 打「本轮跳过」，
+    // 也绝不按「没有 run」放行：漏补下一轮还能补，重复补会顶号毁掉当天收益。
+    if (rows.length && !valid.length) {
+        throw new Error(`返回 ${rows.length} 行但无可解析时间（取数口径异常），样例 ${JSON.stringify(rows[0])}`);
+    }
+    return valid;
 }
 
 function dispatch(repo, ref, workflow) {
@@ -184,4 +201,7 @@ if (require.main === module) {
     }
 }
 
-module.exports = { WAVES, REFS, CHECK_AFTER_MIN, bjMinuteOfDay, hmToMin, waveEpoch, dueWaves, hasRunSince };
+module.exports = {
+    WAVES, REFS, CHECK_AFTER_MIN, RUNS_JQ, bjMinuteOfDay, hmToMin, waveEpoch, dueWaves, hasRunSince,
+    listCreatedAts, __setExec,
+};
