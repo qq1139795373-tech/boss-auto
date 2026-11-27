@@ -99,5 +99,49 @@ t('两条分支各自判定：master 缺、multi-boss 在，只补 master', () =
     assert.strictEqual(g.hasRunSince(multiRuns, target, nowAt(0, 12)), true);
 });
 
+console.log('[7] 取数口径（11-27 线上事故：单测全绿但线上永远认不出已有 run）');
+// 事故：listCreatedAts 原来写 '--jq', '.workflow_runs[] | "\(.created_at)"'
+// JS 单引号串吃掉 \( 的反斜杠 → gh 收到 "(.created_at)" → 输出字面量 → 全 NaN → 恒 false。
+// 那 30 项单测只喂 hasRunSince 干净 ISO，压根没走取数这一层，所以没兜住。
+function fakeGh(stdout) {
+    const calls = [];
+    g.__setExec((cmd, args) => { calls.push({ cmd, args }); return stdout; });
+    return calls;
+}
+t('传给 gh 的 jq 里不许有反斜杠转义（它会被 JS 吃掉）', () => {
+    const calls = fakeGh('2026-11-26T16:00:32Z');
+    g.listCreatedAts('o/r', 'master');
+    const jq = calls[0].args[calls[0].args.indexOf('--jq') + 1];
+    assert.ok(!jq.includes('\\'), `jq 不该含反斜杠：${jq}`);
+    assert.ok(jq.includes('.workflow_runs'), 'jq 应当取 workflow_runs');
+    assert.ok(jq.includes('created_at'), 'jq 应当取 created_at');
+});
+t('正常 ISO 输出 → 原样返回', () => {
+    fakeGh('2026-11-26T16:00:32Z\n2026-11-26T22:00:28Z');
+    assert.deepStrictEqual(g.listCreatedAts('o/r', 'master'),
+        ['2026-11-26T16:00:32Z', '2026-11-26T22:00:28Z']);
+});
+t('空输出 → 空数组（真的没 run，允许补发）', () => {
+    fakeGh('');
+    assert.deepStrictEqual(g.listCreatedAts('o/r', 'master'), []);
+});
+// ★ 证伪：把事故输出塞回去，必须抛错而不是静默当「没有 run」
+t('事故输出 "(.created_at)" ×5 → 必须抛错，不许当成没派发', () => {
+    fakeGh('(.created_at)\n(.created_at)\n(.created_at)\n(.created_at)\n(.created_at)');
+    assert.throws(() => g.listCreatedAts('o/r', 'master'), /无可解析时间/);
+});
+t('部分坏行 + 一条好行 → 只返回好的（不因个别脏行误判）', () => {
+    fakeGh('(.created_at)\n2026-11-26T16:00:32Z\n');
+    assert.deepStrictEqual(g.listCreatedAts('o/r', 'master'), ['2026-11-26T16:00:32Z']);
+});
+t('坏取数必须走「本轮跳过」而不是补发：抛错可被 main 的 try/catch 接住', () => {
+    fakeGh('(.created_at)');
+    let caught = null;
+    try { g.listCreatedAts('o/r', 'multi-boss'); } catch (e) { caught = e; }
+    assert.ok(caught, '必须抛错');
+    // 若上层吞掉这个错并当作空列表，hasRunSince 会返回 false → 误补发。断言错误不被当成数据。
+    assert.strictEqual(g.hasRunSince([], target, nowAt(0, 12)), false);
+});
+
 console.log(`\n结果: ${pass} 通过 / ${fail} 失败`);
 process.exit(fail ? 1 : 0);
