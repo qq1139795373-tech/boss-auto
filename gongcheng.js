@@ -92,10 +92,19 @@ let BATTLE_LIMIT_MS = 120000;
 // 而且每只怪都会被「出手4次体力没变」误判成尸体。攻城窗口足够长（30 分钟），
 // 补药的十几秒花得起，所以按用户 11-15 定的两条路补药：撤退 → 首页「包裹」→ 药水 →
 // 体力宝（优先小体力宝，没有才用大体力宝）。
-let BLOOD_DEAD = false;      // 补药失败后本波不再反复开包裹（否则每只怪白等十几秒）
+let BLOOD_DEAD = false;      // 判定本波打不动（补药无效 / 无药可补到上限）→ 收工
 let BLOOD_HEALS = 0;         // 本波已成功补药次数
-const BLOOD_HEAL_MAX = 1;    // ★ 用户 2026-11-15：体力宝效果是覆盖不是叠加，补第二次不会让血池更多，
-                             //   纯浪费。所以一波只补一个；补完还是 0 就说明是别的问题，立刻收工告警。
+let BLOOD_HEAL_FAILS = 0;    // 补过药、下一场又读到 0 的连续次数（有击杀就清零）
+let BLOOD_DRY_STREAK = 0;    // 血池 0 且补不上药的连续只数（有击杀/补上药就清零）
+// 用户 2026-11-15「体力宝效果是覆盖不是叠加」= 连着吃第二个不会让血池更多，**不等于补一次就永久失效**。
+// 11-28 大号 20:00 就是这个理解把整波封死的：包里还有 73 个小体力宝，补了 1 次后
+// 第二只怪 0.1 秒又读到 0，直接 ::error:: 收工，击杀 0。改成按「连续无效」判。
+const BLOOD_HEAL_MAX = 3;    // 一波最多补 3 次（纯防死循环，正常 1 次就够）
+const BLOOD_HEAL_FAIL_MAX = 2;// 连续 2 次补药后仍归零 → 认为不是缺药，真的打不动
+const BLOOD_DRY_MAX = 5;     // 连续 5 只都无药可补才收工（药没了不放弃，接着抢）
+// 补药后第一帧可能是上一场战斗面板的残影（无怪物体力行）。没读到怪物血量时，
+// 这场战斗至少等这么久才允许判「血池 0」，避免 0.1 秒误杀整波。
+const BLOOD_GRACE_MS = Number(process.env.GC_BLOOD_GRACE_MS) || 1500;
 
 // 用户 10-31：自动攻击「能用，但攻击间隔很高，远不如快速点攻击效率高，选自动攻击大概率抢不到怪」
 // → 默认改成高频点「攻击」；自动攻击只作为可选（AUTO_ATTACK=1），留作逐回合点不动时的兜底。
@@ -473,6 +482,24 @@ function inBattleMenu(t) {
     return t.includes('撤退') && (t.includes('攻击') || t.includes('自动攻击'));
 }
 
+// 血池决策（纯函数，单测 blood-gate-test.js）。四种结果：
+//   fight —— 不用管血池（读到 >0 / 读不到 / 根本不在战斗面板）
+//   wait  —— 血池 0，但这场还没出现怪物体力行、且仍在宽限内：多半是上一场的残影面板，先等
+//   heal  —— 血池 0，撤退补药（retry=true 表示「补过之后又归零」，调用方记一次无效）
+//   giveup——真补不动：已判死 / 额度到顶 / 连续补药无效 / 连续多只无药
+function bloodGate(s) {
+    const pick = (v, d) => (v === undefined || v === null ? d : v);   // 0 是合法值（单测要能关掉宽限）
+    if (s.inBattle === false) return { act: 'fight' };
+    if (s.blood === null || s.blood === undefined) return { act: 'fight' };
+    if (s.blood > 0) return { act: 'fight' };
+    if (!s.hasMonsterHp && s.elapsedMs < pick(s.graceMs, BLOOD_GRACE_MS)) return { act: 'wait' };
+    if (s.dead) return { act: 'giveup', why: '此前已判打不动' };
+    if (s.heals >= pick(s.healMax, BLOOD_HEAL_MAX)) return { act: 'giveup', why: `本波已补 ${s.heals} 次到上限` };
+    if (s.fails >= pick(s.failMax, BLOOD_HEAL_FAIL_MAX)) return { act: 'giveup', why: `连续 ${s.fails} 次补药后血池仍为 0` };
+    if (s.dryStreak >= pick(s.dryMax, BLOOD_DRY_MAX)) return { act: 'giveup', why: `连续 ${s.dryStreak} 只无药可补` };
+    return { act: 'heal', retry: s.heals > 0 };
+}
+
 // 关掉可能弹出的提示框（不同提示按钮不一样：关闭 / 确定 / 取消）
 // 传入当前页面文本 t 有两条好处：① 只点真正存在的按钮；② 不存在就不点。
 // clickText 找不到元素要白等 timeout + 2.5 秒，一次「无按钮」就烧 3~4 秒；
@@ -554,38 +581,69 @@ async function resolveBattle(page, openMs = Number(process.env.GC_OPEN_MS) || 12
             }
             await page.keyboard.press('Escape').catch(() => {});
             await sleep(250);
+            BLOOD_HEAL_FAILS = 0;   // 这一只打赢了 → 补药确实有效，无效计数清零
+            BLOOD_DRY_STREAK = 0;
             return fin('win');
         }
 
         // 1.5) 血池为 0 → 先撤退补药（用户 2026-11-15）。
         //      判据只认面板里自己那行「血池: 0」，读不到就是 null，不会误触发。
         //      补药流程：撤退 → 首页「包裹」→「药水」→ 小体力宝（没有才用体力宝）→ 关包裹 → 回来继续抢。
-        //      补药成功这一只不算失败（外层不推进 tried），补不回来就明确告警并收工，
-        //      绝不留在原地空点到 30 分钟结束。
-        if (inBattleMenu(t) && drain.readBlood(t) === 0) {
-            if (BLOOD_DEAD || BLOOD_HEALS >= BLOOD_HEAL_MAX) {
-                const why = BLOOD_HEALS >= BLOOD_HEAL_MAX ? `本波已补 ${BLOOD_HEALS} 次到上限` : '补药此前失败过';
-                BLOOD_DEAD = true;
-                log(`[血池] 为 0 且${why}，撤出这只`);
-                await closePopup(page, t);
-                await retreat(page, t);
-                return fin('noBlood');
+        //      补药成功这一只不算失败（外层不推进 tried），补不回来就告警，绝不留在原地空点。
+        //
+        // ★ 2026-11-28 修复两处踩空（当晚大号击杀 0 的直接原因）：
+        //   ① 补完药点下一只时，页面可能还停在上一场战斗面板的残影 —— 只有「撤退/攻击」和
+        //      上一场的「血池：0」，没有怪物体力行。原来一进来就判 0，0.1 秒就把本波封死。
+        //      真面板必有「体力：X/Y」怪物行，所以没读到怪物血量时先给 GRACE 宽限，不判血池。
+        //   ② 「覆盖式恢复、不能叠加」被写成了「本波只补 1 次」。覆盖式只说明连着吃不会更多，
+        //      不等于补一次就永久失效。改成：补过又归零记一次无效，连续 BLOOD_HEAL_FAIL_MAX
+        //      次无效才判打不动；药还在就继续补。
+        const hpNow = monsterHp(t);
+        const g = bloodGate({
+            inBattle: inBattleMenu(t),
+            blood: drain.readBlood(t),
+            hasMonsterHp: !!hpNow,
+            elapsedMs: Date.now() - t0,
+            heals: BLOOD_HEALS,
+            fails: BLOOD_HEAL_FAILS,
+            dryStreak: BLOOD_DRY_STREAK,
+            dead: BLOOD_DEAD,
+        });
+        if (g.act === 'giveup') {
+            log(`[血池] 为 0 且${g.why}，撤出这只`);
+            BLOOD_DEAD = true;
+            await closePopup(page, t);
+            await retreat(page, t);
+            return fin('noBlood');
+        }
+        if (g.act === 'heal') {
+            if (g.retry) {
+                BLOOD_HEAL_FAILS++;
+                log(`[血池] 补药后又归零（连续第 ${BLOOD_HEAL_FAILS}/${BLOOD_HEAL_FAIL_MAX} 次），再补一次`);
             }
             log('[血池] 为 0，撤退补药...');
             // force：血池判据这里已经读过（面板一撤就读不到了，不 force 会误报 no-blood-read）。
             // 撤退由 healBlood 自己做（它先点「撤退」再开包裹），保证补完药回到的是活动页。
             const h = await drain.healBlood(page, { tag: '补血池·攻城', inDungeon: false, force: true, log });
             if (!h.ok) {
-                BLOOD_DEAD = true;
-                log(`::warning::[血池] 补药失败（${h.reason}），本波不再尝试`);
+                // ★ 11-20 铁律：药真没了、或包裹/页签读不到，都不许直接放弃整波。
+                //   攻城没有领奖环节，能抢的怪照抢；连续 BLOOD_DRY_MAX 只都因无药打不了才收工。
+                BLOOD_DRY_STREAK++;
+                log(`::warning::[血池] 补不上药（${h.reason}），本只先撤出（连续 ${BLOOD_DRY_STREAK}/${BLOOD_DRY_MAX} 只）`);
+                if (BLOOD_DRY_STREAK >= BLOOD_DRY_MAX) {
+                    BLOOD_DEAD = true;
+                    log(`[血池] 连续 ${BLOOD_DRY_STREAK} 只无药可补，本波收工`);
+                }
                 await closePopup(page, t);
                 await retreat(page, t);
                 return fin('noBlood');
             }
             BLOOD_HEALS++;
+            BLOOD_DRY_STREAK = 0;
             log(`[血池] 补药成功（${h.item}×${h.used}），继续抢怪`);
             return fin('healed');
         }
+        // g.act === 'wait'（残影面板，还没读到怪物体力行）或 'fight'：继续走正常战斗流程
 
         // 2) 判「有没有真的进战斗」。原来只认 inBattleMenu（撤退 + 攻击按钮），
         //    可面板已弹出、按钮还没渲染完时会被判成"没打起来"，白等满 openMs
@@ -1108,14 +1166,21 @@ async function run() {
             const res = await resolveBattle(page);
             stat[res] = (stat[res] || 0) + 1;
             // 血池为 0：补药成功就接着抢（不算这只失败，不推进 tried）；
-            // 补不回来直接收工并报错——血池 0 时一只都打不死，留着空转只会把 30 分钟烧完。
+            // 补不回来先换下一只（连续多只补不上才收工），不留在原地空点到 30 分钟结束。
             if (res === 'healed') {
                 log('血池已补，回到列表继续抢怪');
                 continue;
             }
             if (res === 'noBlood') {
-                log('::error::血池为 0 且没有可用的体力宝（小体力宝/体力宝），本波攻城无法继续');
-                break;
+                // 只有真的判断打不动（连续补药无效 / 连续多只无药可补）才收工；
+                // 单只血池 0 且暂时补不上药时换下一只继续抢 —— 不许一读到 0 就放弃整波。
+                if (BLOOD_DEAD) {
+                    log(`::error::血池为 0 且补不动（补药 ${BLOOD_HEALS} 次 / 连续无效 ${BLOOD_HEAL_FAILS} 次 / 连续无药 ${BLOOD_DRY_STREAK} 只），本波收工`);
+                    break;
+                }
+                tried++;
+                log(`本只血池 0 且暂时补不上药，换下一只（连续无药 ${BLOOD_DRY_STREAK}/${BLOOD_DRY_MAX}）`);
+                continue;
             }
             if (res === 'win') {
                 kills++;
@@ -1187,4 +1252,4 @@ async function run() {
 // 供本地探针/单测复用（tasks.js 用 spawn 子进程调用，require.main 保护不影响 CI）
 if (require.main === module) run();
 
-module.exports = { LOST_RE, inBattleMenu, closePopup, resolveBattle, countMonsters, clickMonster, refreshList, goToGate, readLevel, pickCity, eventPhase, monsterHp, CITIES };
+module.exports = { LOST_RE, inBattleMenu, bloodGate, closePopup, resolveBattle, countMonsters, clickMonster, refreshList, goToGate, readLevel, pickCity, eventPhase, monsterHp, CITIES };

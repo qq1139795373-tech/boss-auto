@@ -965,6 +965,7 @@ async function fightMonster(page, name) {
     await sleep(500);
     let resultTxt = '';
     let heals = 0;
+    let healAt = 0;   // 上次补药成功的时刻：补完点回怪的第一帧常是上一场的残影面板（血池仍显示 0），先等
     for (let a = 0; a < 12; a++) {
         const txt = await getPageText(page);
         if (txt.includes('关闭')) {
@@ -981,6 +982,9 @@ async function fightMonster(page, name) {
             // 等打满 3 刀人已经被砍死、副本直接判失败。血池 0 = 这一刀就不该出。
             // 只补 1 个：体力宝是「覆盖」不是「叠加」，补第二个不会让血池变多。
             if (drain.readBlood(txt) === 0) {
+                // 补药后 1.8 秒内读到 0 先不当真：点回这只怪的第一帧多半还是上一场的面板残影。
+                // 直接按「补过仍为 0」判死，会把刚补好的药白扔掉（攻城 11-28 就是这么整波空的）。
+                if (healAt && Date.now() - healAt < 1800) { await sleep(300); continue; }
                 if (BLOOD_DEAD || heals >= 1) {
                     console.log(`  [血池] ${name}: 血池 0${BLOOD_DEAD ? '（药已用光）' : '（补过 1 个仍为 0）'}，放弃这只`);
                     // 补过 1 个还是 0 → 不是药不够，别再逐只怪开包裹吃第二次药
@@ -994,6 +998,7 @@ async function fightMonster(page, name) {
                     break;
                 }
                 heals++;
+                healAt = Date.now();
                 if (!(await clickMonster(page, name))) { console.log(`  [血池] ${name}: 补药后点不回这只怪`); break; }
                 await sleep(500);
                 continue;

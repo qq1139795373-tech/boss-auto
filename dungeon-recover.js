@@ -981,6 +981,9 @@ async function healBlood(page, opts = {}) {
     }
     const nb = readBlood(await visibleText(page));
     if (nb !== null && nb > 0) log(`[${tag}] 血池 ${blood === null ? '?' : blood} → ${nb}`);
+    // 关掉包裹后多半已经回到列表/活动页，那里没有「血池：」字段 → 读不到是正常的。
+    // 11-28 前这里静默，日志看起来像「补药已验证成功」，实际从没验证过；写清楚，别误导复盘。
+    else log(`[${tag}] 补药完成，当前页读不到血池（${nb === null ? '无该字段' : `仍为 ${nb}`}），下一场战斗首帧确认`);
     log(`[${tag}] 已用 1 个「${r.item}」（覆盖式恢复，不能叠加），回到战斗继续`);
     return { ok: true, used: 1, item: r.item, blood: nb === null ? blood : nb, reason: 'healed' };
 }
