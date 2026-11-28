@@ -92,16 +92,15 @@ let BATTLE_LIMIT_MS = 120000;
 // 而且每只怪都会被「出手4次体力没变」误判成尸体。攻城窗口足够长（30 分钟），
 // 补药的十几秒花得起，所以按用户 11-15 定的两条路补药：撤退 → 首页「包裹」→ 药水 →
 // 体力宝（优先小体力宝，没有才用大体力宝）。
-let BLOOD_DEAD = false;      // 判定本波打不动（补药无效 / 无药可补到上限）→ 收工
+let BLOOD_DEAD = false;      // 整波判死（时间/规则层面收工，不再由「血池 0」触发）
+let BLOOD_HARD = false;      // ★ 用户 11-20 / 11-28：补不上药就按「没有体力宝」硬打，不许撤退换只、不许收工
 let BLOOD_HEALS = 0;         // 本波已成功补药次数
 let BLOOD_HEAL_FAILS = 0;    // 补过药、下一场又读到 0 的连续次数（有击杀就清零）
-let BLOOD_DRY_STREAK = 0;    // 血池 0 且补不上药的连续只数（有击杀/补上药就清零）
 // 用户 2026-11-15「体力宝效果是覆盖不是叠加」= 连着吃第二个不会让血池更多，**不等于补一次就永久失效**。
 // 11-28 大号 20:00 就是这个理解把整波封死的：包里还有 73 个小体力宝，补了 1 次后
 // 第二只怪 0.1 秒又读到 0，直接 ::error:: 收工，击杀 0。改成按「连续无效」判。
-const BLOOD_HEAL_MAX = 3;    // 一波最多补 3 次（纯防死循环，正常 1 次就够）
-const BLOOD_HEAL_FAIL_MAX = 2;// 连续 2 次补药后仍归零 → 认为不是缺药，真的打不动
-const BLOOD_DRY_MAX = 5;     // 连续 5 只都无药可补才收工（药没了不放弃，接着抢）
+const BLOOD_HEAL_MAX = 3;    // 一波最多补 3 次（纯防死循环）；到顶仍 0 → 转硬打，不是收工
+const BLOOD_HEAL_FAIL_MAX = 2;// 连续 2 次补药后仍归零 → 说明不是缺药，转硬打
 // 补药后第一帧可能是上一场战斗面板的残影（无怪物体力行）。没读到怪物血量时，
 // 这场战斗至少等这么久才允许判「血池 0」，避免 0.1 秒误杀整波。
 const BLOOD_GRACE_MS = Number(process.env.GC_BLOOD_GRACE_MS) || 1500;
@@ -483,20 +482,22 @@ function inBattleMenu(t) {
 }
 
 // 血池决策（纯函数，单测 blood-gate-test.js）。四种结果：
-//   fight —— 不用管血池（读到 >0 / 读不到 / 根本不在战斗面板）
+//   fight —— 不用管血池（读到 >0 / 读不到 / 不在战斗面板 / 已转入硬打模式）
 //   wait  —— 血池 0，但这场还没出现怪物体力行、且仍在宽限内：多半是上一场的残影面板，先等
 //   heal  —— 血池 0，撤退补药（retry=true 表示「补过之后又归零」，调用方记一次无效）
-//   giveup——真补不动：已判死 / 额度到顶 / 连续补药无效 / 连续多只无药
+//   hard  —— ★ 不再补了，按「没有体力宝」硬打（补到上限 / 连续补药无效）。绝不等于放弃整波，
+//            用户 11-20、11-28 两次强调：补血失败也要先打怪，不许动不动就放弃。
+//   giveup——仅用于整波判死（dead），「血池 0」本身不再产生这个结果。
 function bloodGate(s) {
     const pick = (v, d) => (v === undefined || v === null ? d : v);   // 0 是合法值（单测要能关掉宽限）
     if (s.inBattle === false) return { act: 'fight' };
+    if (s.hard) return { act: 'fight' };                             // 已转硬打：不再碰血池
     if (s.blood === null || s.blood === undefined) return { act: 'fight' };
     if (s.blood > 0) return { act: 'fight' };
     if (!s.hasMonsterHp && s.elapsedMs < pick(s.graceMs, BLOOD_GRACE_MS)) return { act: 'wait' };
-    if (s.dead) return { act: 'giveup', why: '此前已判打不动' };
-    if (s.heals >= pick(s.healMax, BLOOD_HEAL_MAX)) return { act: 'giveup', why: `本波已补 ${s.heals} 次到上限` };
-    if (s.fails >= pick(s.failMax, BLOOD_HEAL_FAIL_MAX)) return { act: 'giveup', why: `连续 ${s.fails} 次补药后血池仍为 0` };
-    if (s.dryStreak >= pick(s.dryMax, BLOOD_DRY_MAX)) return { act: 'giveup', why: `连续 ${s.dryStreak} 只无药可补` };
+    if (s.dead) return { act: 'giveup', why: '本波已判收工' };
+    if (s.heals >= pick(s.healMax, BLOOD_HEAL_MAX)) return { act: 'hard', why: `本波已补 ${s.heals} 次仍为 0` };
+    if (s.fails >= pick(s.failMax, BLOOD_HEAL_FAIL_MAX)) return { act: 'hard', why: `连续 ${s.fails} 次补药后血池仍为 0` };
     return { act: 'heal', retry: s.heals > 0 };
 }
 
@@ -582,22 +583,21 @@ async function resolveBattle(page, openMs = Number(process.env.GC_OPEN_MS) || 12
             await page.keyboard.press('Escape').catch(() => {});
             await sleep(250);
             BLOOD_HEAL_FAILS = 0;   // 这一只打赢了 → 补药确实有效，无效计数清零
-            BLOOD_DRY_STREAK = 0;
             return fin('win');
         }
 
         // 1.5) 血池为 0 → 先撤退补药（用户 2026-11-15）。
         //      判据只认面板里自己那行「血池: 0」，读不到就是 null，不会误触发。
         //      补药流程：撤退 → 首页「包裹」→「药水」→ 小体力宝（没有才用体力宝）→ 关包裹 → 回来继续抢。
-        //      补药成功这一只不算失败（外层不推进 tried），补不回来就告警，绝不留在原地空点。
         //
         // ★ 2026-11-28 修复两处踩空（当晚大号击杀 0 的直接原因）：
         //   ① 补完药点下一只时，页面可能还停在上一场战斗面板的残影 —— 只有「撤退/攻击」和
         //      上一场的「血池：0」，没有怪物体力行。原来一进来就判 0，0.1 秒就把本波封死。
         //      真面板必有「体力：X/Y」怪物行，所以没读到怪物血量时先给 GRACE 宽限，不判血池。
         //   ② 「覆盖式恢复、不能叠加」被写成了「本波只补 1 次」。覆盖式只说明连着吃不会更多，
-        //      不等于补一次就永久失效。改成：补过又归零记一次无效，连续 BLOOD_HEAL_FAIL_MAX
-        //      次无效才判打不动；药还在就继续补。
+        //      不等于补一次就永久失效。
+        //   ★ 补不上药（没药 / 包裹页签读不到 / 补到上限仍 0）一律转 `hard` 硬打这只，
+        //     **不许撤退换只、更不许收工** —— 用户 11-20、11-28 两次强调「补血失败也要先打怪」。
         const hpNow = monsterHp(t);
         const g = bloodGate({
             inBattle: inBattleMenu(t),
@@ -606,15 +606,21 @@ async function resolveBattle(page, openMs = Number(process.env.GC_OPEN_MS) || 12
             elapsedMs: Date.now() - t0,
             heals: BLOOD_HEALS,
             fails: BLOOD_HEAL_FAILS,
-            dryStreak: BLOOD_DRY_STREAK,
+            hard: BLOOD_HARD,
             dead: BLOOD_DEAD,
         });
         if (g.act === 'giveup') {
-            log(`[血池] 为 0 且${g.why}，撤出这只`);
-            BLOOD_DEAD = true;
+            log(`[血池] ${g.why}，撤出这只`);
             await closePopup(page, t);
             await retreat(page, t);
             return fin('noBlood');
+        }
+        if (g.act === 'hard') {
+            BLOOD_HARD = true;
+            log(`::warning::[血池] ${g.why} → 按「没有体力宝」硬打这只，不再补药、不换只`);
+            await closePopup(page, t);
+            await retreat(page, t);
+            return fin('hard');
         }
         if (g.act === 'heal') {
             if (g.retry) {
@@ -626,20 +632,13 @@ async function resolveBattle(page, openMs = Number(process.env.GC_OPEN_MS) || 12
             // 撤退由 healBlood 自己做（它先点「撤退」再开包裹），保证补完药回到的是活动页。
             const h = await drain.healBlood(page, { tag: '补血池·攻城', inDungeon: false, force: true, log });
             if (!h.ok) {
-                // ★ 11-20 铁律：药真没了、或包裹/页签读不到，都不许直接放弃整波。
-                //   攻城没有领奖环节，能抢的怪照抢；连续 BLOOD_DRY_MAX 只都因无药打不了才收工。
-                BLOOD_DRY_STREAK++;
-                log(`::warning::[血池] 补不上药（${h.reason}），本只先撤出（连续 ${BLOOD_DRY_STREAK}/${BLOOD_DRY_MAX} 只）`);
-                if (BLOOD_DRY_STREAK >= BLOOD_DRY_MAX) {
-                    BLOOD_DEAD = true;
-                    log(`[血池] 连续 ${BLOOD_DRY_STREAK} 只无药可补，本波收工`);
-                }
-                await closePopup(page, t);
-                await retreat(page, t);
-                return fin('noBlood');
+                // ★ 11-20 / 11-28 铁律：药真没了、或包裹/页签读不到，都不许放弃。
+                //   攻城没有领奖环节，能在场上就继续打；血池 0 打不动也会一直抢到窗口结束。
+                BLOOD_HARD = true;
+                log(`::warning::[血池] 补不上药（${h.reason}）→ 按「没有体力宝」硬打这只，不撤不收工`);
+                return fin('hard');
             }
             BLOOD_HEALS++;
-            BLOOD_DRY_STREAK = 0;
             log(`[血池] 补药成功（${h.item}×${h.used}），继续抢怪`);
             return fin('healed');
         }
@@ -1165,21 +1164,23 @@ async function run() {
 
             const res = await resolveBattle(page);
             stat[res] = (stat[res] || 0) + 1;
-            // 血池为 0：补药成功就接着抢（不算这只失败，不推进 tried）；
-            // 补不回来先换下一只（连续多只补不上才收工），不留在原地空点到 30 分钟结束。
+            // 血池为 0：补药成功就回到列表重新抢（不算这只失败，不推进 tried）；
+            // 补不上药转硬打，也是回到列表重新点这只接着打 —— 不换只、不收工。
             if (res === 'healed') {
                 log('血池已补，回到列表继续抢怪');
                 continue;
             }
+            if (res === 'hard') {
+                log('无药可补，按「没有体力宝」硬打（不回退、不收工）');
+                continue;
+            }
             if (res === 'noBlood') {
-                // 只有真的判断打不动（连续补药无效 / 连续多只无药可补）才收工；
-                // 单只血池 0 且暂时补不上药时换下一只继续抢 —— 不许一读到 0 就放弃整波。
                 if (BLOOD_DEAD) {
-                    log(`::error::血池为 0 且补不动（补药 ${BLOOD_HEALS} 次 / 连续无效 ${BLOOD_HEAL_FAILS} 次 / 连续无药 ${BLOOD_DRY_STREAK} 只），本波收工`);
+                    log(`::error::本波已判收工（补药 ${BLOOD_HEALS} 次 / 连续无效 ${BLOOD_HEAL_FAILS} 次）`);
                     break;
                 }
                 tried++;
-                log(`本只血池 0 且暂时补不上药，换下一只（连续无药 ${BLOOD_DRY_STREAK}/${BLOOD_DRY_MAX}）`);
+                log('本只血池 0，换下一只继续抢');
                 continue;
             }
             if (res === 'win') {
@@ -1239,7 +1240,7 @@ async function run() {
         // 5. 战绩页核对
         await checkEventPage(page);
         await page.screenshot({ path: 'gongcheng-end.png' }).catch(() => {});
-        log(`结束: 击杀${kills}只 | 战斗统计 win=${stat.win} 点空=${stat.dead} 被抢=${stat.lost} 卡住=${stat.stuck} 超时=${stat.timeout} 补药=${stat.healed || 0} 血池归零=${stat.noBlood || 0}`);
+        log(`结束: 击杀${kills}只 | 战斗统计 win=${stat.win} 点空=${stat.dead} 被抢=${stat.lost} 卡住=${stat.stuck} 超时=${stat.timeout} 补药=${stat.healed || 0} 转硬打=${stat.hard || 0} 血池收工=${stat.noBlood || 0}`);
 
     } catch (e) {
         console.error('[gongcheng] 错误:', e.message);

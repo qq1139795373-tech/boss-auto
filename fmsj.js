@@ -343,7 +343,7 @@ async function fightOne(page, name) {
     if (!t.includes('攻击')) return { res: 'nopanel', hits: 0, why: flat(t).slice(0, 160) };
 
     log(`  开打 ${name} | ${bloodLine(t)}`);
-    let hits = 0, heals = 0, healAt = 0;
+    let hits = 0, heals = 0, healAt = 0, bloodHard = false;
     for (let a = 0; a < MAX_HITS; a++) {
         t = await txt(page);
         if (t.includes('复活')) return { res: 'dead', hits };
@@ -355,14 +355,23 @@ async function fightOne(page, name) {
             if (drain.readBlood(t) === 0) {
                 // 补药后点回怪的第一帧常是上一场残影（血池仍 0、没有怪物体力行）→ 先等，别判打不动
                 if (healAt && Date.now() - healAt < 1800) { await sleep(300); continue; }
-                if (heals >= 1) { log('  血池 0 且已补过一次 → 判打不动'); return { res: 'stuck', hits, why: '血池0无药' }; }
-                heals++;
-                log('  血池 0 → 退出去补体力宝');
-                const h = await drain.healBlood(page, { tag: `补血池·${name}`, inDungeon: true, log: (m) => log('  ' + m) });
-                if (!h.ok) { log(`  补药失败（${h.reason}）→ 判打不动，按既有铁律继续硬打的场景这里不适用（本副本怪不强）`); return { res: 'stuck', hits, why: '补药失败:' + h.reason }; }
-                if (!(await clickLeaf(page, name, true))) { log('  补药后点不回怪'); return { res: 'stuck', hits, why: '点不回' }; }
-                healAt = Date.now();
-                await sleep(900); continue;
+                if (!bloodHard && heals < 1) {
+                    heals++;
+                    log('  血池 0 → 退出去补体力宝');
+                    const h = await drain.healBlood(page, { tag: `补血池·${name}`, inDungeon: true, log: (m) => log('  ' + m) });
+                    if (h.ok) {
+                        if (!(await clickLeaf(page, name, true))) { log('  补药后点不回怪'); return { res: 'stuck', hits, why: '点不回' }; }
+                        healAt = Date.now();
+                        await sleep(900); continue;
+                    }
+                    // ★ 11-20 / 11-28：补血失败也要先打怪 —— 补不上就按「没有体力宝」硬打，不判打不动
+                    bloodHard = true;
+                    log(`::warning::  补不上药（${h.reason}）→ 按「没有体力宝」硬打这只`);
+                } else if (!bloodHard) {
+                    bloodHard = true;
+                    log('  补过 1 个仍为 0 → 按「没有体力宝」硬打这只');
+                }
+                // 落到下面点攻击：硬打到底（死亡由上面的「复活」分支兜）
             }
             if (hits % 20 === 0) log(`  第 ${hits} 刀 | ${bloodLine(t)}`);
             await clickLeaf(page, '攻击', true); hits++; await sleep(300); continue;

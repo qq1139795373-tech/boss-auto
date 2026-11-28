@@ -985,23 +985,24 @@ async function fightMonster(page, name) {
                 // 补药后 1.8 秒内读到 0 先不当真：点回这只怪的第一帧多半还是上一场的面板残影。
                 // 直接按「补过仍为 0」判死，会把刚补好的药白扔掉（攻城 11-28 就是这么整波空的）。
                 if (healAt && Date.now() - healAt < 1800) { await sleep(300); continue; }
-                if (BLOOD_DEAD || heals >= 1) {
-                    console.log(`  [血池] ${name}: 血池 0${BLOOD_DEAD ? '（药已用光）' : '（补过 1 个仍为 0）'}，放弃这只`);
-                    // 补过 1 个还是 0 → 不是药不够，别再逐只怪开包裹吃第二次药
+                if (!BLOOD_DEAD && heals < 1) {
+                    const h = await drain.healBlood(page, { tag: `补血池·${name}`, inDungeon: false, log: console.log });
+                    if (h.ok) {
+                        heals++;
+                        healAt = Date.now();
+                        if (!(await clickMonster(page, name))) { console.log(`  [血池] ${name}: 补药后点不回这只怪`); break; }
+                        await sleep(500);
+                        continue;
+                    }
+                    // ★ 11-20 / 11-28 用户两次强调：补血失败也要先打怪，不许放弃。
+                    //   补不上（没药 / 包裹页签读不到）→ 不再开包裹，按「没有体力宝」硬打到底。
                     BLOOD_DEAD = true;
-                    break;
-                }
-                const h = await drain.healBlood(page, { tag: `补血池·${name}`, inDungeon: false, log: console.log });
-                if (!h.ok) {
+                    console.log(`::warning::${name} 血池 0 且补不上药（${h.reason}）→ 按「没有体力宝」硬打这只`);
+                } else if (!BLOOD_DEAD) {
                     BLOOD_DEAD = true;
-                    console.log(`::warning::${name} 血池 0 且补药失败（${h.reason}）→ 本波不再尝试补药`);
-                    break;
+                    console.log(`  [血池] ${name}: 补过 1 个仍为 0 → 按「没有体力宝」硬打这只`);
                 }
-                heals++;
-                healAt = Date.now();
-                if (!(await clickMonster(page, name))) { console.log(`  [血池] ${name}: 补药后点不回这只怪`); break; }
-                await sleep(500);
-                continue;
+                // 落到下面继续点「攻击」：硬打到底，不撤退、不换怪
             }
             await page.locator('text=攻击').first().click({ force: true, timeout: 500 }).catch(() => {});
             await sleep(300);
